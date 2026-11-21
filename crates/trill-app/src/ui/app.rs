@@ -7,6 +7,7 @@ use super::audio_settings::{self, Settings};
 use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
 use super::filming::{self, Filming};
+use super::inputs;
 use super::keyboard::{self, Keyboard};
 use super::making_of::{self, MakingOf};
 use super::missing;
@@ -185,6 +186,17 @@ impl TrillApp {
             state.piano.lane = super::state::LaneShown::Controller(kind);
         }
         state.piano.channel = options.channel;
+        if options.recording_scene.is_some() {
+            // The scene's track is the one looked at, its takes unfolded.
+            let project = session.lock().project().clone();
+            if let Some(voice) = project.tracks.iter().find(|track| track.name == super::recording_scene::VOICE) {
+                state.select_track(voice.id);
+                state.arrangement.takes_open.insert(voice.id);
+                if let Some(clip) = voice.clips.get(1).or(voice.clips.first()) {
+                    state.select_clip(voice.id, clip.id);
+                }
+            }
+        }
         let (snapshot, factory, audio, live_input) = {
             let mut guard = session.lock();
             let first = Snapshot::capture(&guard, &[]);
@@ -297,6 +309,8 @@ impl TrillApp {
     /// this frame is painted from what we already have rather than waiting.
     fn sync(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
+        let elapsed = now.duration_since(self.last_meter_update).as_secs_f32().min(0.25);
+        self.last_meter_update = now;
         if let Ok(descriptors) = self.catalog.try_recv() {
             self.descriptors = descriptors;
             self.catalog_ready = true;
@@ -345,6 +359,11 @@ impl TrillApp {
                     self.live.together.notices = session.notices().to_vec();
                 }
                 self.live.preparing = session.preparing();
+                self.live.coming_beside = session.recordings_coming();
+                if self.live.coming_beside.is_some() {
+                    // Looked at again soon: it says how far it is.
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
                 self.live.update_editors(&self.snapshot, &session);
                 self.live.update_silent(&self.snapshot, &session);
                 // Which plugins are still reading their samples. (Not in a
@@ -397,9 +416,30 @@ impl TrillApp {
                     None => self.state.take_shown = None,
                 }
                 if was_recording && self.live.take.is_none() && same_project {
-                    recording::take_ended(&mut self.state, &self.snapshot, session.last_take());
+                    let audio = session.last_recording().is_some_and(|recorded| !recorded.takes.is_empty());
+                    recording::take_ended(&mut self.state, &self.snapshot, session.last_take(), audio);
+                    // What was recorded of the inputs: its lanes unfold
+                    // where there is more than one take to choose from.
+                    inputs::take_ended(&mut self.state, &self.snapshot, session.last_recording());
                 }
                 self.take_generation = self.state.project_generation;
+                // The input: whether it is open, what is arriving, and
+                // the takes that grow. What ended a take before it was
+                // stopped is said once.
+                self.live.input.update(&mut session, elapsed);
+                if let Some(scene) = self.options.recording_scene {
+                    // A picture is of no particular moment: the level is
+                    // the scene's, not what was arriving when it was taken.
+                    self.live.input.show(&scene.levels());
+                }
+                if let Some(notice) = session.take_recording_notice() {
+                    self.state.toasts.error(notice);
+                }
+                // What was held or disarmed because no hand at this
+                // window asked for it: a sentence, and nothing is wrong.
+                if let Some(note) = session.take_input_note() {
+                    self.state.toasts.info(inputs::capitalized(&note));
+                }
             }
             None => ctx.request_repaint_after(Duration::from_millis(8)),
         }
@@ -411,11 +451,12 @@ impl TrillApp {
         super::together::sync(&mut self.state, &mut self.live, &self.snapshot, &runtime, &self.options);
 
         // Meters are read through their own handles; no lock involved.
-        let elapsed = now.duration_since(self.last_meter_update).as_secs_f32().min(0.25);
-        self.last_meter_update = now;
         self.live.update_meters(&self.snapshot, elapsed);
         if std::mem::take(&mut self.state.clear_clip_indicator) {
             self.live.master.clipped = false;
+        }
+        if std::mem::take(&mut self.state.clear_input_lamps) {
+            self.live.input.clear_lamps();
         }
     }
 
@@ -784,6 +825,8 @@ impl TrillApp {
     /// reaches the song.
     fn frame_of_making(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // The song's own input, if it is open: said here too.
+        let input_live = self.live.input.open.as_ref().map(|open| open.device.clone());
         let Self {
             making_of: held,
             theme,
@@ -827,7 +870,7 @@ impl TrillApp {
             .exact_size(status)
             .show_separator_line(false)
             .frame(bare)
-            .show(ui, |ui| making_of::status(ui, theme, making_of));
+            .show(ui, |ui| making_of::status(ui, theme, making_of, input_live.as_deref()));
         let Some(watching) = making_of.watching_mut() else {
             egui::CentralPanel::no_frame().show(ui, |ui| making_of::waiting(ui, theme, making_of));
             if leave {
@@ -955,6 +998,7 @@ impl TrillApp {
         {
             self.jobs.show_opening(file);
         }
+        let show_level = open_settings && self.options.recording_scene == Some(super::RecordingScene::Latency);
         let open_credits = std::mem::take(&mut self.options.show_credits);
         let open_load = std::mem::take(&mut self.options.show_load);
         let open_sharing = std::mem::take(&mut self.options.show_sharing);
@@ -968,7 +1012,9 @@ impl TrillApp {
         for command in commands.into_iter().filter(|_| !reading) {
             run_command(&ctx, &mut cx, command);
         }
-        if open_settings {
+        if show_level {
+            audio_settings::open_showing_level(&mut cx);
+        } else if open_settings {
             audio_settings::open(&mut cx);
         }
         if open_setup {
@@ -1083,6 +1129,7 @@ impl TrillApp {
         filming::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         credits::window(&ctx, &mut cx);
+        inputs::unused_window(&ctx, &mut cx);
         super::load::window(&ctx, &mut cx);
         super::together::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
@@ -1137,6 +1184,9 @@ impl TrillApp {
         let moving = self.live.playing || self.live.take.is_some() || self.live.meters_moving();
         if moving || self.state.audition.is_some() || previewing {
             ctx.request_repaint();
+        } else if self.live.input.open.is_some() {
+            // An open input is looked at often enough for its level to move.
+            ctx.request_repaint_after(Duration::from_millis(33));
         }
         self.automate(&ctx);
     }
@@ -1469,6 +1519,12 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 cx.state.shortcuts_open = false;
             } else if cx.state.credits_open {
                 cx.state.credits_open = false;
+            } else if let Some(unused) = &cx.state.unused_recordings {
+                // Not while its recordings are on their way out: what
+                // became of them is said when they have gone.
+                if !unused.is_removing() {
+                    cx.state.unused_recordings = None;
+                }
             } else if cx.state.load_open {
                 cx.state.load_open = false;
             } else if cx.state.together.panel.is_some() {
@@ -1526,6 +1582,9 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ToggleStage => cx.state.stage_open = !cx.state.stage_open,
         Command::MakingOf => cx.state.story = Some(StoryAsk::Watch),
         Command::Record => recording::toggle(cx),
+        Command::ArmTrack => recording::arm_selected(cx),
+        Command::TogglePunch => recording::toggle_punch(cx),
+        Command::ToggleTakes => arrangement::takes::toggle_selected(cx),
         Command::AudioSettings => audio_settings::toggle(cx),
         Command::Setup => setup::toggle(ctx, cx),
         Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,

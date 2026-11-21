@@ -27,6 +27,7 @@ pub(super) mod ops;
 mod reveal;
 mod rows;
 mod ruler;
+pub(in crate::ui) mod takes;
 
 pub(super) use clips::{allowed_length, fade_level};
 pub use envelopes::{delete_selected as delete_selected_points, select_all as select_all_points};

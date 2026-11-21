@@ -5,6 +5,7 @@
 
 use crate::controllers::ControllerKind;
 use crate::project::{AudioContent, AutomationPoint, AutomationTarget, ChainRef, EditError, Note, Project, TrackKind};
+use crate::takes::{Monitoring, TrackInput};
 use crate::{ClipId, DeviceId, Reference, TrackId};
 
 /// A lot that is the same every time it is drawn from the same seed.
@@ -50,6 +51,7 @@ pub fn check(project: &Project) {
     for track in &project.tracks {
         if track.kind != TrackKind::Normal {
             assert!(track.clips.is_empty() && track.group.is_none() && track.reference.is_none());
+            assert!(track.takes.is_empty(), "only a track that holds clips keeps takes");
             assert!(track.profile.is_empty());
         }
         if let Some(group) = track.group {
@@ -85,6 +87,22 @@ pub fn check(project: &Project) {
                 assert!(!curve.points.is_empty(), "a curve has a point");
                 assert!(curve.points.windows(2).all(|pair| (pair[0].beat, pair[0].id) < (pair[1].beat, pair[1].id)));
             }
+        }
+        // Takes: recordings, each its own clip, in the order they were made
+        // and no two of a lane over one stretch.
+        for (at, take) in track.takes.iter().enumerate() {
+            let clip = &take.clip;
+            assert!(clips.insert(clip.id), "no clip twice, on a track or beside one");
+            assert!(clip.audio().is_some(), "a take is a recording");
+            assert!(clip.start >= 0.0 && clip.length > 0.0 && clip.start.is_finite() && clip.length.is_finite());
+            assert!(track.takes[..at].iter().all(|before| before.clip.id < clip.id), "takes in the order of their ids");
+            let over = |other: &&crate::Take| {
+                other.lane == take.lane && other.clip.start < clip.end() - 1e-9 && other.clip.end() > clip.start + 1e-9
+            };
+            assert!(
+                !track.takes[..at].iter().any(|other| over(&other)),
+                "no two takes of a lane over one stretch: {json}"
+            );
         }
         for device in &track.devices {
             assert!(devices.insert(device.id), "no device twice");
@@ -179,6 +197,8 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
     let other = lot.pick(&tracks).copied().unwrap_or(TrackId(1));
     let clip = lot.pick(&clips).copied().unwrap_or(ClipId(1));
     let device = lot.pick(&devices).copied().unwrap_or(DeviceId(1));
+    let takes: Vec<ClipId> = project.tracks.iter().flat_map(|track| &track.takes).map(|take| take.clip.id).collect();
+    let take = lot.pick(&takes).copied().unwrap_or(ClipId(1));
     let beat = lot.below(64) as f64 / 2.0;
     let (a, b, c) = (lot.below(1000), lot.below(1000), lot.below(1000));
     let level = -(lot.below(40) as f32);
@@ -190,7 +210,7 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
         _ => AutomationTarget::Send { track, to: other },
     };
     let kinds = [TrackKind::Normal, TrackKind::Normal, TrackKind::Group, TrackKind::Return];
-    match lot.below(46) {
+    match lot.below(53) {
         0 => Box::new(move |song| {
             song.add_track_of_kind(format!("Track {a}"), kinds[b % 4]);
             Ok(())
@@ -295,6 +315,23 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
         42 => Box::new(move |song| song.add_marker(beat, format!("Marker {a}")).map(drop)),
         43 => Box::new(move |song| song.move_marker(a % 3, beat).map(drop)),
         44 => Box::new(move |song| song.remove_marker(a % 3).map(drop)),
+        // What is recorded, and what becomes of it.
+        45 | 46 => Box::new(move |song| {
+            let recording = AudioContent::new(format!("take {}.wav", c % 3));
+            song.add_take(track, format!("Take {a}"), beat, 2.0 + (b % 6) as f64, recording).map(drop)
+        }),
+        47 => Box::new(move |song| song.comp_take(take, beat, beat + 1.0 + (a % 4) as f64).map(drop)),
+        48 => Box::new(move |song| song.choose_take(take).map(drop)),
+        49 => Box::new(move |song| match a % 2 {
+            0 => song.remove_take(take).map(drop),
+            _ => song.rename_take(take, format!("Kept {b}")),
+        }),
+        50 => Box::new(move |song| song.cover(track, beat, beat + 2.0).map(drop)),
+        51 => Box::new(move |song| {
+            // (One's own: which input of the machine's a track records.)
+            let input = TrackInput { channel: 1 + (b % 4) as u16, stereo: c % 2 == 0, monitor: Monitoring::Off };
+            song.set_track_input(track, (a % 3 != 0).then_some(input))
+        }),
         _ => Box::new(move |song| {
             song.set_key((a % 2 == 0).then(|| crate::SongKey::new((b % 12) as u8, c % 2 == 0)));
             song.name = format!("Song {a}");

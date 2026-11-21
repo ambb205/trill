@@ -614,6 +614,44 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             (None, None) => about("Looking through", "Looked through", "the instruments to be had"),
         },
         "song_credits" => about("Working out", "Worked out", "what the song owes for its instruments"),
+        "track_input" => match (call.track("track"), call.text("input"), call.text("monitor")) {
+            (Some(track), Some("none"), _) => about("Having", "Had", &format!("{track} record what a keyboard plays")),
+            (Some(track), Some(input), _) => about("Having", "Had", &format!("{track} record input {input}")),
+            (Some(track), None, Some("off")) => {
+                about("Stopping", "Stopped", &format!("monitoring the input of {track}"))
+            }
+            (Some(track), None, Some(_)) => about("Monitoring", "Monitored", &format!("the input of {track}")),
+            (Some(track), None, None) => about("Checking", "Checked", &format!("what {track} records")),
+            (None, ..) => about("Checking", "Checked", "what a track records"),
+        },
+        "audio_inputs" => match call.is("listen") {
+            true => about("Listening to", "Listened to", "what is arriving on the input"),
+            false => about("Looking at", "Looked at", "the input"),
+        },
+        "takes" => match call.text("action") {
+            Some("use") if call.has("from_beat") => about("Putting", "Put", "a stretch of a take on its track"),
+            Some("use") => about("Choosing", "Chose", "a take"),
+            Some("hear") if call.has("take") => about("Hearing", "Heard", "a take in place"),
+            Some("hear") => about("Going back", "Went back", "from a take to the song"),
+            Some("rename") => about("Naming", "Named", "a take"),
+            Some("remove") => about("Letting go of", "Let go of", "a take"),
+            Some("measure") => about("Measuring", "Measured", "a take"),
+            _ => match call.track("track") {
+                Some(track) => about("Looking through", "Looked through", &format!("the takes of {track}")),
+                None => about("Looking through", "Looked through", "the takes"),
+            },
+        },
+        "recording_latency" => match call.text("action") {
+            Some("measure") => about("Measuring", "Measured", "how long sound takes to go round"),
+            Some("use") => about("Taking", "Took", "the measured round trip"),
+            Some("adjust") => about("Adjusting", "Adjusted", "where takes are put"),
+            Some("forget") => about("Going back", "Went back", "to what the devices say of their latency"),
+            _ => about("Checking", "Checked", "how long sound takes to go round"),
+        },
+        "unused_recordings" => match call.has("delete") {
+            true => about("Deleting", "Deleted", "recordings the song no longer uses"),
+            false => about("Listing", "Listed", "the recordings the song no longer uses"),
+        },
         "playback_load" => about("Checking", "Checked", "how the machine keeps up with the song"),
         "shared_song" => match call.text("action") {
             Some("share") => about("Sharing", "Shared", "the song"),
@@ -836,6 +874,29 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
                 0 => "nobody else is here".to_owned(),
                 _ => format!("here: {}", names.join(", ")),
             })
+        }
+        "takes" => {
+            // A take that was measured: how loud it is.
+            let peak = answer.get("peak_db").and_then(number)?;
+            let level = answer.get("level_db").and_then(number)?;
+            Some(format!("peak {peak} dB, level {level} dB"))
+        }
+        "audio_inputs" => {
+            // What is arriving, a channel at a time.
+            let channels = answer.get("arriving")?.as_array()?;
+            let said: Vec<String> = channels
+                .iter()
+                .filter_map(|channel| {
+                    let peak = channel.get("peak_db")?;
+                    let peak = peak.as_str().map(str::to_owned).or_else(|| number(peak))?;
+                    Some(format!("{} at {peak} dB", channel.get("channel")?))
+                })
+                .collect();
+            (!said.is_empty()).then(|| said.join(", "))
+        }
+        "recording_latency" => {
+            let round = answer.get("round_trip_ms").and_then(number)?;
+            Some(format!("{round} ms round"))
         }
         "playback_load" => {
             // How much of its time the audio thread needs, and what came late.

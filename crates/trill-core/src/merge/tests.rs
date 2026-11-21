@@ -15,7 +15,7 @@ fn text(project: &Project) -> String {
     project.count_ids_from(0);
     project.loop_region = crate::LoopRegion { enabled: false, start: 0.0, end: 16.0 };
     for track in &mut project.tracks {
-        track.solo = false;
+        (track.solo, track.input) = (false, None);
         if let Some(reference) = &mut track.reference {
             reference.listening = false;
         }
@@ -30,6 +30,8 @@ pub(super) struct Peer {
     replica: Replica,
     next_id: u64,
     pub aside: Vec<Aside>,
+    /// How many takes lie in another lane than they were put in.
+    pub displaced: usize,
 }
 
 impl Peer {
@@ -38,7 +40,7 @@ impl Peer {
         let mut project = Project::from_json(&song.to_json()).expect("a song that was written is read");
         project.settle(None);
         let doc = Doc::from_project(&project);
-        Peer { project, doc, replica, next_id: first_id(replica), aside: Vec::new() }
+        Peer { project, doc, replica, next_id: first_id(replica), aside: Vec::new(), displaced: 0 }
     }
 
     /// Makes an edit as a session does: the method on the project, then
@@ -68,7 +70,8 @@ impl Peer {
         );
         assert!(taken.waiting.is_empty(), "and none of it waits for anything");
         let derived = self.doc.derive();
-        if self.aside.is_empty() && derived.aside.is_empty() {
+        let settled = self.aside.is_empty() && derived.aside.is_empty() && self.displaced + derived.displaced == 0;
+        if settled {
             assert_eq!(
                 text(&derived.project),
                 text(&self.project),
@@ -92,7 +95,7 @@ impl Peer {
         let personal = self.project.clone();
         self.project = derived.project;
         self.project.count_ids_from(personal.next_id());
-        self.aside = derived.aside;
+        (self.aside, self.displaced) = (derived.aside, derived.displaced);
         check(&self.project);
     }
 
@@ -817,7 +820,8 @@ fn three_programs_that_took_the_same_changes_in_any_order_hold_the_same_song() {
             let cut = (30..60).contains(&round).then_some(seed as usize % 3);
             let who = lot.below(3);
             let edit = any_edit(&mut lot, &peers[who].project);
-            if let Some(change) = peers[who].edit(edit) {
+            // (What is said of it is said without what is one's own.)
+            if let Some(change) = peers[who].edit(edit).and_then(Change::impersonal) {
                 made += 1;
                 for (to, waiting) in on_the_way.iter_mut().enumerate().filter(|(to, _)| *to != who) {
                     waiting.push(change.clone());

@@ -24,6 +24,7 @@ use crate::project::{
     AudioContent, AudioLoop, AutomationLane, AutomationPoint, Clip, Device, LoopRegion, Marker, MidiContent, Note,
     Project, Segment, SongKey, Track, WarpMode,
 };
+use crate::takes::TrackInput;
 use crate::time::{Beats, TimeSignature};
 use crate::travel::Travel;
 use crate::{TrackId, TrackKind};
@@ -154,8 +155,12 @@ props! {
         Solo(bool) = solo,
         Group(Option<TrackId>) = group,
         Profile(InstrumentProfile) = profile,
+        // One's own, and never anyone else's: which input of this
+        // machine's audio device the track records, and how it is heard
+        // meanwhile. See `Op::is_personal`.
+        Input(Option<TrackInput>) = input,
     }
-    beside { id, kind, sends, devices, clips, reference }
+    beside { id, kind, sends, devices, clips, reference, takes }
 }
 
 props! {
@@ -198,6 +203,7 @@ props! {
         SourceTempo(Option<f64>) = source_tempo,
         Transpose(f64) = transpose,
         Looped(Option<AudioLoop>) = looped,
+        Crossfade(bool) = crossfade,
     }
     beside { }
 }

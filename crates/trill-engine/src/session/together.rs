@@ -149,8 +149,15 @@ pub(super) struct Sharing {
     /// The properties set here lately, for telling whose work was in
     /// something that was removed.
     recent: VecDeque<(Stamp, Key)>,
+    /// What is changed here while a take is recorded, kept until it has
+    /// landed: nothing half-made is said to anyone.
+    held: Vec<Said>,
+    holding: bool,
     /// What the song as it stands sets aside.
     pub aside: Vec<Aside>,
+    /// How many takes lie in another lane than the one they were put in
+    /// ([`merge::Derived::displaced`]).
+    pub displaced: usize,
     /// The edits made here that were set aside and have been said.
     told: HashSet<Key>,
     watched: HashMap<DeviceId, Watched>,
@@ -170,7 +177,10 @@ impl Sharing {
             last_notice: 0,
             numbers: Vec::new(),
             recent: VecDeque::new(),
+            held: Vec::new(),
+            holding: false,
             aside: Vec::new(),
+            displaced: 0,
             told: HashSet::new(),
             watched: HashMap::new(),
             epoch: 0,
@@ -263,6 +273,7 @@ fn what(doc: &merge::Doc, key: &Key, op: &Op) -> String {
                 ClipOp::Set(merge::ClipSet::Name(_)) => format!("the name of {clip}"),
                 ClipOp::Set(merge::ClipSet::Muted(_)) => format!("whether {clip} is muted"),
                 ClipOp::Track(_) => format!("the track {clip} is on"),
+                ClipOp::Lane(_) => format!("the lane {clip} is kept in"),
                 _ => clip,
             }
         }
@@ -285,6 +296,7 @@ fn what(doc: &merge::Doc, key: &Key, op: &Op) -> String {
         }
         Op::Param(device, name, _) => format!("{name} on {}", of(Thing::Device(*device))),
         Op::Lane(target, _) => envelope(doc, target),
+        Op::Envelopes(_) => "the order of the envelopes".to_owned(),
         Op::Point(home, id, _) => of(Thing::Point(home.clone(), *id)),
         Op::Notes(..) | Op::Points(..) => key.thing().map_or_else(|| "something".to_owned(), of),
     }
@@ -368,8 +380,29 @@ impl Session {
     }
 
     /// What was changed here since this was last asked, for the others.
+    /// What a take that is still being recorded has written so far is not
+    /// among it: that is said when the take has landed.
     pub fn take_said(&mut self) -> Vec<Said> {
+        if self.sharing.holding && !self.take_is_open() {
+            // (No take is being recorded any more, whatever became of it.)
+            self.say_what_was_held();
+        }
         std::mem::take(&mut self.sharing.said)
+    }
+
+    /// From here until [`Session::say_what_was_held`], what is changed
+    /// here is kept and not said: a take is being recorded, and what it
+    /// has written so far is nobody else's yet.
+    pub(super) fn hold_what_is_said(&mut self) {
+        self.sharing.holding = true;
+    }
+
+    /// The take has landed, or was let go of: what was changed meanwhile
+    /// is said, all of it at once.
+    pub(super) fn say_what_was_held(&mut self) {
+        self.sharing.holding = false;
+        let held = std::mem::take(&mut self.sharing.held);
+        self.sharing.said.extend(held);
     }
 
     /// How much of what each program did is held here.
@@ -395,7 +428,7 @@ impl Session {
         let mut song = self.project.clone();
         song.loop_region.enabled = false;
         for track in &mut song.tracks {
-            track.solo = false;
+            (track.solo, track.input) = (false, None);
             if let Some(reference) = &mut track.reference {
                 reference.listening = false;
             }
@@ -508,11 +541,14 @@ impl Session {
         while self.sharing.recent.len() > RECENT {
             self.sharing.recent.pop_front();
         }
-        if self.sharing.live {
-            let ops: Vec<Op> = change.ops.into_iter().filter(|op| !op.is_personal()).collect();
-            if !ops.is_empty() {
-                let knew = Some(self.doc.floors().clone());
-                self.sharing.said.push(Said { change: Change { stamp, ops }, knew });
+        // Said without what is one's own, which never leaves the program.
+        if self.sharing.live
+            && let Some(change) = change.impersonal()
+        {
+            let said = Said { change, knew: Some(self.doc.floors().clone()) };
+            match self.sharing.holding {
+                true => self.sharing.held.push(said),
+                false => self.sharing.said.push(said),
             }
         }
         taken
@@ -538,7 +574,7 @@ impl Session {
         let derived = self.doc.derive();
         let before = std::mem::replace(&mut self.project, derived.project);
         self.project.count_ids_from(next);
-        self.sharing.aside = derived.aside;
+        (self.sharing.aside, self.sharing.displaced) = (derived.aside, derived.displaced);
         self.tell_of_what_was_set_aside();
         before
     }

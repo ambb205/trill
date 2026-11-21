@@ -18,6 +18,9 @@ pub enum RowKind {
     /// An automation lane, by its index in the view's list of open lanes,
     /// under the track at `track`.
     Lane { lane: usize, track: usize },
+    /// A lane of the takes kept beside the track at `track`, unfolded
+    /// under it: directly under the track, above its automation.
+    Take { track: usize, lane: u32 },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -87,6 +90,13 @@ impl Rows {
             top += height;
             if track.kind == TrackKind::Normal {
                 clip_tracks.push(index);
+            }
+            if view.takes_open.contains(&track.id) {
+                for lane in 0..track.lanes() {
+                    let height = super::takes::LANE_HEIGHT;
+                    rows.push(Row { kind: RowKind::Take { track: index, lane }, top, height });
+                    top += height;
+                }
             }
             for (lane, open) in view.lanes.iter().enumerate() {
                 if open.owner == LaneOwner::Track(track.id) {
@@ -158,7 +168,7 @@ pub fn drop_at(tracks: &[Track], rows: &Rows, dragged: TrackId, y: f32) -> Optio
     let track_rows: Vec<&Row> = rows.rows.iter().filter(|row| matches!(row.kind, RowKind::Track { .. })).collect();
     let track_of = |row: &Row| match row.kind {
         RowKind::Track { index, .. } => &tracks[index],
-        RowKind::Lane { track, .. } => &tracks[track],
+        RowKind::Lane { track, .. } | RowKind::Take { track, .. } => &tracks[track],
     };
     // The track row the pointer is on, or whose lanes it is on; past the
     // last row counts as the last row's lower half.
@@ -215,7 +225,7 @@ pub fn drop_at(tracks: &[Track], rows: &Rows, dragged: TrackId, y: f32) -> Optio
 fn after_block(tracks: &[Track], track_rows: &[&Row], head: usize) -> Option<TrackId> {
     let track_at = |row: &Row| match row.kind {
         RowKind::Track { index, .. } => &tracks[index],
-        RowKind::Lane { track, .. } => &tracks[track],
+        RowKind::Lane { track, .. } | RowKind::Take { track, .. } => &tracks[track],
     };
     let group = track_at(track_rows[head]).id;
     let rest = track_rows[head + 1..].iter().map(|row| track_at(row));
@@ -325,6 +335,30 @@ mod tests {
         assert_eq!(folded.rows.len(), 5, "the members and the lane under one of them are folded away");
         assert_eq!(folded.track(1), None);
         assert_eq!(folded.clip_tracks(), [0, 2]);
+    }
+
+    #[test]
+    fn takes_unfold_under_their_track_above_its_automation() {
+        use trill_core::project::AudioContent;
+        let (mut project, [drums, ..]) = project();
+        for name in ["Take 1", "Take 2"] {
+            project.add_take(drums, name, 0.0, 4.0, AudioContent::new("take.wav")).unwrap();
+        }
+        let mut view = view();
+        view.open_lane(LaneOwner::Track(drums), AutomationTarget::TrackVolume { track: drums });
+        let folded = Rows::build(&project.tracks, &view);
+        assert_eq!(folded.rows.len(), 7, "takes are kept out of sight until they are unfolded");
+        view.takes_open.insert(drums);
+        let rows = Rows::build(&project.tracks, &view);
+        let height = crate::ui::arrangement::takes::LANE_HEIGHT;
+        assert_eq!(rows.rows[1], Row { kind: RowKind::Take { track: 0, lane: 0 }, top: 60.0, height });
+        assert_eq!(rows.rows[2].kind, RowKind::Take { track: 0, lane: 1 });
+        assert_eq!(rows.rows[3].kind, RowKind::Lane { lane: 0, track: 0 }, "automation comes after the takes");
+        assert_eq!(rows.rows[4].top, 60.0 + 2.0 * height + ArrangementState::DEFAULT_LANE_HEIGHT);
+        assert_eq!(rows.clip_tracks(), [0, 2, 1, 3], "a lane of takes holds no clips");
+        // A header dragged onto a lane of takes lands by the track above it.
+        let dragged = project.tracks[2].id;
+        assert_eq!(drop_at(&project.tracks, &rows, dragged, 70.0), drop_at(&project.tracks, &folded, dragged, 40.0));
     }
 
     #[test]

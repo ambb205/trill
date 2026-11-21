@@ -68,6 +68,35 @@ fn track_change(was: &Track, now: &Track) -> String {
         }
         _ => {}
     }
+    // What it records, and how that is heard.
+    match (&was.input, &now.input) {
+        (None, Some(input)) => return format!("Had {} record {}", quoted(&now.name), input.said()),
+        (Some(_), None) => return format!("Had {} record what a keyboard plays again", quoted(&now.name)),
+        (Some(before), Some(after)) if before.monitor != after.monitor => {
+            return match after.monitor {
+                crate::Monitoring::Off => format!("Stopped monitoring the input of {}", quoted(&now.name)),
+                crate::Monitoring::Armed => format!("Monitored the input of {} while it is armed", quoted(&now.name)),
+                crate::Monitoring::Always => format!("Monitored the input of {}", quoted(&now.name)),
+            };
+        }
+        (Some(before), Some(after)) if before != after => {
+            return format!("Had {} record {}", quoted(&now.name), after.said());
+        }
+        _ => {}
+    }
+    // Its takes: kept, let go of, or named.
+    if was.takes != now.takes {
+        let had = |takes: &[crate::Take], id| takes.iter().any(|take| take.clip.id == id);
+        let kept: Vec<&crate::Take> = now.takes.iter().filter(|take| !had(&was.takes, take.clip.id)).collect();
+        let gone: Vec<&crate::Take> = was.takes.iter().filter(|take| !had(&now.takes, take.clip.id)).collect();
+        return match (kept.as_slice(), gone.as_slice()) {
+            ([take], []) => format!("Kept {} as a take of {}", quoted(&take.clip.name), quoted(&now.name)),
+            ([], [take]) => format!("Let go of the take {} of {}", quoted(&take.clip.name), quoted(&now.name)),
+            ([], []) => format!("Changed a take of {}", quoted(&now.name)),
+            (kept, []) => format!("Kept {} of {}", count(kept.len(), "take", "takes"), quoted(&now.name)),
+            _ => format!("Changed the takes of {}", quoted(&now.name)),
+        };
+    }
     let mut changed = Vec::new();
     for (differs, what) in [
         (was.volume_db != now.volume_db, "volume"),

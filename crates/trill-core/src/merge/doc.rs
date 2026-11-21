@@ -3,8 +3,8 @@
 
 use super::props::{AudioSet, ClipSet, DeviceSet, LaneSet, MarkerSet, MidiSet, NoteSet, PointSet, SongSet, TrackSet};
 use super::{
-    ALIVE, Beside, Change, ClipOp, DeviceOp, FIRST_AUDIO, FIRST_MIDI, Floors, Home, KIND, Key, LISTENING, MarkerOp,
-    NoteOp, Op, PLACE, Place, PointOp, REFERENCE, SongId, Stamp, Thing, TrackOp,
+    ALIVE, Beside, Change, ClipOp, DeviceOp, FIRST_AUDIO, FIRST_MIDI, Floors, Home, KIND, Key, LANE, LISTENING,
+    MarkerOp, NoteOp, Op, PLACE, Place, PointOp, REFERENCE, SongId, Stamp, Thing, TrackOp,
 };
 use crate::channel::Channel;
 use crate::controllers::{ControllerCurve, ControllerKind};
@@ -49,6 +49,9 @@ pub(super) struct TrackHeld {
 pub(super) struct ClipHeld {
     pub held: Held<Clip>,
     pub track: TrackId,
+    /// The lane it is kept in beside its track, for a take; `None` for a
+    /// clip the track plays.
+    pub lane: Option<u32>,
     pub notes: BTreeMap<u64, Held<Note>>,
     pub curves: BTreeMap<(ControllerKind, Channel), Points>,
 }
@@ -167,6 +170,8 @@ pub struct Doc {
     pub(super) clips: BTreeMap<ClipId, ClipHeld>,
     pub(super) devices: BTreeMap<DeviceId, DeviceHeld>,
     pub(super) lanes: BTreeMap<AutomationTarget, LaneHeld>,
+    /// The order the envelopes are held in ([`Op::Envelopes`]).
+    pub(super) envelopes: Vec<AutomationTarget>,
     /// When each property was last set, where that is later than its thing
     /// was made.
     pub(super) stamps: HashMap<Key, Stamp>,
@@ -179,7 +184,7 @@ pub struct Doc {
 
 /// A track with nothing on it.
 fn track_shell(track: &Track) -> Track {
-    Track { clips: Vec::new(), devices: Vec::new(), sends: Vec::new(), ..track.clone() }
+    Track { clips: Vec::new(), devices: Vec::new(), sends: Vec::new(), takes: Vec::new(), ..track.clone() }
 }
 
 /// A clip without its notes and curves.
@@ -203,12 +208,12 @@ fn points_of(points: &[AutomationPoint], made: Stamp) -> Points {
 }
 
 impl ClipHeld {
-    fn of(clip: &Clip, track: TrackId, made: Stamp) -> Self {
+    fn of(clip: &Clip, track: TrackId, lane: Option<u32>, made: Stamp) -> Self {
         let notes = clip.notes().iter().map(|note| (note.id, Held::new(*note, made))).collect();
         let curves = (clip.controllers().iter())
             .map(|curve| ((curve.controller, curve.channel), points_of(&curve.points, made)))
             .collect();
-        Self { held: Held::new(clip_shell(clip), made), track, notes, curves }
+        Self { held: Held::new(clip_shell(clip), made), track, lane, notes, curves }
     }
 
     /// The clip with everything that is held in it, there or not.
@@ -288,6 +293,7 @@ impl Doc {
             clips: BTreeMap::new(),
             devices: BTreeMap::new(),
             lanes: BTreeMap::new(),
+            envelopes: automation.iter().map(|lane| lane.target.clone()).collect(),
             stamps: HashMap::new(),
             orphans: Vec::new(),
             clock: 0,
@@ -302,7 +308,10 @@ impl Doc {
         for (index, track) in tracks.iter().enumerate() {
             doc.tracks.insert(track.id, TrackHeld::of(track, (index + 1) as Place, made));
             for clip in &track.clips {
-                doc.clips.insert(clip.id, ClipHeld::of(clip, track.id, made));
+                doc.clips.insert(clip.id, ClipHeld::of(clip, track.id, None, made));
+            }
+            for take in &track.takes {
+                doc.clips.insert(take.clip.id, ClipHeld::of(&take.clip, track.id, Some(take.lane), made));
             }
             chain(ChainRef::Track(track.id), &track.devices, &mut doc);
         }
@@ -347,6 +356,10 @@ impl Doc {
     /// and a device's parameters.
     fn made_for(&self, key: &Key) -> Stamp {
         let made = match key {
+            // Whether a clip is a take, and in which lane, is not said
+            // when it is made: a clip is made a clip, and what says of it
+            // that it is a take is as old as itself.
+            Key::Clip(_, LANE) => None,
             Key::Send(track, _) => self.tracks.get(track).map(|track| track.held.made),
             Key::Param(device, _) => self.devices.get(device).map(|device| device.held.made),
             key => key.thing().and_then(|thing| self.made(&thing)),
@@ -375,6 +388,66 @@ impl Doc {
                 self.points(home).and_then(|points| points.get(id)).is_some_and(|held| held.alive)
             }
         }
+    }
+
+    /// The order envelopes are held in, as something to sort by: the ones
+    /// the order names as it names them, then the others by what they
+    /// move.
+    pub fn envelope_order(&self) -> impl Fn(&AutomationTarget, &AutomationTarget) -> std::cmp::Ordering + '_ {
+        let mut named: HashMap<&AutomationTarget, usize> = HashMap::new();
+        for (at, target) in self.envelopes.iter().enumerate() {
+            named.entry(target).or_insert(at);
+        }
+        move |a, b| {
+            let (at_a, at_b) = (named.get(a).copied(), named.get(b).copied());
+            at_a.is_none().cmp(&at_b.is_none()).then(at_a.cmp(&at_b)).then_with(|| a.cmp(b))
+        }
+    }
+
+    /// The lane a clip is kept in as a take, for one that is held as one.
+    pub fn lane_of(&self, clip: ClipId) -> Option<u32> {
+        self.clips.get(&clip)?.lane
+    }
+
+    /// A clip as it is held, there or removed, with what is alive in it,
+    /// and the track it is on.
+    pub fn held_clip(&self, clip: ClipId) -> Option<(TrackId, Clip)> {
+        let held = self.clips.get(&clip)?;
+        Some((held.track, super::derive::clip_of(held)))
+    }
+
+    /// A device as it is held, there or removed.
+    pub fn held_device(&self, device: DeviceId) -> Option<Device> {
+        Some(self.devices.get(&device)?.held.it.clone())
+    }
+
+    /// The song with everything in it that is held, removed or not: no
+    /// state of the song that anyone can come back to holds anything this
+    /// has not got.
+    pub fn with_everything(&self) -> Project {
+        let mut all = self.clone();
+        all.markers.values_mut().for_each(|held| held.alive = true);
+        all.tracks.values_mut().for_each(|track| track.held.alive = true);
+        all.clips.values_mut().for_each(|clip| clip.held.alive = true);
+        all.devices.values_mut().for_each(|device| device.held.alive = true);
+        all.derive().project
+    }
+
+    /// The song with `things` in it too, where they are held and were
+    /// removed: what it would hold if each were brought back.
+    pub fn with_also<'a>(&self, things: impl Iterator<Item = &'a Thing>) -> Project {
+        let mut with = self.clone();
+        for thing in things {
+            match thing {
+                Thing::Marker(id) => with.markers.get_mut(id).into_iter().for_each(|held| held.alive = true),
+                Thing::Track(id) => with.tracks.get_mut(id).into_iter().for_each(|track| track.held.alive = true),
+                Thing::Clip(id) => with.clips.get_mut(id).into_iter().for_each(|clip| clip.held.alive = true),
+                Thing::Device(id) => with.devices.get_mut(id).into_iter().for_each(|held| held.held.alive = true),
+                // (A note or a point names no file.)
+                Thing::Note(..) | Thing::Point(..) => {}
+            }
+        }
+        with.derive().project
     }
 
     /// Whether `thing` is held at all, there or removed.
@@ -503,6 +576,7 @@ impl Doc {
                     match (*prop, &it.content) {
                         (ALIVE, _) => ClipOp::Alive(clip.held.alive),
                         (PLACE, _) => ClipOp::Track(clip.track),
+                        (LANE, _) => ClipOp::Lane(clip.lane),
                         (prop, ClipContent::Audio(audio)) if prop >= FIRST_AUDIO => {
                             ClipOp::Audio(AudioSet::read(audio, prop)?)
                         }
@@ -549,6 +623,7 @@ impl Doc {
                 };
                 Op::Lane(target.clone(), LaneSet::read(&shown, *prop)?)
             }
+            Key::Envelopes => Op::Envelopes(self.envelopes.clone()),
             Key::Point(home, id, prop) => {
                 let held = self.points(home)?.get(id)?;
                 Op::Point(
@@ -650,7 +725,7 @@ impl Doc {
     fn take(&mut self, stamp: Stamp, op: Op, won: &mut Vec<Won>) {
         // A property of a thing that is not known waits for the thing.
         let known = match &op {
-            Op::Song(_) | Op::MasterVolume(_) | Op::Tempo(..) | Op::Meter(..) | Op::Lane(..) => true,
+            Op::Song(_) | Op::MasterVolume(_) | Op::Tempo(..) | Op::Meter(..) | Op::Lane(..) | Op::Envelopes(_) => true,
             Op::Marker(_, MarkerOp::Whole(_))
             | Op::Track(_, TrackOp::Whole(..))
             | Op::Clip(_, ClipOp::Whole(..))
@@ -734,6 +809,7 @@ impl Doc {
                 match (part, &mut clip.held.it.content) {
                     (ClipOp::Alive(alive), _) => clip.held.alive = alive,
                     (ClipOp::Track(track), _) => clip.track = track,
+                    (ClipOp::Lane(lane), _) => clip.lane = lane,
                     (ClipOp::Set(set), _) => set.put(&mut clip.held.it),
                     (ClipOp::Midi(set), ClipContent::Midi(midi)) => set.put(midi),
                     (ClipOp::Audio(set), ClipContent::Audio(audio)) => set.put(audio),
@@ -771,6 +847,7 @@ impl Doc {
                 set.put(&mut shown);
                 (lane.travel, lane.enabled) = (shown.travel, shown.enabled);
             }
+            Op::Envelopes(order) => self.envelopes = order,
             Op::Point(home, id, part) => {
                 let Some(held) = self.points_mut(&home).and_then(|points| points.get_mut(&id)) else { return };
                 match part {
@@ -851,7 +928,7 @@ impl Doc {
                 let clip = Clip { id: *id, ..(**clip).clone() };
                 match self.clips.get(id).map(|held| held.held.made) {
                     None => {
-                        self.clips.insert(*id, ClipHeld::of(&clip, *track, stamp));
+                        self.clips.insert(*id, ClipHeld::of(&clip, *track, None, stamp));
                         any = true;
                     }
                     Some(made) => {
@@ -1023,7 +1100,12 @@ impl Doc {
         for (id, clip) in &self.clips {
             if lacks(clip.held.made) {
                 let whole = Box::new(clip.held.it.clone());
-                changes.entry(clip.held.made).or_default().push(Op::Clip(*id, ClipOp::Whole(whole, clip.track)));
+                let made = changes.entry(clip.held.made).or_default();
+                made.push(Op::Clip(*id, ClipOp::Whole(whole, clip.track)));
+                // A take that was made one, and is as old as that.
+                if clip.lane.is_some() && !self.stamps.contains_key(&Key::Clip(*id, LANE)) {
+                    made.push(Op::Clip(*id, ClipOp::Lane(clip.lane)));
+                }
             }
             let mut notes: BTreeMap<Stamp, Vec<Note>> = BTreeMap::new();
             for held in clip.notes.values().filter(|held| lacks(held.made)) {
@@ -1095,10 +1177,20 @@ impl Doc {
         }
         for (id, clip) in &self.clips {
             match base.clips.get(id) {
-                None => hidden.push(Op::Clip(*id, ClipOp::Whole(Box::new(clip.whole()), clip.track))),
+                None => {
+                    hidden.push(Op::Clip(*id, ClipOp::Whole(Box::new(clip.whole()), clip.track)));
+                    if clip.lane.is_some() {
+                        hidden.push(Op::Clip(*id, ClipOp::Lane(clip.lane)));
+                    }
+                }
                 Some(base) => {
                     if base.held.it != clip.held.it || base.track != clip.track {
                         hidden.push(Op::Clip(*id, ClipOp::Whole(Box::new(clip.held.it.clone()), clip.track)));
+                    }
+                    // (The lane a take asked for, where it lies in another
+                    // because two asked for one.)
+                    if base.lane != clip.lane {
+                        hidden.push(Op::Clip(*id, ClipOp::Lane(clip.lane)));
                     }
                     let as_held =
                         |note: &&Held<Note>| base.notes.get(&note.it.id).is_none_or(|base| base.it != note.it);
@@ -1131,6 +1223,9 @@ impl Doc {
                 hidden.push(Op::Device(*id, whole));
             }
             removed(device.held.alive, Thing::Device(*id), &mut hidden);
+        }
+        if base.envelopes != self.envelopes {
+            hidden.push(Op::Envelopes(self.envelopes.clone()));
         }
         for (target, lane) in &self.lanes {
             let default = LaneHeld::default();
@@ -1302,6 +1397,7 @@ fn target_holder(target: &AutomationTarget) -> Option<Thing> {
 /// A track as it is said to anyone else: without what is one's own.
 pub(super) fn impersonal(mut track: Track) -> Track {
     track.solo = false;
+    track.input = None;
     if let Some(reference) = &mut track.reference {
         reference.listening = false;
     }

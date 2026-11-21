@@ -13,15 +13,17 @@
 //! graph and every running device, stays where it is, in a `Seat` that one
 //! stream after another renders from.
 
+use crate::capture::{self, Reader};
 use crate::graph::{AudioData, Graph};
 use crate::host::priority::AudioPriority;
 use crate::host::{
-    AudioConfig, AudioDevices, AudioHost, FailureCallback, NULL_DEVICE, NullHost, OpenError, OpenStream, StreamFailure,
-    StreamHandle, StreamRequest, SystemHost, Timing,
+    AudioConfig, AudioDevices, AudioHost, FailureCallback, InputRequest, NULL_DEVICE, NullHost, OpenError, OpenStream,
+    StreamFailure, StreamHandle, StreamRequest, SystemHost, Timing,
 };
 use crate::live::{Captured, LiveInput, LiveSender, LiveTarget, TrackSet};
-use crate::processor::{Processor, Taken};
+use crate::processor::{Measure, Processor, Taken};
 use crate::queue::Queue;
+use crate::recorder::Feeds;
 use crate::spread::Workers;
 use crate::team::{Team, TeamStats, Watch};
 use std::cell::UnsafeCell;
@@ -261,6 +263,55 @@ fn frames_to_ms(frames: u32, sample_rate: f64) -> f64 {
     if sample_rate > 0.0 { frames as f64 * 1000.0 / sample_rate } else { 0.0 }
 }
 
+/// Why an input is not open after it was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NoInput {
+    /// No device could be opened: why, fit to show.
+    Refused(String),
+    /// The device of this name was opened and closed again: the audio
+    /// thread was not taking messages and could not be told of it, so
+    /// nothing would have read what it heard.
+    Away(String),
+}
+
+/// The input that is open: what is recorded from, as it turned out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputInfo {
+    /// The device's name.
+    pub device: String,
+    /// The rate it runs at, which need not be the engine's.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// How many frames it hands over at a time.
+    pub buffer_frames: u32,
+    /// How many of its own frames the device says lie between its
+    /// microphone and a buffer it hands over.
+    pub latency_frames: u32,
+    /// Whether it was taken for this program alone.
+    pub exclusive: bool,
+    /// How many of the engine's frames before the engine reads a frame
+    /// the input heard it: the device's own latency and what handing the
+    /// sound across takes, which is constant for as long as it is open.
+    pub delay_frames: u32,
+    /// Whether it counts time by the clock the output counts by: an input
+    /// of the device that is played through. Then nothing drifts, and
+    /// nothing has to be told apart.
+    pub shares_clock: bool,
+    /// Set when the input is not open as it was asked for: it could not
+    /// be taken exclusively. In words fit to show the user.
+    pub warning: Option<String>,
+}
+
+/// An input that is open, as the engine holds it.
+struct Input {
+    stream: StreamHandle,
+    link: Arc<capture::Link>,
+    counts: Arc<capture::Counts>,
+    info: InputInfo,
+    /// When it was opened, on the host's clock.
+    opened_ns: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("audio output unavailable: {0}")]
@@ -302,12 +353,22 @@ pub(crate) enum Message {
     /// Count the cycles threads run over each track's block, or stop.
     CountCycles(bool),
     /// Starts the take numbered `take` on `tracks`, after `count_in_beats`
-    /// of count-in if the song is not already playing.
+    /// of count-in if the song is not already playing; with `punch`, over
+    /// that stretch of the song only.
     Record {
         take: u32,
         tracks: TrackSet,
         count_in_beats: f64,
+        punch: Option<(f64, f64)>,
     },
+    /// Ends the take that is being recorded and lets the song play on.
+    EndTake,
+    /// What an input device hears from now on, or nothing.
+    Input(Option<Box<Reader>>),
+    /// Where the recorded inputs of the take asked for next go.
+    Feeds(Box<Feeds>),
+    /// Plays a signal and listens for it: see [`Measure`].
+    Measure(Box<Measure>),
 }
 
 /// What the audio thread hands back to be freed elsewhere.
@@ -317,6 +378,13 @@ pub(crate) enum Garbage {
     /// Threads the song is no longer made on: sent home, and waited for,
     /// by whoever collects this.
     Team(Box<Team>),
+    /// What an input device heard, which nothing reads any more.
+    Input(Box<Reader>),
+    /// The audio thread's ends of a take's files, which nothing more is
+    /// handed to.
+    Feeds(Box<Feeds>),
+    /// A measurement, with what it heard.
+    Measure(Box<Measure>),
 }
 
 /// Whether a take is being recorded, as the audio thread has it.
@@ -339,10 +407,13 @@ struct Shared {
     /// How many buffers have been rendered: a stream that stops asking is
     /// found out by this standing still.
     callbacks: AtomicU64,
-    /// The output latency the host last reported, in frames.
+    /// The output latency the host last reported, in frames; and what it
+    /// has reported of late, as the bits of an `f32`.
     latency_frames: AtomicU32,
-    /// A [`StreamFailure`] code, or 0.
+    steady_latency: AtomicU32,
+    /// A [`StreamFailure`] code, or 0; and the same for the input.
     failure: AtomicU8,
+    input_failure: AtomicU8,
     /// A [`RecordPhase`].
     recording: AtomicU8,
     /// Times live input was lost for want of room.
@@ -433,13 +504,39 @@ impl Realtime {
                 }
                 Message::SpreadFrom(share) => self.processor.spread_from(share),
                 Message::CountCycles(on) => self.processor.count_cycles(on),
-                Message::Record { take, tracks, count_in_beats } => {
-                    self.processor.record(take, tracks, count_in_beats);
+                Message::Record { take, tracks, count_in_beats, punch } => {
+                    self.processor.record(take, tracks, count_in_beats, punch);
+                }
+                Message::EndTake => self.processor.end_take(),
+                Message::Input(input) => {
+                    if let Some(before) = self.processor.set_input(input) {
+                        let _ = self.garbage.push(Garbage::Input(before));
+                    }
+                }
+                Message::Feeds(feeds) => {
+                    if let Some(before) = self.processor.set_feeds(feeds) {
+                        let _ = self.garbage.push(Garbage::Feeds(before));
+                    }
+                }
+                Message::Measure(measure) => {
+                    if let Some(before) = self.processor.start_measure(measure) {
+                        let _ = self.garbage.push(Garbage::Measure(before));
+                    }
                 }
             }
         }
         if let Some(finished) = self.processor.take_finished_audition() {
             let _ = self.garbage.push(Garbage::Audio(finished));
+        }
+    }
+
+    /// Hands back what the buffer just made was the last to use.
+    fn hand_back(&mut self) {
+        if let Some(feeds) = self.processor.take_finished_feeds() {
+            let _ = self.garbage.push(Garbage::Feeds(feeds));
+        }
+        if let Some(measure) = self.processor.take_finished_measure() {
+            let _ = self.garbage.push(Garbage::Measure(measure));
         }
     }
 
@@ -542,6 +639,7 @@ impl Realtime {
         }
         self.apply_messages();
         self.processor.set_output_latency(timing.latency_frames);
+        self.processor.begin_input(timing.now_ns, total);
         self.take_live_input(total, timing);
         let mut done = 0;
         while done < total {
@@ -550,6 +648,7 @@ impl Realtime {
             sink(&self.left[..frames], &self.right[..frames]);
             done += frames;
         }
+        self.hand_back();
 
         let shared = &self.shared;
         shared.playing.store(self.processor.is_playing(), Ordering::Relaxed);
@@ -557,6 +656,7 @@ impl Realtime {
         shared.position.store(self.processor.position().to_bits(), Ordering::Relaxed);
         shared.recording.store(self.processor.record_phase() as u8, Ordering::Relaxed);
         shared.latency_frames.store(timing.latency_frames, Ordering::Relaxed);
+        shared.steady_latency.store((self.processor.steady_output_latency() as f32).to_bits(), Ordering::Relaxed);
         shared.callbacks.fetch_add(1, Ordering::Relaxed);
         shared.wants_threads.store(self.processor.wants_threads(), Ordering::Relaxed);
         shared.threads.store(self.processor.threads() as u32, Ordering::Relaxed);
@@ -791,14 +891,22 @@ pub struct Engine {
     retire: Option<Box<dyn Fn(Box<Graph>) + Send>>,
     /// Set when a message could not be sent; see [`Engine::send`].
     messages_lost: bool,
+    /// Whether an input is taken to count time by the output's clock
+    /// whatever the system says of the two: see
+    /// [`Engine::say_one_clock`].
+    one_clock_said: bool,
     host: Arc<dyn AudioHost>,
     /// What plays when no device will: nothing, at real-time pace.
     null: Arc<NullHost>,
     config: AudioConfig,
     patience: Patience,
-    // Field order is drop order: the stream goes before the driver thread
-    // that opened it.
+    // Field order is drop order: the streams go before the driver thread
+    // that opened them.
     stream: Option<StreamHandle>,
+    /// The input, while something needs it: see [`Engine::open_input`].
+    input: Option<Input>,
+    /// The last measurement that ended, until it is asked for.
+    measured: Option<Box<Measure>>,
     driver: Driver,
     /// Whether the stream is one that should be asking for audio by
     /// itself, and so can be caught stalling.
@@ -892,11 +1000,14 @@ impl Engine {
             swaps_in_flight: 0,
             retire: None,
             messages_lost: false,
+            one_clock_said: false,
             host: setup.host,
             null: Arc::new(NullHost::new(FALLBACK_SAMPLE_RATE)),
             config: setup.config,
             patience: setup.patience,
             stream: None,
+            input: None,
+            measured: None,
             driver: Driver::start()?,
             watched: false,
             last_callbacks: 0,
@@ -1069,6 +1180,13 @@ impl Engine {
         self.shared.latency_frames.load(Ordering::Relaxed)
     }
 
+    /// [`Engine::output_latency`] as it has been of late, in frames: what
+    /// the device says with each buffer flutters, and this does not. A
+    /// take's audio is placed by it.
+    pub fn steady_output_latency(&self) -> f64 {
+        f64::from(f32::from_bits(self.shared.steady_latency.load(Ordering::Relaxed)))
+    }
+
     /// How many times live input arrived faster than the engine could take
     /// it and some was lost; every sounding note was let go of each time.
     /// Never, in ordinary playing.
@@ -1098,6 +1216,172 @@ impl Engine {
     /// The way in for live input.
     pub fn live(&self) -> &LiveSender {
         &self.live
+    }
+
+    // ---- the input ------------------------------------------------------
+
+    /// The input that is open, if one is.
+    pub fn input(&self) -> Option<&InputInfo> {
+        self.input.as_ref().map(|input| &input.info)
+    }
+
+    /// Opens the device that is recorded from ([`AudioConfig::input`]),
+    /// if it is not open: taken for this program alone where the output
+    /// is and the device allows, shared otherwise. From then on the audio
+    /// thread has a frame of it for every frame it makes. An input is
+    /// open only while something needs it, which is the session's to say.
+    ///
+    /// Why it is not open is something fit to show the user.
+    pub(crate) fn open_input(&mut self) -> Result<(), NoInput> {
+        if self.input.is_some() {
+            return Ok(());
+        }
+        let engine_rate = self.info.sample_rate;
+        let shared = self.shared.clone();
+        shared.input_failure.store(0, Ordering::Relaxed);
+        let on_failure: FailureCallback = Arc::new(move |failure: StreamFailure| {
+            shared.input_failure.store(failure.code(), Ordering::Relaxed);
+        });
+        let wish = InputRequest {
+            device: self.config.input.clone(),
+            exclusive: self.info.exclusive,
+            sample_rate: Some(engine_rate.round() as u32),
+            buffer_size: Some(self.info.buffer_frames).filter(|frames| *frames > 0),
+            output: self.info.device.clone(),
+        };
+        let mut tries = vec![wish.clone()];
+        if wish.exclusive {
+            tries.push(InputRequest { exclusive: false, ..wish });
+        }
+        let mut refusals: Vec<String> = Vec::new();
+        for request in tries {
+            let (host, attempt, failed) = (self.host.clone(), request.clone(), on_failure.clone());
+            let opened = self
+                .driver
+                .call(self.patience.device, move || host.open_input(&attempt, failed))
+                .unwrap_or_else(|| Err(OpenError::Failed("the input device did not answer".into())));
+            let open = match opened {
+                Ok(open) => open,
+                Err(error) => {
+                    refusals.push(error.to_string());
+                    continue;
+                }
+            };
+            let format = open.format;
+            let delay = capture::delay_frames(
+                format.sample_rate as f64,
+                format.buffer_frames,
+                format.latency_frames,
+                engine_rate,
+                self.info.buffer_frames,
+            );
+            // One clock by the system's word, or by the word of whoever
+            // knows the two ends: a belief either way.
+            let shares_clock = format.shares_clock || self.one_clock_said;
+            let reader = Reader::new(open.link.clone(), engine_rate, delay, shares_clock);
+            let counts = reader.counts();
+            let warning = refusals.first().map(|refusal| {
+                format!(
+                    "{refusal}. '{}' is open shared with other programs instead, which is a longer way in.",
+                    format.device
+                )
+            });
+            let info = InputInfo {
+                device: format.device,
+                sample_rate: format.sample_rate,
+                channels: format.channels,
+                buffer_frames: format.buffer_frames,
+                latency_frames: format.latency_frames,
+                exclusive: format.exclusive,
+                delay_frames: delay,
+                shares_clock,
+                warning,
+            };
+            if !self.send(Message::Input(Some(Box::new(reader)))) {
+                // The audio thread is not taking messages, and was not
+                // told: nothing would read what the device hears. An input
+                // that is open for nothing is closed again.
+                let stream = open.handle;
+                self.driver.call(self.patience.device, move || drop(stream));
+                log::warn!("{} was opened and closed again: the audio thread could not be told of it", info.device);
+                return Err(NoInput::Away(info.device));
+            }
+            log::info!("recording from {} ({} Hz, {} channels)", info.device, info.sample_rate, info.channels);
+            let opened_ns = self.host.now_ns();
+            self.input = Some(Input { stream: open.handle, link: open.link, counts, info, opened_ns });
+            return Ok(());
+        }
+        Err(NoInput::Refused(refusals.join("; ")))
+    }
+
+    /// Has the inputs that are opened from now on taken to count time by
+    /// the output's clock, whatever the system says of the two. For a
+    /// test through a cable whose two ends are known to be one device and
+    /// of which the system says nothing. It is a belief like the system's
+    /// own: the input's time stamps may overturn it.
+    pub(crate) fn say_one_clock(&mut self, said: bool) {
+        self.one_clock_said = said;
+    }
+
+    /// Whether the audio thread runs by itself: not one that is driven by
+    /// hand, which makes a buffer only when it is told to.
+    pub(crate) fn runs_by_itself(&self) -> bool {
+        self.host.runs_by_itself()
+    }
+
+    /// Closes the input: nothing needs it any more, or it has failed.
+    pub(crate) fn close_input(&mut self) {
+        let Some(input) = self.input.take() else { return };
+        self.send(Message::Input(None));
+        let stream = input.stream;
+        self.driver.call(self.patience.device, move || drop(stream));
+        log::info!("the input {} is closed", input.info.device);
+    }
+
+    /// How long the input has been open, in seconds of the host's clock:
+    /// how long its clock and the output's have been told apart for.
+    pub(crate) fn input_open_for(&self) -> Option<f64> {
+        let input = self.input.as_ref()?;
+        Some(self.host.now_ns().saturating_sub(input.opened_ns) as f64 / 1e9)
+    }
+
+    /// What went wrong with the input since this was last asked, if
+    /// anything did.
+    pub(crate) fn input_failure(&mut self) -> Option<StreamFailure> {
+        StreamFailure::from_code(self.shared.input_failure.swap(0, Ordering::Relaxed))
+    }
+
+    /// The highest level each channel of the input has had since this was
+    /// last asked (1 is full scale), and whether it was at full scale or
+    /// over. Empty with no input open.
+    pub fn take_input_levels(&self) -> Vec<(f32, bool)> {
+        self.input.as_ref().map(|input| input.link.take_levels()).unwrap_or_default()
+    }
+
+    /// How the input has done since it was opened: what never arrived and
+    /// what came too late, each of which is silence where it would have
+    /// been.
+    pub fn input_health(&self) -> Option<capture::Health> {
+        self.input.as_ref().map(|input| capture::health(&input.link, &input.counts))
+    }
+
+    /// Whether the open input was opened as one that counts time by the
+    /// output's clock and was found, by its time stamps, to have a clock
+    /// of its own: it is read as any two devices are from then on.
+    pub fn input_parted(&self) -> bool {
+        self.input.as_ref().is_some_and(|input| capture::parted(&input.counts))
+    }
+
+    /// How far the input's clock is from the output's as the engine reads
+    /// it now, in parts a million.
+    pub fn input_drift_ppm(&self) -> Option<f64> {
+        self.input.as_ref().map(|input| capture::off_ppm(&input.counts))
+    }
+
+    /// The last measurement that ended, with what it heard.
+    pub(crate) fn take_measured(&mut self) -> Option<Box<Measure>> {
+        self.collect_garbage();
+        self.measured.take()
     }
 
     pub(crate) fn record_phase(&self) -> RecordPhase {
@@ -1151,6 +1435,9 @@ impl Engine {
                 Garbage::Audio(audio) => drop(audio),
                 // Its threads are told to go home and waited for.
                 Garbage::Team(team) => drop(team),
+                Garbage::Input(input) => drop(input),
+                Garbage::Feeds(feeds) => drop(feeds),
+                Garbage::Measure(measure) => self.measured = Some(measure),
             }
         }
     }
@@ -1345,6 +1632,9 @@ impl Engine {
     /// nearest thing to it. Fails only if nothing at all can be opened and
     /// `silent_fallback` is off.
     fn open(&mut self, silent_fallback: bool) -> Result<Applied, EngineError> {
+        // The input was read for the stream that goes: whoever needs one
+        // opens it again for the stream that comes.
+        self.close_input();
         self.close();
         let mut reset = false;
         if self.seat.claim(self.patience.audio_thread).is_none() {
@@ -1452,6 +1742,7 @@ impl Engine {
             latency_frames: format.latency_frames,
         };
         self.shared.latency_frames.store(format.latency_frames, Ordering::Relaxed);
+        self.shared.steady_latency.store((format.latency_frames as f32).to_bits(), Ordering::Relaxed);
         self.shared.failure.store(0, Ordering::Relaxed);
         let now = Instant::now();
         self.watched = real && self.host.runs_by_itself();
@@ -1476,6 +1767,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.close_input();
         self.close();
         self.collect_garbage();
     }

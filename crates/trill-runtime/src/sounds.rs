@@ -234,6 +234,7 @@ impl Runtime {
             source_tempo,
             transpose: sound.transpose,
             looped: None,
+            ..Default::default()
         };
         let stem = path.file_stem().map_or_else(|| "Audio".to_string(), |stem| stem.to_string_lossy().into_owned());
         let name = sound.name.clone().unwrap_or_else(|| stem.clone());

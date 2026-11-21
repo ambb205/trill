@@ -310,6 +310,17 @@ shot graphite-controllers-expression --demo --select Melody --lane expression --
 shot recording-count-in "$song" --select Lead --arm Lead --record
 shot recording-mixer "$song" --select Lead --arm Lead --arm Bass --tab mixer --record
 shot min-window-recording "$song" --select Bass --arm Bass --record --size 1060x640
+# Recording an input: a made-up session on devices that exist only there,
+# whose input hears a voice that is worked out. Three takes over a loop
+# with a stretch of the first put on the track, the lanes unfolded; a take
+# as it is recorded; the strip of the mixer; and the Audio and MIDI panel
+# with the input's level and a measurement of the round trip.
+shot takes-lanes --recording takes
+shot takes-rolling --recording rolling
+shot takes-mixer --recording takes --tab mixer
+shot input-latency --recording latency
+shot graphite-takes-lanes --recording takes --theme graphite
+shot min-window-takes --recording takes --size 1060x640
 shot film-export "$song" --select Lead --film
 shot audio-settings "$song" --select Lead --settings --audio-scene studio
 shot audio-settings-fallback "$song" --select Lead --settings --audio-scene fallback

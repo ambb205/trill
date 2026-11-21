@@ -469,7 +469,9 @@ mod tests {
         let stats = team.watch().take();
         assert_eq!(stats.rounds, 2_000, "every round is handed out, with places or without");
         assert!(stats.joined >= stats.woken && stats.woken > 0, "{stats:?}");
-        assert!(stats.late_worst_us >= stats.late_mean_us && stats.late_mean_us > 0.0, "{stats:?}");
+        // (A thread that was woken as it was about to look is no later
+        // than the clock can tell.)
+        assert!(stats.late_worst_us >= stats.late_mean_us && stats.late_mean_us >= 0.0, "{stats:?}");
         assert_eq!(team.watch().take().rounds, 0, "what was taken is not counted again");
     }
 
@@ -512,7 +514,15 @@ mod tests {
                     for _ in 0..4 {
                         ready.fetch_add(1, Ordering::SeqCst);
                         team.more();
-                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        // Busy until somebody has taken it: a moment, and
+                        // on a machine that has other work, as long as a
+                        // thread that slept takes to be given a processor.
+                        let waited = std::time::Instant::now();
+                        while ready.load(Ordering::SeqCst) > 0
+                            && waited.elapsed() < std::time::Duration::from_millis(250)
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
                 let take = |ready: usize| ready.checked_sub(1);
@@ -540,12 +550,18 @@ mod tests {
     fn a_panic_on_a_thread_of_the_team_is_the_callers_once_everyone_is_back() {
         let team = Team::new(1);
         let caller = std::thread::current().id();
+        let taken_up = std::sync::atomic::AtomicBool::new(false);
         let work = |_: usize| {
             if std::thread::current().id() != caller {
+                taken_up.store(true, Ordering::SeqCst);
                 panic!("on purpose");
             }
-            // Give the other thread time to take the work up.
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // The other thread is waited for until it has taken the work
+            // up, which a busy machine lets it do late.
+            let begun = std::time::Instant::now();
+            while !taken_up.load(Ordering::SeqCst) && begun.elapsed() < std::time::Duration::from_secs(20) {
+                std::thread::yield_now();
+            }
         };
         let came_back = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| team.all(1, &work)));
         assert!(came_back.is_err());

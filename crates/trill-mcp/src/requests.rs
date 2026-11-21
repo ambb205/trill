@@ -103,7 +103,9 @@ pub struct UpdateTrackRequest {
     /// fader.
     pub send: Option<SendInput>,
     /// Arm the track: what is played live (a MIDI keyboard, play_notes) goes to the armed tracks, and
-    /// `transport` with action "record" records them. Not part of the project file; not an undo step.
+    /// `transport` with action "record" records them. A track that records an input of the audio device
+    /// (track_input) records that when armed, and arming it opens the input. Not part of the project file;
+    /// not an undo step.
     pub armed: Option<bool>,
     /// true makes the track a reference: a recording beside the song to hold the song against, silent unless
     /// listened to and in no render, stem or film. false makes it a track of the song again. Only a track
@@ -537,6 +539,9 @@ pub struct TransportRequest {
     pub count_in_bars: Option<u32>,
     /// Turn the metronome on or off. It clicks while the song plays and is never part of a render.
     pub metronome: Option<bool>,
+    /// Punch in: with it on, a take records only while the song is inside the loop's stretch, and the song
+    /// plays through that stretch and does not go round. For notes and audio alike. Kept until changed.
+    pub punch: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -565,6 +570,10 @@ pub struct AudioRequest {
     /// Take the output device for Trill alone: the shortest latency, and no other program can play through
     /// the device meanwhile.
     pub exclusive: Option<bool>,
+    /// Name of the device that is recorded from, as `devices` lists it under `inputs`. "default" follows the
+    /// system's default input. It is opened only while a track that records it is armed or monitored
+    /// (track_input, audio_inputs).
+    pub input: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]

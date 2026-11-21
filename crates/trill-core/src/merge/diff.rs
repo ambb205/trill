@@ -16,6 +16,7 @@ use super::{Beside, ClipOp, DeviceOp, Home, MarkerOp, NoteOp, Op, Place, PointOp
 use crate::project::{
     AutomationPoint, AutomationTarget, ChainRef, Clip, ClipContent, Device, Note, Project, Track, same_clip, same_lane,
 };
+use crate::takes::Take;
 use crate::{ClipId, DeviceId, TrackId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -225,7 +226,7 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
             // New: made whole, without what it holds, which follows.
             let place =
                 placed.map_or_else(|| doc.place_of_track(id).unwrap_or((index + 1) as Place), |(place, _)| place);
-            let whole = Track { clips: Vec::new(), devices: Vec::new(), ..track.clone() };
+            let whole = Track { clips: Vec::new(), devices: Vec::new(), takes: Vec::new(), ..track.clone() };
             ops.push(Op::Track(id, TrackOp::Whole(Box::new(whole), place)));
             continue;
         };
@@ -309,7 +310,13 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
                         clips_differ(old, clip, &mut ops);
                     }
                 }
-                _ => ops.push(Op::Clip(clip.id, ClipOp::Whole(Box::new(clip.clone()), track.id))),
+                _ => {
+                    ops.push(Op::Clip(clip.id, ClipOp::Whole(Box::new(clip.clone()), track.id)));
+                    // (One that is held as a take is a clip from here on.)
+                    if doc.lane_of(clip.id).is_some() {
+                        ops.push(Op::Clip(clip.id, ClipOp::Lane(None)));
+                    }
+                }
             }
         }
         // The ones that are gone from this track, if they are gone from
@@ -318,15 +325,48 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
             if track.clips.iter().any(|clip| clip.id == old.id) {
                 continue;
             }
-            let now = clips_now.get_or_insert_with(|| {
-                after.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.id).collect()
-            });
+            let now = clips_now.get_or_insert_with(|| clips_and_takes(after));
             if !now.contains(&old.id) {
                 ops.push(Thing::Clip(old.id).set_alive(false));
             }
         }
     }
     // (The clips of a track that went, went with it.)
+
+    // ---- takes -------------------------------------------------------------
+    // A take is a clip that is kept beside its track, in a lane: made,
+    // changed and removed as a clip is. (No edit moves one to another
+    // track, or makes a take of a clip: a take is made, as a copy is.)
+    for (index, track) in after.tracks.iter().enumerate() {
+        let was_takes: &[Take] = was_track(index, track.id).map_or(&[], |was| &was.takes);
+        let same = |(a, b): (&Take, &Take)| a.lane == b.lane && same_clip(&a.clip, &b.clip);
+        if was_takes.len() == track.takes.len() && was_takes.iter().zip(&track.takes).all(same) {
+            continue;
+        }
+        for take in &track.takes {
+            let id = take.clip.id;
+            match was_takes.iter().find(|was| was.clip.id == id) {
+                Some(old) => {
+                    if old.lane != take.lane {
+                        ops.push(Op::Clip(id, ClipOp::Lane(Some(take.lane))));
+                    }
+                    if !same_clip(&old.clip, &take.clip) {
+                        clips_differ(&old.clip, &take.clip, &mut ops);
+                    }
+                }
+                None => {
+                    ops.push(Op::Clip(id, ClipOp::Whole(Box::new(take.clip.clone()), track.id)));
+                    ops.push(Op::Clip(id, ClipOp::Lane(Some(take.lane))));
+                }
+            }
+        }
+        for old in was_takes.iter().filter(|old| track.take(old.clip.id).is_none()) {
+            let now = clips_now.get_or_insert_with(|| clips_and_takes(after));
+            if !now.contains(&old.clip.id) {
+                ops.push(Thing::Clip(old.clip.id).set_alive(false));
+            }
+        }
+    }
 
     // ---- devices -----------------------------------------------------------
     let devices_now: HashSet<DeviceId> = after.devices().map(|device| device.id).collect();
@@ -437,7 +477,26 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
             }
         }
     }
+    // The order they are held in, where the edit left another than the
+    // one they are held in already: all of it. (An envelope that is new
+    // and the last is where one that is not named lies by itself; one
+    // that went with its track is not named any the less.)
+    let now: Vec<AutomationTarget> = after.automation.iter().map(|lane| lane.target.clone()).collect();
+    let mut held = now.clone();
+    held.sort_by(doc.envelope_order());
+    if now != held {
+        ops.push(Op::Envelopes(now));
+    }
     ops
+}
+
+/// Every clip a song has, on its tracks and beside them.
+fn clips_and_takes(song: &Project) -> HashSet<ClipId> {
+    let of = |track: &Track| {
+        let (clips, takes) = (track.clips.iter(), track.takes.iter().map(|take| &take.clip));
+        clips.chain(takes).map(|clip| clip.id).collect::<Vec<ClipId>>()
+    };
+    song.tracks.iter().flat_map(of).collect()
 }
 
 #[cfg(test)]

@@ -22,6 +22,8 @@ use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
 use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
+mod beside;
+mod bin;
 mod controllers;
 mod cores;
 mod editors;
@@ -33,6 +35,7 @@ mod params;
 mod playing;
 mod presets;
 mod probing;
+mod recording;
 mod sounds;
 mod story;
 mod take;
@@ -42,12 +45,17 @@ mod wavetable;
 pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_after};
 pub use wavetable::{TableReport, factory_tables};
 
+pub use beside::{ComingBeside, spelled as spelled_path};
+pub use bin::{Bin, REMOVED_FOLDER, Removed};
 pub use controllers::SilentInstrument;
 pub use cores::{Costs, KeepingUp, Shortfall, TrackCost};
 pub use files::file_facts;
 pub use opening::{Arriving, Made};
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
+pub use recording::{
+    Correction, GrowingTake, InputClock, InputStatus, Measured, Measurement, Recorded, RecordedTake, RecordingLatency,
+};
 pub use take::TakeClip;
 pub use together::{Notice, Remedy, Turned};
 
@@ -195,6 +203,8 @@ pub struct Session {
     metronome: bool,
     /// Arming, the selection, and the take being recorded.
     playing: playing::Playing,
+    /// The input, a take's audio, and how long sound takes to go round.
+    recording: recording::Audio,
     /// The journal of the open project: how it came to be.
     story: story::Keeping,
     /// What is kept of how the song is played: see [`cores`].
@@ -280,6 +290,7 @@ impl Session {
             gesture: None,
             metronome: false,
             playing: playing::Playing::new(),
+            recording: recording::Audio::default(),
             story: story::Keeping::new(),
             cores: cores::Watch::default(),
             another_song: false,
@@ -586,11 +597,12 @@ impl Session {
             _ if ops.iter().all(Op::is_param) => Scope::ParamsOnly,
             _ => Scope::Everything,
         };
-        let waited = !self.sharing.aside.is_empty();
+        let waited = !self.sharing.aside.is_empty() || self.sharing.displaced > 0;
         let taken = self.write(ops);
         let done = history::Done::of(&taken.won);
         if waited {
-            // Something was set aside that this edit may have let in.
+            // Something was set aside that this edit may have let in, or
+            // a take lies where this edit may have made room.
             let _ = self.rederive();
         } else if checks_merge() {
             let derived = self.doc.derive();
@@ -598,7 +610,7 @@ impl Session {
             worked_out.count_ids_from(0);
             made.count_ids_from(0);
             assert!(
-                worked_out.to_json() == made.to_json() && derived.aside.is_empty(),
+                worked_out.to_json() == made.to_json() && derived.aside.is_empty() && derived.displaced == 0,
                 "the song worked out from its properties is not the song the edit made:\n{}\n---- the edit made ----\n{}",
                 worked_out.to_json(),
                 made.to_json()
@@ -1009,10 +1021,25 @@ impl Session {
         self.engine.send(Message::Play);
     }
 
-    /// Stops the song. A take that was being recorded ends here: the keys
-    /// still down end with it, and what was played is in the project by
-    /// the time this returns ([`Session::last_take`]).
+    /// Stops the song. A take that was being recorded ends with it: the
+    /// keys still down end there, and what was played and sung is in the
+    /// project a moment later ([`Session::is_recording`] says when,
+    /// [`Session::last_take`] and [`Session::last_recording`] what), once
+    /// the audio thread has said where the song stopped and the last of
+    /// what was sung has come in. That is a round of housekeeping's to
+    /// see: nobody waits for it with the session held. (Where the audio is
+    /// driven by hand, as in tests, the take is over when this returns:
+    /// see `end_take_when_it_is_in`.)
     pub fn stop(&mut self) {
+        self.engine.send(Message::Stop);
+        self.end_take_when_it_is_in();
+    }
+
+    /// Stops the song, and returns when a take that was being recorded is
+    /// in the project: for whoever has the session to itself (a test, a
+    /// program that measures). It waits for as long as sound takes to go
+    /// round, with the session held; a front end calls [`Session::stop`].
+    pub fn stop_and_wait(&mut self) {
         self.engine.send(Message::Stop);
         self.finish_take(true);
     }
@@ -1025,7 +1052,7 @@ impl Session {
     pub fn panic(&mut self) {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Panic);
-        self.finish_take(true);
+        self.end_take_when_it_is_in();
     }
 
     pub fn transport(&self) -> TransportStatus {
@@ -1104,6 +1131,11 @@ impl Session {
         {
             std::fs::create_dir_all(parent).map_err(|e| io_error(path, e))?;
         }
+        // What was recorded before the song had a place comes beside it:
+        // given a second name there where the volume allows, so that the
+        // file about to be written names recordings that are there, and
+        // copied afterwards, away from here, where it does not.
+        let brought = self.bring_recordings_beside(path)?;
         // Write beside the target and rename, so a crash mid-save cannot
         // leave a truncated project file.
         // The song goes into the file with what is known of its files,
@@ -1113,6 +1145,13 @@ impl Session {
         std::fs::rename(&temporary, path).map_err(|e| io_error(path, e))?;
         self.path = Some(path.to_path_buf());
         self.saved_revision = self.revision;
+        // The song's file names its recordings beside it now: the names
+        // they had before are taken away, and what could be given no
+        // second name begins to be copied.
+        for old in self.take_first_names() {
+            let _ = std::fs::remove_file(old);
+        }
+        self.after_song_was_written(path, brought);
         // The journal is written with the song, in the program's own
         // folder: the file just written holds none of it.
         self.write_journal(path);
@@ -1149,7 +1188,17 @@ impl Session {
         self.absorb_editor_edits();
         self.capture_device_state();
         let song = self.path.clone();
-        self.project_text(song.as_deref())
+        // A take that is being recorded is in the copy as far as it has
+        // been written: the program may not live to end it.
+        match self.with_take_so_far() {
+            Some(mut with_take) => {
+                std::mem::swap(&mut self.project, &mut with_take);
+                let text = self.project_text(song.as_deref());
+                std::mem::swap(&mut self.project, &mut with_take);
+                text
+            }
+            None => self.project_text(song.as_deref()),
+        }
     }
 
     /// Opens `copy`, a project file kept for safety, in place of a project
@@ -1208,6 +1257,8 @@ impl Session {
         self.look(false);
         self.tend_audio();
         self.recover_lost_messages();
+        self.tend_input();
+        self.tend_bringing();
         self.tend_take();
         self.tend_watched();
         self.tend_journal();
@@ -1245,6 +1296,7 @@ impl Session {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Seek(0.0));
         self.abandon_take();
+        self.abandon_audio_take();
         // Every note, point and marker has an id from here on: a file
         // from before they had is given them as it is opened.
         project.settle(None);
@@ -1269,6 +1321,13 @@ impl Session {
         // made away from here: see `opening`.
         self.forget_opening();
         self.another_song = true;
+        // Nothing that was armed in the song before is armed in this one,
+        // whatever numbers its tracks have, and nothing a hand let there
+        // is let here: what this song says of its inputs is held until a
+        // hand says so again.
+        self.disarm_all();
+        self.forget_the_hand();
+        self.hold_to_the_hand(&|_| false);
         // Its recordings are read several at a time, ahead of the compile
         // that would read them one after the other.
         let read = self.audio.read_ahead(&self.project, self.engine.sample_rate());
@@ -1305,6 +1364,15 @@ impl Session {
         // Read before compiling: a stretch that ends while the compile runs
         // may be too late for it, and must still count as news afterwards.
         self.stretches_seen = self.audio.finished();
+        // What goes on beside the song: which tracks are armed, and a
+        // take that is heard in place of what its track plays. A take
+        // that is punched in plays through its loop.
+        let live = self.live_now();
+        let looping = !self.punching();
+        let heard = self.recording.heard_take().and_then(|take| {
+            let mut with_take = self.project.clone();
+            with_take.choose_take(take).ok().map(|_| with_take)
+        });
         let (graph, problems) = Compiler {
             factory: self.factory.as_ref(),
             bank: &mut self.bank,
@@ -1314,7 +1382,7 @@ impl Session {
             sample_rate,
             purpose: trill_core::device::Purpose::Playing,
         }
-        .compile(&self.project, true);
+        .compile_live(heard.as_ref().unwrap_or(&self.project), looping, &live);
         self.problems = problems;
         // Which of its tracks can be made at once, for when the song is
         // more than one thread plays in time.
@@ -1339,6 +1407,9 @@ impl Session {
         if scope == Scope::Nothing {
             return;
         }
+        // Before the graph is made: what came to want the input by this
+        // change is let, held or disarmed by whose hand made it.
+        self.hold_to_the_hand(&|track| old.track(track).is_ok());
         if scope == Scope::Everything {
             self.compile_and_swap();
             // A track that is gone is no longer armed or played.

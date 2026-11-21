@@ -233,6 +233,13 @@ pub struct ArrangementState {
     pub heights: HashMap<TrackId, f32>,
     /// Group tracks whose members are folded away.
     pub folded: HashSet<TrackId>,
+    /// Tracks whose takes are unfolded under them, a lane a row.
+    pub takes_open: HashSet<TrackId>,
+    /// A stretch of a take being marked with the pointer, to be put on
+    /// its track when the button is let go of.
+    pub take_drag: Option<TakeDrag>,
+    /// A take whose name is being typed over its strip.
+    pub renaming_take: Option<TextEditState<ClipId>>,
     pub lanes: Vec<LaneView>,
     pub points: Option<PointSelection>,
     pub tool: Tool,
@@ -274,6 +281,9 @@ impl ArrangementState {
             track_height: Self::DEFAULT_TRACK_HEIGHT,
             heights: HashMap::new(),
             folded: HashSet::new(),
+            takes_open: HashSet::new(),
+            take_drag: None,
+            renaming_take: None,
             lanes: Vec::new(),
             points: None,
             tool: Tool::default(),
@@ -802,12 +812,32 @@ pub struct UiState {
     pub gesture_open: bool,
     /// Set when the user dismisses the master's clip indicator.
     pub clear_clip_indicator: bool,
+    /// Set when the user puts out the lamps of the input's meters.
+    pub clear_input_lamps: bool,
+    /// The recordings the song no longer uses, while their list is up.
+    pub unused_recordings: Option<super::inputs::Unused>,
     /// How many projects this window has had open: it goes up each time
     /// another one takes the place of the open one.
     pub project_generation: u64,
     /// A making-of that was asked for; the shell opens it once the frame
     /// is over.
     pub story: Option<StoryAsk>,
+}
+
+/// A stretch of a take as it is marked: from where the pointer went down
+/// to where it is, in beats of the song.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TakeDrag {
+    pub take: ClipId,
+    pub anchor: Beats,
+    pub to: Beats,
+}
+
+impl TakeDrag {
+    /// The stretch, in order.
+    pub fn span(&self) -> (Beats, Beats) {
+        (self.anchor.min(self.to), self.anchor.max(self.to))
+    }
 }
 
 /// Which making-of to open.
@@ -875,6 +905,8 @@ impl UiState {
             gesture_open: false,
             story: None,
             clear_clip_indicator: false,
+            clear_input_lamps: false,
+            unused_recordings: None,
             project_generation: 0,
         }
     }
@@ -1000,6 +1032,13 @@ impl UiState {
         let exists = |id: &TrackId| project.track(*id).is_ok();
         view.heights.retain(|id, _| exists(id));
         view.folded.retain(|id| project.track(*id).is_ok_and(|track| track.kind == TrackKind::Group));
+        view.takes_open.retain(exists);
+        if view.take_drag.is_some_and(|drag| project.take(drag.take).is_err()) {
+            view.take_drag = None;
+        }
+        if view.renaming_take.as_ref().is_some_and(|edit| project.take(edit.target).is_err()) {
+            view.renaming_take = None;
+        }
         view.lanes.retain(|lane| lane_owner(project, &lane.target) == Some(lane.owner));
         if let Some(selection) = &mut view.time_selection {
             selection.tracks.retain(exists);
@@ -1161,19 +1200,27 @@ pub struct Cx<'a> {
 impl Cx<'_> {
     /// Applies an edit to the project as one undo step. A failed edit
     /// leaves the project untouched and tells the user why.
+    ///
+    /// What a view asks of the session through these three is asked by
+    /// the user's own hand ([`trill_engine::hand`]): a click, a key, a
+    /// drag. The assistant in the window never comes this way; it works
+    /// at its own door of the MCP server.
     pub fn edit<T>(&mut self, edit: impl FnOnce(&mut Project) -> Result<T, EditError>) -> Option<T> {
+        let _hand = trill_engine::hand::by_hand();
         let result = self.session.lock().edit(edit);
         self.report(result)
     }
 
     /// Runs a fallible session operation, reporting failure to the user.
     pub fn try_session<T>(&mut self, call: impl FnOnce(&mut Session) -> Result<T, SessionError>) -> Option<T> {
+        let _hand = trill_engine::hand::by_hand();
         let result = call(&mut self.session.lock());
         self.report(result)
     }
 
     /// Runs an infallible session operation (transport, undo).
     pub fn with_session<T>(&self, call: impl FnOnce(&mut Session) -> T) -> T {
+        let _hand = trill_engine::hand::by_hand();
         call(&mut self.session.lock())
     }
 

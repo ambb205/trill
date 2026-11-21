@@ -35,9 +35,14 @@ use crate::project::{
     Project, Send, Track, TrackKind, sort_clips, sort_notes, sort_points, sort_tempo_changes, valid_signature,
     valid_tempo,
 };
+use crate::takes::Take;
 use crate::tempo::{MeterChange, SAME_BEAT, TempoChange};
 use crate::{DeviceId, InstrumentProfile, TrackId};
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// Two positions this close are the same one, where takes are laid in
+/// their lanes: what the edits that put them there go by.
+const LANE_TOUCHING: f64 = 1e-9;
 
 /// Why an edit that was allowed where it was made is not in the song.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -66,6 +71,11 @@ pub struct Derived {
     /// (The number the next thing is given is whoever asks' own to say.)
     pub project: Project,
     pub aside: Vec<Aside>,
+    /// How many takes lie in another lane than the one they were put in,
+    /// because two were put in one lane over the same stretch. While there
+    /// are any, a change can move one back: whoever keeps the song beside
+    /// its properties works it out again after every change.
+    pub displaced: usize,
 }
 
 /// Something that says what plays through what.
@@ -219,7 +229,7 @@ fn alive_points(points: &BTreeMap<u64, Held<AutomationPoint>>) -> Vec<Automation
 }
 
 /// A clip with the notes and curves it has.
-fn clip_of(held: &ClipHeld) -> Clip {
+pub(super) fn clip_of(held: &ClipHeld) -> Clip {
     let mut clip = held.held.it.clone();
     if let ClipContent::Midi(midi) = &mut clip.content {
         midi.notes = held.notes.values().filter(|note| note.alive).map(|note| note.it).collect();
@@ -257,13 +267,39 @@ impl Doc {
             })
             .collect();
 
+        // A clip is among the clips its track plays, or it is a take kept
+        // beside them. Only a recording is kept as a take.
+        let mut takes: Vec<Vec<(u32, Stamp, Clip)>> = tracks.iter().map(|_| Vec::new()).collect();
         for held in self.clips.values().filter(|clip| clip.held.alive) {
             if kind(held.track) == Some(TrackKind::Normal) {
-                tracks[index[&held.track]].clips.push(clip_of(held));
+                let (at, clip) = (index[&held.track], clip_of(held));
+                match held.lane.filter(|_| clip.audio().is_some()) {
+                    Some(lane) => takes[at].push((lane, held.held.made, clip)),
+                    None => tracks[at].clips.push(clip),
+                }
             }
         }
-        for track in &mut tracks {
+        // Takes into their lanes: where two were put in one lane over the
+        // same stretch, each where the other was not known, the one made
+        // first has it and the other lies in the next lane with room.
+        let mut displaced = 0;
+        for (track, mut wishes) in tracks.iter_mut().zip(takes) {
             sort_clips(&mut track.clips);
+            wishes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.id.cmp(&b.2.id)));
+            for (wish, _, clip) in wishes {
+                let lane = {
+                    let (start, end) = (clip.start + LANE_TOUCHING, clip.end() - LANE_TOUCHING);
+                    let taken = |lane: u32| {
+                        let lies = |take: &Take| take.lane == lane && take.clip.start < end && take.clip.end() > start;
+                        track.takes.iter().any(lies)
+                    };
+                    (wish..).find(|lane| !taken(*lane)).unwrap_or(wish)
+                };
+                displaced += usize::from(lane != wish);
+                track.takes.push(Take { lane, clip });
+            }
+            // In the order they were made, which their ids say.
+            track.takes.sort_by_key(|take| take.clip.id);
         }
 
         // The devices that are there, each listening to its own input
@@ -371,6 +407,11 @@ impl Doc {
             }
         }
 
+        // In the order they are held in: the ones the order names as it
+        // names them, then the others by what they move.
+        let order = self.envelope_order();
+        automation.sort_by(|a: &AutomationLane, b: &AutomationLane| order(&a.target, &b.target));
+
         // The devices into their chains, in their order.
         let mut master_devices: Vec<(f64, Device)> = Vec::new();
         let mut chains: Vec<Vec<(f64, Device)>> = tracks.iter().map(|_| Vec::new()).collect();
@@ -442,7 +483,7 @@ impl Doc {
         project.master.devices = in_order(master_devices);
         project.automation = automation;
         project.markers = markers;
-        Derived { project, aside }
+        Derived { project, aside, displaced }
     }
 
     /// What is held alive and is not in the song because the thing it is

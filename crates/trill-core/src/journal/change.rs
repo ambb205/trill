@@ -351,9 +351,13 @@ fn same_track(a: &Track, b: &Track) -> bool {
         clips: _,
         profile,
         reference,
+        input,
+        takes,
     } = a;
     *id == b.id
         && *reference == b.reference
+        && *input == b.input
+        && *takes == b.takes
         && *name == b.name
         && *kind == b.kind
         && *group == b.group
@@ -383,6 +387,8 @@ fn track_of(track: &Track) -> Track {
         clips: _,
         profile,
         reference,
+        input,
+        takes,
     } = track;
     Track {
         id: *id,
@@ -399,6 +405,10 @@ fn track_of(track: &Track) -> Track {
         clips: Vec::new(),
         profile: profile.clone(),
         reference: reference.clone(),
+        // The takes are a track's own, with its settings: recordings
+        // beside it, each a few words and a path.
+        input: *input,
+        takes: takes.clone(),
     }
 }
 

@@ -68,6 +68,12 @@ pub enum Command {
     MakingOf,
     /// Starts a take, or ends the one being recorded.
     Record,
+    /// Arms the selected track for recording, or disarms it.
+    ArmTrack,
+    /// Records only inside the loop's stretch, or everywhere again.
+    TogglePunch,
+    /// Unfolds the takes kept beside the selected track, or folds them away.
+    ToggleTakes,
     AudioSettings,
     Setup,
     ShowShortcuts,
@@ -250,6 +256,30 @@ pub const BINDINGS: &[Binding] = &[
     ),
     bind(Command::TogglePlay, NONE, Key::Space, When::NotTyping, Section::Transport, "Play or stop"),
     bind(Command::Record, NONE, Key::F9, When::NotTyping, Section::Transport, "Record, or end the take"),
+    bind(
+        Command::ArmTrack,
+        SHIFT,
+        Key::F9,
+        When::NotTyping,
+        Section::Transport,
+        "Arm the selected track for recording, or disarm it",
+    ),
+    bind(
+        Command::TogglePunch,
+        NONE,
+        Key::P,
+        When::NotTyping,
+        Section::Transport,
+        "Punch in: record only inside the loop\u{2019}s stretch",
+    ),
+    bind(
+        Command::ToggleTakes,
+        NONE,
+        Key::T,
+        When::NotTyping,
+        Section::Tracks,
+        "Show or fold away the takes kept beside the track",
+    ),
     bind(Command::Rewind, NONE, Key::Home, When::NotTyping, Section::Transport, "Return to the start"),
     bind(Command::ToggleLoop, NONE, Key::L, When::NotTyping, Section::Transport, "Loop on or off"),
     bind(Command::ToggleMetronome, NONE, Key::K, When::NotTyping, Section::Transport, "Metronome on or off"),

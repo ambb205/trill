@@ -46,7 +46,7 @@
 //! it, and a file written before there was one simply has none.
 
 use crate::ids::{ClipId, DeviceId, TrackId};
-use crate::project::{ClipContent, Device, EditError, Project};
+use crate::project::{Clip, ClipContent, Device, EditError, Project};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -152,6 +152,18 @@ impl Project {
                     }),
                 });
             }
+            // A take's recording is the song's too, played or not: one
+            // that is gone is missed, and looked for, like any other.
+            for take in &track.takes {
+                let Some(audio) = take.clip.audio() else { continue };
+                uses.push(FileUse {
+                    place: FilePlace::Clip(take.clip.id),
+                    path: audio.path.clone(),
+                    track: Some(track.id),
+                    name: take.clip.name.clone(),
+                    reach_seconds: Some(audio.offset_seconds + take.clip.length * audio.seconds_per_beat(self.tempo)),
+                });
+            }
             of_devices(&track.devices, Some(track.id), &mut uses);
         }
         of_devices(&self.master.devices, None, &mut uses);
@@ -191,7 +203,7 @@ impl Project {
 
         // Everything is looked at before anything is changed.
         for (id, path) in &clips {
-            let clip = self.clip(*id)?;
+            let clip = self.recording(*id)?;
             let Some(audio) = clip.audio() else {
                 return invalid(format!("{id} ({}) is a MIDI clip: it plays no file", clip.name));
             };
@@ -228,7 +240,7 @@ impl Project {
         }
 
         for (id, path) in clips {
-            if let ClipContent::Audio(audio) = &mut self.clip_mut(id)?.content {
+            if let ClipContent::Audio(audio) = &mut self.recording_mut(id)?.content {
                 audio.path = path.to_owned();
             }
         }
@@ -236,6 +248,23 @@ impl Project {
             self.device_mut(id)?.state = Some(state);
         }
         Ok(changed)
+    }
+}
+
+impl Project {
+    /// A clip of a track, or a take kept beside one: whichever has `id`.
+    /// Both name a file, and both are found by the place that names it.
+    fn recording(&self, id: ClipId) -> Result<&Clip, EditError> {
+        let takes = self.tracks.iter().flat_map(|track| track.takes.iter().map(|take| &take.clip));
+        self.clip(id).or_else(|missing| takes.clone().find(|clip| clip.id == id).ok_or(missing))
+    }
+
+    fn recording_mut(&mut self, id: ClipId) -> Result<&mut Clip, EditError> {
+        if self.clip(id).is_ok() {
+            return self.clip_mut(id);
+        }
+        let takes = self.tracks.iter_mut().flat_map(|track| track.takes.iter_mut().map(|take| &mut take.clip));
+        takes.into_iter().find(|clip| clip.id == id).ok_or(EditError::ClipNotFound(id))
     }
 }
 

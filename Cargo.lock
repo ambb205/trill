@@ -4919,6 +4919,7 @@ dependencies = [
  "trill-dsp",
  "trill-media",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -4969,6 +4970,7 @@ dependencies = [
  "anyhow",
  "axum",
  "log",
+ "parking_lot",
  "rmcp",
  "serde",
  "serde_json",

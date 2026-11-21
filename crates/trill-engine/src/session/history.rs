@@ -29,6 +29,17 @@ pub(super) struct Done {
 }
 
 impl Done {
+    /// Every value the step set a property from or to.
+    pub fn ops(&self) -> impl Iterator<Item = &Op> {
+        self.records.iter().flat_map(|record| [&record.before, &record.after])
+    }
+
+    /// [`Done::ops`], to change them: for what names a file by another
+    /// name from here on.
+    pub fn ops_mut(&mut self) -> impl Iterator<Item = &mut Op> {
+        self.records.iter_mut().flat_map(|record| [&mut record.before, &mut record.after])
+    }
+
     /// What the parts of a change that were taken in did.
     pub fn of(won: &[Won]) -> Done {
         let mut records = Vec::new();

@@ -188,6 +188,11 @@ pub enum ClipOp {
     Set(ClipSet),
     Midi(MidiSet),
     Audio(AudioSet),
+    /// Where on its track it is: in a lane beside the track's clips, as a
+    /// take that is kept and not played from there, or with `None` among
+    /// the clips the track plays. A clip that is made is among the clips
+    /// until this says otherwise.
+    Lane(Option<u32>),
 }
 
 /// What a change does to a note.
@@ -247,6 +252,10 @@ pub enum Op {
     /// Points made in an envelope or a curve.
     Points(Home, Vec<AutomationPoint>),
     Point(Home, u64, PointOp),
+    /// The order the song's envelopes are held in: one property, the
+    /// whole list. An envelope it does not name comes after the ones it
+    /// names.
+    Envelopes(Vec<AutomationTarget>),
 }
 
 /// The property that says whether a thing is there.
@@ -261,6 +270,9 @@ pub const LISTENING: u8 = 3;
 /// What a thing is for good: a track's kind, a device's type, whether a
 /// clip holds notes or audio. Said when the thing is made.
 pub const KIND: u8 = 4;
+/// The property that says whether a clip is a take kept beside its track,
+/// and in which lane.
+pub const LANE: u8 = 5;
 
 /// One property: what a change sets, and what the later of two changes
 /// wins.
@@ -281,6 +293,8 @@ pub enum Key {
     Param(DeviceId, String),
     Lane(AutomationTarget, u8),
     Point(Home, u64, u8),
+    /// The order of the song's envelopes.
+    Envelopes,
 }
 
 /// Something a song holds that has an id.
@@ -311,7 +325,8 @@ impl Key {
             | Key::Meter(_)
             | Key::Send(..)
             | Key::Param(..)
-            | Key::Lane(..) => return None,
+            | Key::Lane(..)
+            | Key::Envelopes => return None,
         })
     }
 
@@ -321,9 +336,26 @@ impl Key {
             Key::Song(prop) => {
                 *prop == SongSet::Loop(crate::LoopRegion { enabled: false, start: 0.0, end: 1.0 }).prop()
             }
-            Key::Track(_, prop) => *prop == LISTENING || *prop == TrackSet::Solo(false).prop(),
+            Key::Track(_, prop) => {
+                *prop == LISTENING || *prop == TrackSet::Solo(false).prop() || *prop == TrackSet::Input(None).prop()
+            }
             _ => false,
         }
+    }
+}
+
+impl Change {
+    /// The change as it is said to another program: without what is one's
+    /// own listening and this machine's. `None` where nothing of it is
+    /// anyone else's.
+    pub fn impersonal(mut self) -> Option<Change> {
+        self.ops.retain(|op| !op.is_personal());
+        for op in &mut self.ops {
+            if let Op::Track(_, TrackOp::Whole(track, _)) = op {
+                **track = doc::impersonal((**track).clone());
+            }
+        }
+        (!self.ops.is_empty()).then_some(self)
     }
 }
 
@@ -375,6 +407,8 @@ impl Op {
             Op::Clip(id, ClipOp::Set(set)) => Key::Clip(*id, set.prop()),
             Op::Clip(id, ClipOp::Midi(set)) => Key::Clip(*id, set.prop()),
             Op::Clip(id, ClipOp::Audio(set)) => Key::Clip(*id, set.prop()),
+            Op::Clip(id, ClipOp::Lane(_)) => Key::Clip(*id, LANE),
+            Op::Envelopes(_) => Key::Envelopes,
             Op::Note(clip, id, NoteOp::Alive(_)) => Key::Note(*clip, *id, ALIVE),
             Op::Note(clip, id, NoteOp::Set(set)) => Key::Note(*clip, *id, set.prop()),
             Op::Device(id, DeviceOp::Alive(_)) => Key::Device(*id, ALIVE),

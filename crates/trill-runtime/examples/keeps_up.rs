@@ -46,6 +46,11 @@
 //! --no-device-lanes   leaves out the lines that move devices' parameters, here and
 //!                     for this run only: with them a song's blocks end every 256
 //!                     frames, so this says what that costs
+//! --monitor <n>       adds n tracks to the song as it is held here, each hearing a
+//!                     channel of an input always: the stand-in's own, which hears a
+//!                     quiet tone and is handed over by a thread of its own, as a
+//!                     device's is. No microphone is opened. Says what an input that
+//!                     is heard costs the song
 //! ```
 //!
 //! The song is read and never written. It opens with the plugins that are
@@ -58,7 +63,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::project::{AutomationLane, AutomationPoint, AutomationTarget};
-use trill_core::{ChainRef, Note, TrackKind};
+use trill_core::{ChainRef, Monitoring, Note, TrackInput, TrackKind};
 use trill_engine::host::{AudioHost, NullHost, SystemHost};
 use trill_engine::{AudioBackend, Session};
 use trill_plugins::Scanner;
@@ -78,13 +83,15 @@ struct Options {
     seconds: Option<f64>,
     plugins: bool,
     device_lanes: bool,
+    /// How many tracks that hear an input are added to the song.
+    monitor: usize,
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     let [song, rest @ ..] = arguments else {
         return Err("usage: keeps_up <song.trill> [--profile <folder>] [--device] [--buffer <frames>] [--rate <hz>] \
                     [--threads <n>] [--always] [--from <beat>] [--seconds <s>] [--play-at-once] [--no-plugins] \
-                    [--no-device-lanes]"
+                    [--no-device-lanes] [--monitor <n>]"
             .to_string());
     };
     let mut options = Options {
@@ -101,6 +108,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         seconds: None,
         plugins: true,
         device_lanes: true,
+        monitor: 0,
     };
     let mut rest = rest.iter();
     while let Some(name) = rest.next() {
@@ -121,10 +129,16 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     "--threads" => options.threads = Some((number()? as usize).max(1)),
                     "--from" => options.from = number()?,
                     "--seconds" => options.seconds = Some(number()?),
+                    "--monitor" => options.monitor = (number()? as usize).min(16),
                     other => return Err(format!("there is no option '{other}'")),
                 }
             }
         }
+    }
+    if options.device && options.monitor > 0 {
+        return Err(
+            "--monitor is for the stand-in, whose input is made up: with --device no input is opened".to_string()
+        );
     }
     if options.device && (options.buffer.is_some() || options.rate.is_some()) {
         return Err(
@@ -243,7 +257,15 @@ fn run(options: &Options) -> Result<(), String> {
         true => Arc::new(SystemHost::unheard()),
         // A device that asks as a real one does, at the priority a real
         // one has, and plays nothing.
-        false => Arc::new(NullHost::like_a_device(stand_in_rate, options.buffer.unwrap_or(480))),
+        false => {
+            let stand_in = NullHost::like_a_device(stand_in_rate, options.buffer.unwrap_or(480));
+            match options.monitor {
+                0 => Arc::new(stand_in),
+                // And an input of its own that hears a quiet tone: no
+                // microphone is opened.
+                tracks => Arc::new(stand_in.with_input(tracks as u16)),
+            }
+        }
     };
     let parts = Parts { audio: Some(device), ..Parts::default() };
     let runtime = Runtime::start_custom(runtime_options, parts).map_err(|error| error.to_string())?;
@@ -300,6 +322,39 @@ fn run(options: &Options) -> Result<(), String> {
         if options.at_once {
             session.seek(options.from);
             session.play();
+        }
+        if options.monitor > 0 {
+            // Whoever asked for --monitor is the hand that switches it on.
+            let _hand = trill_engine::hand::by_hand();
+            // In the song as it is held here, which is never written: a
+            // track for each channel of the stand-in's input, heard always.
+            let tracks = options.monitor;
+            let edited = session.edit(|project| {
+                let mut added = Vec::new();
+                for channel in 1..=tracks as u16 {
+                    let track = project.add_track(format!("Input {channel}"));
+                    let input = TrackInput { channel, stereo: false, monitor: Monitoring::Always };
+                    project.set_track_input(track, Some(input))?;
+                    project.set_track_volume(track, -30.0)?;
+                    added.push(track);
+                }
+                Ok(added)
+            });
+            // A track that is new is held, whoever made it: the click on
+            // its switch is what lets it be heard.
+            for track in edited.map_err(|error| error.to_string())? {
+                session.let_input_be_heard(track).map_err(|error| error.to_string())?;
+            }
+            session.ready_input().map_err(|error| error.to_string())?;
+            let open = session.input_status().open.ok_or("the stand-in's input did not open")?;
+            println!(
+                "added: {tracks} track(s) that hear an input always ('{}', {} channel(s), {} frames a buffer, on a clock \
+                 of its own, read {:.1} ms after it was heard)",
+                open.device,
+                open.channels,
+                open.buffer_frames,
+                f64::from(open.delay_frames) * 1000.0 / f64::from(stand_in_rate)
+            );
         }
         if !options.device_lanes {
             // In the song as it is held here, which is never written.

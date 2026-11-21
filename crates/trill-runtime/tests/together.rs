@@ -38,7 +38,7 @@ fn text(runtime: &Runtime) -> String {
     song.count_ids_from(0);
     song.loop_region.enabled = false;
     for track in &mut song.tracks {
-        track.solo = false;
+        (track.solo, track.input) = (false, None);
     }
     song.to_json()
 }

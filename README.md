@@ -22,7 +22,7 @@ Trill is an early build and has only been run on Windows. [Status](docs/status.m
 ## What is in it
 
 - **A full arrangement**: audio and MIDI clips, a piano roll, a mixer, groups and returns, automation, tempo and
-  time-signature changes, MIDI recording, WAV and stem export.
+  time-signature changes, recording of notes and of audio with takes, WAV and stem export.
   ([The window](docs/window.md), [the engine](docs/engine.md))
 - **Built-in instruments and effects**: a poly synth, a wavetable synth with a bank of 82 sounds, a drum machine,
   a sampler, a drum rack, a player for sampled instruments in SFZ format, and thirteen effects.
@@ -73,6 +73,7 @@ Start with `--demo` and press `Space` to play. `F1` lists every keyboard shortcu
 | Write notes | Double-click a lane to create a clip, then click in the piano roll below it |
 | Play an instrument | Plug in a MIDI keyboard, or press `Ctrl+K` to play from the computer keyboard |
 | Record what you play | Arm a track and press `F9` |
+| Record a voice or an instrument | Right-click a track, choose an input under *Records*, arm it and press `F9` |
 | Choose the audio device | `Ctrl+,`, or click the device in the status bar |
 | Export the song | File > Export WAV |
 | Get instruments and study models | File > Setup |

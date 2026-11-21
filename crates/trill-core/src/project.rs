@@ -11,6 +11,7 @@ use crate::ids::{ClipId, DeviceId, TrackId};
 use crate::instrument::InstrumentProfile;
 use crate::midi_file::{MidiFile, MidiTrack};
 use crate::presets::{PresetInfo, PresetRef};
+use crate::takes::{Take, TrackInput};
 use crate::tempo::{MeterChange, MeterMap, SAME_BEAT, TempoChange, TempoMap};
 use crate::time::{Beats, TimeSignature};
 use crate::travel::Travel;
@@ -328,6 +329,14 @@ pub struct AudioContent {
     /// recording as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub looped: Option<AudioLoop>,
+    /// Whether the clip's start is faded across the end of the audio clip
+    /// of its track that ends where it starts: each is played a moment
+    /// into the other's time, one going as the other comes, so that the
+    /// seam neither dips nor clicks. That is how the pieces of a comp meet
+    /// ([`Project::comp_take`]). It says nothing where no clip ends there,
+    /// and a file saved before there were comps has none.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub crossfade: bool,
 }
 
 /// A stretch of a recording that an audio clip plays round: where it
@@ -489,7 +498,7 @@ impl ClipContent {
     /// Moves the point where playback starts `beats` later in the content
     /// (earlier when negative), as trimming a clip's left edge does. `at` is
     /// where the clip starts in the song, whose tempo is `map`.
-    fn advance(&mut self, beats: Beats, at: Beats, map: &TempoMap) {
+    pub(crate) fn advance(&mut self, beats: Beats, at: Beats, map: &TempoMap) {
         match self {
             ClipContent::Midi(midi) => {
                 let target = midi.start_offset + beats;
@@ -1026,6 +1035,15 @@ pub struct Track {
     /// there were any has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<Reference>,
+    /// What the track records, where that is an input of the audio device
+    /// ([`TrackInput`]). Without one it records what a keyboard plays, as
+    /// every track of a file saved before does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<TrackInput>,
+    /// The recordings kept beside the track's clips, in lanes, and never
+    /// played from there: see [`takes`](crate::takes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<Take>,
 }
 
 impl Track {
@@ -1468,7 +1486,7 @@ impl Project {
         }
     }
 
-    fn alloc_id(&mut self) -> u64 {
+    pub(crate) fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -1525,6 +1543,8 @@ impl Project {
                 }
             }
             sort_clips(&mut track.clips);
+            // Takes in the order they were made, which their ids say.
+            track.takes.sort_by_key(|take| take.clip.id);
             track.sends.sort_by_key(|send| send.to);
         }
         for lane in &mut self.automation {
@@ -1533,7 +1553,6 @@ impl Project {
                 settle_points(&mut lane.points, was.map(|was| &was.points[..]), &mut next);
             }
         }
-        self.automation.sort_by(|a, b| a.target.cmp(&b.target));
         let mut seen = std::collections::HashSet::new();
         for marker in &mut self.markers {
             if marker.id == 0 || !seen.insert(marker.id) {
@@ -1780,6 +1799,8 @@ impl Project {
             clips: Vec::new(),
             profile: InstrumentProfile::default(),
             reference: None,
+            input: None,
+            takes: Vec::new(),
         });
         id
     }
@@ -1958,6 +1979,9 @@ impl Project {
         copy.solo = false;
         for clip in &mut copy.clips {
             clip.id = ClipId(self.alloc_id());
+        }
+        for take in &mut copy.takes {
+            take.clip.id = ClipId(self.alloc_id());
         }
         // Old device id to new, so the copy's automation follows its own devices.
         let mut devices = Vec::with_capacity(copy.devices.len());

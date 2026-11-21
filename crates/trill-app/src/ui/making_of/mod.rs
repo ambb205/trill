@@ -636,7 +636,7 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
 
 /// The bar along the bottom: what this is, how much of it there is, whose
 /// marks are whose, and what the pointer is over.
-pub fn status(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) {
+pub fn status(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf, input_live: Option<&str>) {
     let bar = ui.max_rect();
     let painter = ui.painter().clone();
     painter.rect_filled(bar, 0.0, theme.panel);
@@ -648,6 +648,16 @@ pub fn status(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) {
         *x += text::paint(&painter, rest(*x), Align2::LEFT_CENTER, theme.text.micro, words, theme.ink_faint) + 16.0;
     };
     word(&mut x, theme.signal, "Making of");
+    if let Some(device) = input_live {
+        // An input that is open is live whatever the window shows: the
+        // song's own status bar, which says so, is not on screen here.
+        let words = format!("Input live \u{00B7} {device}");
+        x = paint::dot(&painter, pos2(x, bar.center().y), theme.metric.dot, theme.signal) + 5.0;
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
+        let _ = rect;
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &words));
+        x += text::paint(&painter, rest(x), Align2::LEFT_CENTER, theme.text.micro, &words, theme.signal) + 16.0;
+    }
     let Some(watching) = making_of.watching_mut() else { return };
     // Whose marks are whose, for the authors this session had.
     let mut authors: Vec<&Author> = Vec::new();

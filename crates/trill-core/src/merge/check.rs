@@ -25,6 +25,8 @@ pub const MAX_STATE_BYTES: usize = 64 << 20;
 /// How many parts one change may have, and how many notes or points one
 /// part.
 pub const MAX_OPS: usize = 200_000;
+/// The highest lane of takes beside a track.
+pub const MAX_LANE: u32 = 4095;
 /// How far above the count this program has seen a change may say it was
 /// made: beyond it the count could be run out.
 const CLOCK_AHEAD: u64 = 1 << 40;
@@ -240,7 +242,7 @@ fn track(mut track: Track) -> Result<Track, Refused> {
         text(study)?;
     }
     // What a track holds is made apart, and what is one's own is not said.
-    (track.clips, track.devices) = (Vec::new(), Vec::new());
+    (track.clips, track.devices, track.takes) = (Vec::new(), Vec::new(), Vec::new());
     Ok(impersonal(track))
 }
 
@@ -344,6 +346,17 @@ impl Op {
                             small(&profile, "what a track's notes mean")?;
                             TrackSet::Profile(profile)
                         }
+                        TrackSet::Input(input) => {
+                            // (One's own, and refused of anyone else: held
+                            // to what the edit takes all the same.)
+                            if let Some(input) = input {
+                                let last = input.channel.saturating_add(u16::from(input.stereo));
+                                if input.channel == 0 || last > crate::takes::MAX_INPUT_CHANNEL {
+                                    return refused(format!("{} is no input of an audio device", input.said()));
+                                }
+                            }
+                            TrackSet::Input(input)
+                        }
                         set @ (TrackSet::Mute(_) | TrackSet::Solo(_)) => set,
                     }),
                     part @ (TrackOp::Alive(_) | TrackOp::Listening(_)) => part,
@@ -363,7 +376,10 @@ impl Op {
                         clip(whole)?;
                     }
                     ClipOp::Track(on) => id(on.0)?,
-                    ClipOp::Alive(_) | ClipOp::Set(ClipSet::Muted(_)) => {}
+                    ClipOp::Lane(Some(lane)) if *lane > MAX_LANE => {
+                        return refused(format!("lane {lane} beside a track: more than {MAX_LANE}"));
+                    }
+                    ClipOp::Lane(_) | ClipOp::Alive(_) | ClipOp::Set(ClipSet::Muted(_)) => {}
                     ClipOp::Set(ClipSet::Name(name)) => text(name)?,
                     ClipOp::Set(ClipSet::Start(start)) => position(*start, "a clip")?,
                     ClipOp::Set(ClipSet::Length(length)) => validate_span(0.0, *length)?,
@@ -432,6 +448,15 @@ impl Op {
                     finite(set, "a parameter")?;
                 }
                 Op::Param(of, name, set)
+            }
+            Op::Envelopes(order) => {
+                if order.len() > MAX_OPS {
+                    return refused(format!("the order of {} envelopes at once", order.len()));
+                }
+                for target in &order {
+                    small(target, "what an envelope moves")?;
+                }
+                Op::Envelopes(order)
             }
             Op::Lane(target, set) => {
                 small(&target, "what an envelope moves")?;

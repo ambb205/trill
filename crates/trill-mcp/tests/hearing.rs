@@ -436,7 +436,28 @@ async fn a_plugin_that_takes_its_process_down_costs_the_call_an_error_that_says_
     let client = &fixture.client;
     let (bass, _, _) = two_part_song(client).await;
     let folder = tempfile::tempdir().unwrap();
-    let before = ok(client, "get_project", json!({})).await;
+    // The song, without the notes that its devices may still be reading
+    // what they play (one for the song and one on each such device): they
+    // are of the moment and go by themselves, sooner or later as the
+    // machine is busy, and are no part of the song.
+    fn song(mut reply: Value) -> Value {
+        match &mut reply {
+            Value::Object(fields) => {
+                fields.remove("loading");
+                for field in fields.values_mut() {
+                    *field = song(field.take());
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    *item = song(item.take());
+                }
+            }
+            _ => {}
+        }
+        reply
+    }
+    let before = song(ok(client, "get_project", json!({})).await);
 
     let refused = call(client, "measure", json!({})).await.unwrap_err();
     assert!(refused.contains("the measurement was taken down while it was being played"), "{refused}");
@@ -448,7 +469,7 @@ async fn a_plugin_that_takes_its_process_down_costs_the_call_an_error_that_says_
     assert!(refused.contains("what it had begun to write was removed"), "{refused}");
     assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0, "nothing was written");
     // The song is what it was, and the server goes on serving it.
-    assert_eq!(ok(client, "get_project", json!({})).await, before);
+    assert_eq!(song(ok(client, "get_project", json!({})).await), before);
     // A probe plays the instrument's notes while the song stands still,
     // which this bass lives through: in a process of its own as well.
     let probed = ok(client, "probe", json!({ "track": bass, "notes": [40, 43] })).await;
