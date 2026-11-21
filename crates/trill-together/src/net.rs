@@ -10,7 +10,7 @@
 //! falls too far behind is let go of.
 
 use crate::invite::Invitation;
-use crate::secure::{Broken, Hearer, Sayer, secure};
+use crate::point::MeetingPoint;
 use crate::wire::{MAX_MESSAGE, Message};
 use std::collections::HashMap;
 use std::io;
@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use trill_meet::secure::{Broken, Hearer, Sayer, secure};
+use trill_meet::{Holding, Key, Meeting, Ticket};
 
 /// Which connection.
 pub type LinkId = u64;
@@ -37,6 +39,13 @@ const CONNECTING: Duration = Duration::from_secs(8);
 /// seconds at the most), on a thread of its own: whoever opens many
 /// without it gets no more threads than this.
 const MAX_MEETING: usize = 16;
+/// How long a meeting point that could not be reached, or was lost, is
+/// left alone before it is tried again: this long the first time and
+/// twice as long each time after, up to the longest.
+const FIRST_PAUSE: Duration = Duration::from_secs(1);
+const LONGEST_PAUSE: Duration = Duration::from_secs(20);
+/// How often the thread that holds a meeting looks whether it is to stop.
+const LOOKING: Duration = Duration::from_millis(100);
 
 /// Where to listen.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -71,12 +80,24 @@ pub enum Event {
     Failed {
         why: String,
     },
+    /// The meeting this program shares through is open at the meeting
+    /// point: whoever has the invitation gets in.
+    Held,
+    /// It is not, and why. With `again` this program goes on trying by
+    /// itself, and a [`Event::Held`] follows when it has it back; without,
+    /// something has to be changed first (the key, the address) and
+    /// nothing is listened for any more.
+    Unheld {
+        why: String,
+        again: bool,
+    },
 }
 
 /// One connection, as the program that drives the song holds it.
 struct Link {
     say: Sender<Arc<Vec<u8>>>,
-    socket: TcpStream,
+    /// The connection's one handle, to end it by.
+    socket: Arc<TcpStream>,
     /// How many bytes wait to be said.
     waiting: Arc<AtomicUsize>,
 }
@@ -84,6 +105,108 @@ struct Link {
 struct Listening {
     invitation: Invitation,
     stop: Arc<AtomicBool>,
+    /// For a meeting held at a meeting point: where the thread that holds
+    /// it says that it has ended it there.
+    ended: Option<Receiver<()>>,
+}
+
+/// What the thread that holds a meeting at a meeting point has.
+struct Hold {
+    address: String,
+    key: Key,
+    meeting: Meeting,
+    /// What the two programs prove to each other: the invitation's.
+    proved_by: [u8; 32],
+    stop: Arc<AtomicBool>,
+    /// How many knocks are being taken up and proved at the moment.
+    proving: Arc<AtomicUsize>,
+    links: Arc<Mutex<HashMap<LinkId, Link>>>,
+    last: Arc<AtomicU64>,
+    happened: Sender<Event>,
+}
+
+impl Hold {
+    /// Holds the meeting open until it is told to stop: lost, it is
+    /// opened again, after a pause that grows.
+    fn run(self) {
+        let mut pause = FIRST_PAUSE;
+        while !self.stop.load(Ordering::Relaxed) {
+            let turned = match Holding::open(&self.address, &self.key, self.meeting) {
+                Ok(mut holding) => {
+                    pause = FIRST_PAUSE;
+                    let _ = self.happened.send(Event::Held);
+                    let mut spent = false;
+                    loop {
+                        if self.stop.load(Ordering::Relaxed) {
+                            // Whoever asks from here on is told it is over.
+                            holding.close();
+                            return;
+                        }
+                        match holding.next(LOOKING) {
+                            Ok(Some(ticket)) => self.take(ticket),
+                            Ok(None) => {}
+                            Err(turned) => break turned,
+                        }
+                        if holding.spent() != spent {
+                            spent = holding.spent();
+                            let _ = self.happened.send(match spent {
+                                true => Event::Unheld { why: trill_meet::No::Spent.sentence().to_owned(), again: true },
+                                false => Event::Held,
+                            });
+                        }
+                    }
+                }
+                Err(turned) => turned,
+            };
+            if self.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let again = !turned.for_good();
+            let _ = self.happened.send(Event::Unheld { why: turned.sentence(), again });
+            if !again {
+                return;
+            }
+            let until = Instant::now() + pause;
+            while Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
+                std::thread::sleep(LOOKING);
+            }
+            pause = (pause * 2).min(LONGEST_PAUSE);
+        }
+    }
+
+    /// Someone asked the meeting point for this meeting: a connection to
+    /// them is taken up, through it, and they prove the invitation over it
+    /// as on a connection of their own, on a thread of its own.
+    fn take(&self, ticket: Ticket) {
+        // (As many as may be proving who they are: this one is let go of,
+        // and the meeting point tells it that nobody answered in time.)
+        if self.proving.load(Ordering::Relaxed) >= MAX_MEETING {
+            return;
+        }
+        let (address, proved_by, proving) = (self.address.clone(), self.proved_by, self.proving.clone());
+        let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
+        proving.fetch_add(1, Ordering::Relaxed);
+        let met = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
+            let secured = match trill_meet::client::take(&address, ticket) {
+                Ok(stream) => secure(stream, &proved_by, false).map_err(|broken| broken.to_string()),
+                Err(turned) => Err(turned.sentence()),
+            };
+            proving.fetch_sub(1, Ordering::Relaxed);
+            match secured {
+                Ok(pair) => {
+                    if let Err(error) = open(pair, false, &links, &last, &happened) {
+                        log::warn!("a program that connected could not be heard: {error}");
+                    }
+                }
+                // Someone without the invitation: nothing is said of it
+                // to anyone but the log.
+                Err(why) => log::info!("a connection through the meeting point was not taken: {why}"),
+            }
+        });
+        if met.is_err() {
+            self.proving.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The connections of one program.
@@ -116,14 +239,14 @@ fn open(
     happened: &Sender<Event>,
 ) -> io::Result<()> {
     let link = last.fetch_add(1, Ordering::Relaxed) + 1;
-    let socket = hearer.socket()?;
+    let socket = hearer.socket();
     let (say, to_say) = channel::<Arc<Vec<u8>>>();
     let waiting = Arc::new(AtomicUsize::new(0));
-    links.lock().unwrap().insert(link, Link { say, socket: socket.try_clone()?, waiting: waiting.clone() });
+    links.lock().unwrap().insert(link, Link { say, socket: socket.clone(), waiting: waiting.clone() });
     // Open is said before anything can be heard.
     let _ = happened.send(Event::Open { link, joined });
 
-    let saying_socket = socket.try_clone()?;
+    let saying_socket = socket.clone();
     std::thread::Builder::new().name("trill-together-say".into()).spawn(move || {
         for message in to_say {
             let said = sayer.say(&message);
@@ -255,7 +378,41 @@ impl Net {
                 }
             }
         })?;
-        self.listening = Some(Listening { invitation: invitation.clone(), stop });
+        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: None });
+        Ok(invitation)
+    }
+
+    /// Shares through a meeting point, and returns the invitation, which
+    /// carries the meeting point's address. Nothing listens: this program
+    /// connects outward, holds a meeting open there with the key its
+    /// keeper gave, and takes up a connection through it for whoever asks
+    /// for the meeting. Whether the meeting is open there follows as an
+    /// [`Event::Held`] or an [`Event::Unheld`]; lost, it is opened again
+    /// by itself. A program that shares already goes on under the
+    /// invitation it has.
+    pub fn listen_through(&mut self, point: &MeetingPoint) -> io::Result<Invitation> {
+        if let Some(listening) = &self.listening {
+            return Ok(listening.invitation.clone());
+        }
+        let invitation = Invitation::through(point.host.clone(), point.port)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let hold = Hold {
+            address: point.address(),
+            key: point.key.clone(),
+            meeting: invitation.meeting(),
+            proved_by: invitation.key(),
+            stop: stop.clone(),
+            proving: Arc::default(),
+            links: self.links.clone(),
+            last: self.last.clone(),
+            happened: self.happened.clone(),
+        };
+        let (done, ended) = channel();
+        std::thread::Builder::new().name("trill-together-hold".into()).spawn(move || {
+            hold.run();
+            let _ = done.send(());
+        })?;
+        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: Some(ended) });
         Ok(invitation)
     }
 
@@ -264,11 +421,19 @@ impl Net {
         self.listening.as_ref().map(|listening| &listening.invitation)
     }
 
-    /// Stops listening: the port is closed, and the invitation is no
-    /// longer one. The programs that are connected stay.
+    /// Stops listening: the port is closed, or the meeting ended at its
+    /// meeting point, and the invitation is no longer one. The programs
+    /// that are connected stay.
     pub fn stop_listening(&mut self) {
         if let Some(listening) = self.listening.take() {
             listening.stop.store(true, Ordering::Relaxed);
+            // A meeting is ended where it is held, so that whoever asks
+            // for it is told that it is over and not that its holder is
+            // away: waited for, a moment, because a program that is being
+            // closed ends before a thread of its own has said so.
+            if let Some(ended) = listening.ended {
+                let _ = ended.recv_timeout(Duration::from_secs(1));
+            }
         }
     }
 
@@ -282,6 +447,23 @@ impl Net {
             let connect = || -> Result<(), String> {
                 use std::net::ToSocketAddrs;
                 let address = invitation.address();
+                if invitation.meet {
+                    // Through the meeting point the invitation names: it
+                    // is asked for the meeting, and what comes back is a
+                    // connection to the program that shares, over which
+                    // the two prove the invitation as they would directly.
+                    let stream =
+                        trill_meet::client::join(&address, invitation.meeting()).map_err(|turned| turned.sentence())?;
+                    let pair = secure(stream, &invitation.key(), true).map_err(|broken| match broken {
+                        Broken::Io(_) | Broken::NotTrusted => {
+                            "the program that shares the song did not answer through \
+                                                               the meeting point: its connection may have just dropped"
+                                .to_owned()
+                        }
+                        broken => broken.to_string(),
+                    })?;
+                    return open(pair, true, &links, &last, &happened).map_err(|error| error.to_string());
+                }
                 let found = address.to_socket_addrs().map_err(|error| format!("{address} is no address: {error}"))?;
                 let mut last_error = format!("{address} is no address");
                 for candidate in found {
@@ -404,6 +586,15 @@ impl Net {
         let mut events = std::mem::take(&mut self.early);
         events.extend(self.events.try_iter());
         events
+    }
+
+    /// Waits `at_most` so long for the next thing that happened, and
+    /// returns it alone: what happened after it stays to be asked for.
+    pub fn next(&mut self, at_most: Duration) -> Option<Event> {
+        match self.early.is_empty() {
+            true => self.events.recv_timeout(at_most).ok(),
+            false => Some(self.early.remove(0)),
+        }
     }
 
     /// Waits until something has happened, `at_most` so long: it is there

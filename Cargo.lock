@@ -5005,6 +5005,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-meet"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "sha2",
+ "snow",
+]
+
+[[package]]
 name = "trill-noir"
 version = "0.1.0"
 dependencies = [
@@ -5113,8 +5122,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "snow",
  "trill-core",
+ "trill-meet",
 ]
 
 [[package]]

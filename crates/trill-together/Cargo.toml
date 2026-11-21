@@ -8,21 +8,14 @@ license.workspace = true
 
 [dependencies]
 trill-core.workspace = true
+# The connection only holders of a secret can use (the Noise protocol,
+# through the `snow` library: no cipher is written here or there), and
+# the half of a meeting point that a Trill speaks. The crate has nothing
+# of Trill in it: it is also what a keeper builds for a server.
+trill-meet.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# The Noise protocol: who may connect is proved, and what is said is
-# encrypted and authenticated, by a library that does that and nothing
-# else. No cipher is written here. Only the pieces one handshake needs
-# are built: X25519, ChaCha20-Poly1305 and BLAKE2 (Apache-2.0 or MIT).
-# (Without its `std` feature, which would bring in `ring` and a second
-# SHA-2 that nothing here uses.)
-snow = { version = "0.10", default-features = false, features = [
-    "use-chacha20poly1305",
-    "use-blake2",
-    "use-curve25519",
-    "use-getrandom",
-] }
 # The secret of an invitation, from the system's own source. In the tree
 # already, through snow and others.
 getrandom = "0.3"

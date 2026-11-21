@@ -528,6 +528,9 @@ impl Driver {
                     }
                     self.shared.lock().status.revision += 1;
                 }
+                // Whether a meeting is held at a meeting point: nothing shares
+                // through one yet.
+                Event::Held | Event::Unheld { .. } => {}
                 Event::Failed { why } => {
                     if !self.joining.is_empty() {
                         self.joining.remove(0);
