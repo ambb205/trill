@@ -116,6 +116,34 @@ fn nothing_asked_at_the_door_opens_the_input_by_any_route() {
     assert!(rig.session.input_held(voice));
     settle(&mut rig);
 
+    // The user's own hand takes the door's step back and brings it back.
+    // The step was not the hand's: what it brings stays held, as it was
+    // when the door made it, and that is said again.
+    assert!(rig.session.undo(), "the door's step is taken back by hand");
+    assert!(!rig.session.input_held(voice), "there is nothing to hold: the song no longer says it is heard");
+    assert!(rig.session.redo(), "and brought back by hand");
+    assert!(rig.session.input_held(voice), "what the step brings is held all the same");
+    assert!(!rig.session.input_status().needed);
+    let said = rig.session.take_input_note().expect("it is said");
+    assert!(said.contains("the input of 'Voice' is held"), "{said}");
+    settle(&mut rig);
+    // The same with a track the hand arms in between: the door gives a
+    // track an input, the hand takes that back, arms the track while it
+    // records a keyboard, and brings the door's step back. The track is
+    // disarmed.
+    let lead = at_the_door(&mut rig.session, |session| {
+        let lead = track(session, "Lead", None);
+        session.edit(|project| project.set_track_input(lead, input(Monitoring::Armed))).unwrap();
+        lead
+    });
+    assert!(rig.session.undo());
+    rig.session.set_armed(lead, true).unwrap();
+    assert!(rig.session.redo());
+    assert!(rig.session.project().track(lead).unwrap().input.is_some() && rig.session.armed().is_empty());
+    assert!(rig.session.take_input_note().unwrap().contains("'Lead' was disarmed"));
+    settle(&mut rig);
+    assert_eq!(opens(&rig), 0, "a hand's redo of the door's step opened the input");
+
     // A track that is new: a duplicate of one that is always heard.
     let twin = at_the_door(&mut rig.session, |session| session.edit(|project| project.duplicate_track(voice)).unwrap());
     assert!(rig.session.input_held(twin) && rig.session.input_held(voice));

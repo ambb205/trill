@@ -466,12 +466,14 @@ impl Session {
     /// armed or is always monitored, a take is being recorded, a
     /// measurement runs, or somebody is looking at its level.
     fn input_needed(&self) -> bool {
-        // An armed track that records an input was made so by a hand, or
-        // it is no longer armed; one that is always heard needs the input
-        // only once a hand has let it be.
+        // Asked of what a hand let, not of what is armed or of what the
+        // song says: an armed track that records an input needs it only
+        // where a hand armed it so, and one that is always heard only
+        // once a hand has let it be. (Whatever disarms and holds the rest
+        // is not taken on trust here: see `hold_to_the_hand`.)
         let wanted = |track: &trill_core::Track| {
             track.input.is_some_and(|input| {
-                self.is_armed(track.id)
+                (self.is_armed(track.id) && self.recording.hand.open.contains(&track.id))
                     || (input.monitor == Monitoring::Always && !self.recording.hand.holds(track.id, input.monitor))
             })
         };
@@ -502,7 +504,11 @@ impl Session {
         ))
     }
 
-    /// What goes on beside the song that the graph has to know of.
+    /// What goes on beside the song that the graph has to know of. Which
+    /// inputs are heard is asked of what a hand let ([`Session::input_held`]
+    /// asks `hand.heard`), never of the song and of what is armed alone:
+    /// a track whose hearing no hand switched on is held here, whoever
+    /// forgot to hold it.
     pub(super) fn live_now(&self) -> Live {
         let held = self.project.tracks.iter().filter(|track| self.input_held(track.id)).map(|track| track.id);
         Live { armed: self.armed().iter().copied().collect(), held: held.collect() }
@@ -558,21 +564,31 @@ impl Session {
     /// what wants it: **the input is opened for a track only by the user's
     /// own hand, in this run of the program and in this song.** The hand
     /// arms a track that records an input, gives an armed track its input,
-    /// or switches its monitoring on; an undo or a redo of the hand's is
-    /// the hand's too. Nothing else opens it: not what is asked at a door
-    /// where nobody says they are the user ([`crate::hand`]), not a song
-    /// that is opened, begun or recovered, not a track that is new (a
-    /// duplicate, a paste).
+    /// or switches its monitoring on; the hand's undo or redo of a step
+    /// that the hand made, all of it, is the hand's too. Nothing else
+    /// opens it: not what is asked at a door where nobody says they are
+    /// the user ([`crate::hand`]), not the hand's undo or redo of a step
+    /// somebody else made or had a part in (the user who takes back and
+    /// brings back what the assistant did means no microphone by it), not
+    /// a song that is opened, begun or recovered, not a track that is new
+    /// (a duplicate, a paste).
     ///
     /// So an armed track that came to record an input any other way is
     /// disarmed, and an input that the song says is heard, and that no
     /// hand switched on, is held ([`Session::input_held`]).
     ///
     /// `there_before` says whether a track was in the song before what
-    /// was just done. Arming does not carry into another song, and
-    /// neither does anything a hand let: [`Session::forget_the_hand`].
-    pub(super) fn hold_to_the_hand(&mut self, there_before: &dyn Fn(TrackId) -> bool) {
-        let by_hand = crate::hand::is_by_hand();
+    /// was just done, and `by_hand` whether that was the hand's doing.
+    /// Arming does not carry into another song, and neither does anything
+    /// a hand let: [`Session::forget_the_hand`].
+    ///
+    /// What opens the input does not take this rule's having been kept on
+    /// trust: [`Session::input_needed`], the take that is begun and what
+    /// the graph is told is heard each ask what a hand let themselves. A
+    /// change that one day forgets to come by here leaves an armed track
+    /// that records nothing, which someone sees, and not an open
+    /// microphone, which nobody does.
+    pub(super) fn hold_to_the_hand(&mut self, there_before: &dyn Fn(TrackId) -> bool, by_hand: bool) {
         let mut hand = std::mem::take(&mut self.recording.hand);
         let mut disarmed: Vec<(TrackId, String)> = Vec::new();
         let mut held: Vec<String> = Vec::new();
@@ -753,11 +769,24 @@ impl Session {
         punch: Option<(f64, f64)>,
     ) -> Result<(), SessionError> {
         let refuse = |sentence: String| Err(SessionError::Recording(sentence));
-        let recorded: Vec<(TrackId, String, TrackInput)> = tracks
+        // Only for the tracks a hand armed as they record an input: the
+        // input is opened for no other, whatever is armed. One that is
+        // armed and that no hand let records nothing, and that is said.
+        let (recorded, unlet): (Vec<_>, Vec<_>) = tracks
             .iter()
             .filter_map(|id| self.project.track(*id).ok())
             .filter_map(|track| Some((track.id, track.name.clone(), track.input?)))
-            .collect();
+            .partition(|(id, ..)| self.recording.hand.open.contains(id));
+        if !unlet.is_empty() {
+            let names: Vec<String> = unlet.iter().map(|(_, name, _)| format!("'{name}'")).collect();
+            self.recording.hand.said = Some(format!(
+                "nothing is recorded from the input on {}: the microphone is opened by hand, and no hand armed {}. \
+                 Disarm and arm again with the track's arm button",
+                names.join(", "),
+                if names.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        let recorded: Vec<(TrackId, String, TrackInput)> = recorded;
         if recorded.is_empty() {
             return Ok(());
         }

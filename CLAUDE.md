@@ -623,7 +623,13 @@ on the samples.
   input, giving an armed track its input, or switching its monitoring on. A thread says that it is the hand
   (`trill_engine::hand::by_hand`: the window's, an outside MCP client's) and one that says nothing is nobody's,
   so whatever comes to act on the session without saying so opens nothing: the assistant's door, an undo or a
-  redo made there, a song opened, begun or recovered, a track duplicated or pasted. What comes to want the
+  redo made there, a song opened, begun or recovered, a track duplicated or pasted. A step of the history
+  knows whether the hand made it, all of it (`Step::by_hand`; a group or a gesture several had a part in is
+  nobody's): the hand's undo or redo is the hand's only of such a step. And the rule is closed in depth: what
+  opens the input (`Session::input_needed`, `begin_audio_take`, what `live_now` tells the graph is heard) asks
+  `hand.open` and `hand.heard` itself, so that a path which forgets `hold_to_the_hand` leaves an armed track
+  that records nothing and says so, never an open input (a test in `session/playing.rs` arms behind the rule's
+  back). What comes to want the
   input any other way is disarmed or held, with a sentence (`Session::input_held`, one click lets it go);
   arming does not carry into another song; the device that is recorded from is not changed at the door while
   an input is live. The door's refusals stay, as the polite word; they are not what holds the rule.

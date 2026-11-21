@@ -120,6 +120,13 @@ struct Step {
     project: Project,
     /// What the step is in the journal.
     story: story::Story,
+    /// Whether the user's own hand made the step, all of it
+    /// ([`crate::hand`]). The hand's undo or redo of such a step is the
+    /// hand's doing; of any other step it is nobody's, and what the step
+    /// brings that wants the input stays held or disarmed, as it was
+    /// when the step was made. A step that several made (a group, a
+    /// gesture) is nobody's.
+    by_hand: bool,
 }
 
 /// A group between its [`Session::begin_group`] and [`Session::end_group`].
@@ -509,8 +516,9 @@ impl Session {
         // before any of them; the rest are the stops along the way. In the
         // journal the one step is all of theirs.
         let story = story::Story::joined(self.undo[floor..].iter().map(|step| &step.story));
+        let by_hand = self.undo[floor..].iter().all(|step| step.by_hand);
         self.undo.truncate(floor + 1);
-        self.undo[floor].story = story;
+        (self.undo[floor].story, self.undo[floor].by_hand) = (story, by_hand);
         let unchanged = self.undo[floor].project == self.project;
         if unchanged {
             self.undo.truncate(floor);
@@ -541,7 +549,7 @@ impl Session {
             return;
         }
         self.keep_leaving_state(&mut before);
-        self.sync(&before, scope);
+        self.sync(&before, scope, crate::hand::is_by_hand());
         self.make_step(before);
     }
 
@@ -554,6 +562,7 @@ impl Session {
             self.push_step(before, story);
         } else if let Some(step) = self.undo.last_mut() {
             step.story.and(story);
+            step.by_hand &= crate::hand::is_by_hand();
         }
         if let Some(has_step) = &mut self.gesture {
             *has_step = true;
@@ -572,7 +581,7 @@ impl Session {
             open.floor = open.floor.min(depth);
         }
         let id = UndoStep(self.fresh_id());
-        self.undo.push(Step { id, project: before, story });
+        self.undo.push(Step { id, project: before, story, by_hand: crate::hand::is_by_hand() });
         if self.undo.len() > UNDO_LIMIT {
             // The oldest step goes, unless it is where an open group began:
             // that group must still be able to undo all the way back, so
@@ -591,28 +600,29 @@ impl Session {
     /// by one that takes it back; a call that undoes what it has just done
     /// itself backs out of it instead, and leaves no trace.
     pub fn undo(&mut self) -> bool {
-        let Some(Step { id, project: previous, story }) = self.undo.pop() else { return false };
+        let Some(Step { id, project: previous, story, by_hand }) = self.undo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, previous);
         self.keep_leaving_state(&mut current);
-        self.sync(&current, Scope::Everything);
+        // The hand's own only if the step was: see `Step::by_hand`.
+        self.sync(&current, Scope::Everything, by_hand && crate::hand::is_by_hand());
         let story = if self.retract_step(&story, true) {
             story::Story::default()
         } else {
             self.record_reversal(Reversal::Undo, &story, &current);
             Self::settled(story)
         };
-        self.redo.push(Step { id, project: current, story });
+        self.redo.push(Step { id, project: current, story, by_hand });
         self.revision += 1;
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(Step { id, project: next, story }) = self.redo.pop() else { return false };
+        let Some(Step { id, project: next, story, by_hand }) = self.redo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, next);
         self.keep_leaving_state(&mut current);
-        self.sync(&current, Scope::Everything);
+        self.sync(&current, Scope::Everything, by_hand && crate::hand::is_by_hand());
         self.record_reversal(Reversal::Redo, &story, &current);
-        self.undo.push(Step { id, project: current, story });
+        self.undo.push(Step { id, project: current, story, by_hand });
         self.revision += 1;
         true
     }
@@ -621,10 +631,10 @@ impl Session {
     /// operation that could not be finished. Nothing is left to redo, and
     /// the journal has it as if it had not been made.
     fn back_out(&mut self) {
-        let Some(Step { project: previous, story, .. }) = self.undo.pop() else { return };
+        let Some(Step { project: previous, story, by_hand, .. }) = self.undo.pop() else { return };
         let mut current = std::mem::replace(&mut self.project, previous);
         self.keep_leaving_state(&mut current);
-        self.sync(&current, Scope::Everything);
+        self.sync(&current, Scope::Everything, by_hand && crate::hand::is_by_hand());
         if !self.retract_step(&story, false) {
             self.record_reversal(Reversal::Undo, &story, &current);
         }
@@ -1178,7 +1188,7 @@ impl Session {
         // hand says so again.
         self.disarm_all();
         self.forget_the_hand();
-        self.hold_to_the_hand(&|_| false);
+        self.hold_to_the_hand(&|_| false, false);
         // Its recordings are read several at a time, ahead of the compile
         // that would read them one after the other.
         let read = self.audio.read_ahead(&self.project, self.engine.sample_rate());
@@ -1253,11 +1263,13 @@ impl Session {
     }
 
     /// Brings the engine in line with the project after it changed from
-    /// `old`.
-    fn sync(&mut self, old: &Project, scope: Scope) {
+    /// `old`. `by_hand` says whether the change was the user's own hand's
+    /// doing: an edit of a thread that is the hand, or the hand's undo or
+    /// redo of a step that was the hand's.
+    fn sync(&mut self, old: &Project, scope: Scope, by_hand: bool) {
         // Before the graph is made: what came to want the input by this
         // change is let, held or disarmed by whose hand made it.
-        self.hold_to_the_hand(&|track| old.track(track).is_ok());
+        self.hold_to_the_hand(&|track| old.track(track).is_ok(), by_hand);
         if scope == Scope::Everything {
             self.compile_and_swap();
             // A track that is gone is no longer armed or played.

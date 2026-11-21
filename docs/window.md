@@ -109,8 +109,10 @@ the device and record again. `Shift+F9` arms the selected track.
 
 *An input is opened by your own hand, at this window, in this song.* Three things open it for a track: arming
 the track as it then records an input, giving an armed track its input, and switching its monitoring on. Nothing
-else does. Not the assistant, and not an undo or a redo made for it; not a song that is opened, begun or
-recovered; not a track that is duplicated or pasted. Arming does not carry into another song, and a track that
+else does. Not the assistant, and not an undo or a redo of what it did, whoever presses the keys: taking back
+and bringing back a step the assistant made, or had a part in, opens nothing, and what the step brings stays
+held or disarmed as it was. Not a song that is opened, begun or recovered; not a track that is duplicated or
+pasted. Arming does not carry into another song, and a track that
 comes to be armed with an input in any other way is disarmed, with a line that says so. A song that says a track
 is *always* heard does not open the microphone by being opened either, your own songs included: the switch
 shows it as **held**, and one click lets it go. The assistant may record once you have armed the track yourself,
