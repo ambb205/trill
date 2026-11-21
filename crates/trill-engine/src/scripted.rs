@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use trill_core::Device;
 use trill_core::device::{
     Beside, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
-    DeviceProcessor, Event, EventKind, PresetLoadError, ProcessInfo, Purpose,
+    DeviceProcessor, EditorError, EditorOptions, Event, EventKind, PresetLoadError, ProcessInfo, Purpose,
 };
 use trill_core::presets::{PresetInfo, PresetList};
 
@@ -137,6 +137,10 @@ pub struct Loading {
     /// ([`DeviceFactory::takes_time`]), and a session that opens a song
     /// makes them after the song is there.
     pub making: Duration,
+    /// Its devices have a window of their own, as a plugin has: one that
+    /// opens nothing, and in which a knob is turned by
+    /// [`ScriptedFactory::turned_in_its_window`].
+    pub window: bool,
     /// The amplifier cannot be made: its `create` fails, after however
     /// long making takes.
     pub fails: bool,
@@ -226,6 +230,9 @@ pub struct ScriptedFactory {
     /// it at the longest, by what was asked.
     thread: Arc<Mutex<()>>,
     waits: Arc<Mutex<Vec<(&'static str, Duration)>>>,
+    /// What every instrument that was made sounds like, for as long as it
+    /// lives.
+    patches: Arc<Mutex<Vec<std::sync::Weak<Patch>>>>,
 }
 
 /// The one thread a factory's devices are made and asked on, for a
@@ -255,6 +262,15 @@ impl ScriptedFactory {
     /// Instruments that take their time: see [`Loading`].
     pub fn loading(loading: Loading) -> Self {
         Self { loading, ..Self::default() }
+    }
+
+    /// Someone turns a knob in the window of every instrument that has
+    /// its window open: each comes to sound like `preset`, without anyone
+    /// having asked it to through its host. Returns how many there were.
+    pub fn turned_in_its_window(&self, preset: &str) -> usize {
+        let patches: Vec<Arc<Patch>> = self.patches.lock().iter().filter_map(std::sync::Weak::upgrade).collect();
+        let open = patches.iter().filter(|patch| patch.window.load(Ordering::Relaxed));
+        open.filter(|patch| patch.load(preset)).count()
     }
 
     /// The URI of every instrument made so far and what it was made for,
@@ -369,6 +385,7 @@ impl DeviceFactory for ScriptedFactory {
             die();
         }
         let patch = Arc::new(Patch::default());
+        self.patches.lock().push(Arc::downgrade(&patch));
         // The sound a saved state stands for: the preset it was saved with.
         if let Some(saved) = device.state.as_deref().and_then(|state| std::str::from_utf8(state).ok()) {
             // And whether it was told to take its notes in turn.
@@ -425,6 +442,7 @@ impl DeviceFactory for ScriptedFactory {
             params: Vec::new(),
             controller: Some(Box::new(Controller {
                 patch,
+                window: self.loading.window,
                 changes_after: self.loading.changes_after,
                 random: self.loading.random && kind == Kind::Bass,
                 thread: self.one_thread(),
@@ -491,6 +509,8 @@ struct Patch {
     /// The setting `takes` is `in turn`: a bass that draws at random does
     /// not.
     in_turn: AtomicBool,
+    /// The instrument's own window is open.
+    window: AtomicBool,
 }
 
 impl Default for Patch {
@@ -501,6 +521,7 @@ impl Default for Patch {
             name: Mutex::new(String::new()),
             coming: Mutex::new(None),
             in_turn: AtomicBool::new(false),
+            window: AtomicBool::new(false),
         }
     }
 }
@@ -537,6 +558,8 @@ impl Patch {
 
 struct Controller {
     patch: Arc<Patch>,
+    /// It has a window of its own.
+    window: bool,
     changes_after: Duration,
     /// The instrument draws at random, and has a setting that stops it.
     random: bool,
@@ -597,6 +620,22 @@ impl DeviceController for Controller {
         } else {
             Err(PresetLoadError::Failed(format!("there is no preset '{}'", preset.id)))
         }
+    }
+
+    fn open_editor(&mut self, _options: &EditorOptions) -> Result<(), EditorError> {
+        if !self.window {
+            return Err(EditorError::NoEditor);
+        }
+        self.patch.window.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn close_editor(&mut self) {
+        self.patch.window.store(false, Ordering::Relaxed);
+    }
+
+    fn is_editor_open(&self) -> bool {
+        self.patch.window.load(Ordering::Relaxed)
     }
 }
 

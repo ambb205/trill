@@ -25,7 +25,12 @@ Whoever has the invitation can read and change the song for as long as it is sha
 secret in it never crosses the wire: each side proves it has it, and everything said afterwards is encrypted and
 authenticated (the Noise protocol, through the `snow` library; no cipher is written in Trill). **Stop sharing**
 closes the port, and the invitation is no longer one; whoever is connected stays. Listening starts when you share
-and stops when you stop: Trill listens for nobody otherwise.
+and stops when you stop: Trill listens for nobody otherwise. A connection that has not proved the secret within
+ten seconds is closed, and no more than sixteen may be trying at once.
+
+What someone who is connected says is not trusted either: a message is bounded in size and messages in rate,
+and a change is held to the rules every edit is held to before any of it is taken. A program that says what no
+edit could have made is let go of, with a sentence, and the song is as it was.
 
 A program joins wherever it can open a connection to the other. Trill runs nothing that introduces two home
 networks to each other: across the internet, one of you forwards a port or both are on a VPN.

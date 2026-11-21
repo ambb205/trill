@@ -144,7 +144,7 @@ owes the makers of the sampled instruments it plays.
 ## Development
 
 ```sh
-cargo test --workspace                    # about 2,700 tests; needs nothing installed
+cargo test --workspace                    # about 2,800 tests; needs nothing installed
 cargo clippy --workspace --all-targets    # must be clean
 cargo fmt --all -- --check
 ```

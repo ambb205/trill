@@ -127,4 +127,31 @@ mod tests {
         let bounded = long.bounded();
         assert_eq!((bounded.person.name.len(), bounded.beat, bounded.clips.len()), (MAX_NAME, 0.0, MAX_HELD));
     }
+
+    #[test]
+    fn many_connections_without_the_invitation_are_let_go_of_and_whoever_has_it_still_joins() {
+        let (mut sharer, mut joiner) = (Net::new(), Net::new());
+        let invitation = sharer.listen(Reach::ThisMachine, 0).unwrap();
+        // More at once than may be proving who they are, none of which
+        // says a word; then they go.
+        let silent: Vec<_> = (0..60).filter_map(|_| std::net::TcpStream::connect(invitation.address()).ok()).collect();
+        assert!(silent.len() > 16, "they were connected: {}", silent.len());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(sharer.events().is_empty() && sharer.links().is_empty(), "none of them is a program in the song");
+        drop(silent);
+        // Whoever has the invitation is taken, as soon as there is room.
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            joiner.join(invitation.clone());
+            match next(&mut joiner) {
+                Event::Open { joined: true, .. } => break,
+                Event::Failed { .. } => {
+                    assert!(Instant::now() < until, "nobody with the invitation was taken any more")
+                }
+                other => panic!("{other:?}"),
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let Event::Open { joined: false, .. } = next(&mut sharer) else { panic!("the sharer has it too") };
+    }
 }

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trill_core::device::{CompositeFactory, DeviceFactory};
+use trill_core::device::{CompositeFactory, DeviceFactory, EditorOptions};
 use trill_core::journal::Author;
 use trill_core::merge::lot::{Lot, any_edit, check, note};
 use trill_core::merge::{Change, Op, Said, Stamp, TrackOp, TrackSet};
@@ -82,7 +82,8 @@ fn clip(session: &Session, name: &str) -> ClipId {
 /// A session whose plugins take a moment to make, as plugins do, and the
 /// factory that says how often one was made.
 fn with_plugins() -> (Session, ScriptedFactory) {
-    let scripted = ScriptedFactory::loading(Loading { making: Duration::from_millis(60), ..Loading::default() });
+    let loading = Loading { making: Duration::from_millis(60), window: true, ..Loading::default() };
+    let scripted = ScriptedFactory::loading(loading);
     let factory: Arc<dyn DeviceFactory> =
         Arc::new(CompositeFactory::new(vec![Box::new(BuiltinFactory), Box::new(scripted.clone())]));
     let mut session = Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).unwrap();
@@ -142,6 +143,54 @@ fn a_preset_a_plugin_loads_in_one_program_reaches_the_other_as_its_state_and_mak
     b.save(&std::env::temp_dir().join(format!("trill-together-{}-b.trill", std::process::id()))).unwrap();
     assert_eq!(pass(&mut b, &mut a, "Ben"), 0, "the other said its own reading of the state");
     let _ = std::fs::remove_file(std::env::temp_dir().join(format!("trill-together-{}-b.trill", std::process::id())));
+    meet(&mut a, &mut b);
+}
+
+#[test]
+fn what_is_changed_in_a_plugins_own_window_reaches_the_other_once_it_has_settled_and_is_said_once() {
+    let ((mut a, in_a), (mut b, in_b)) = (with_plugins(), with_plugins());
+    let track = a.edit(|song| Ok(song.add_track("Bass"))).unwrap();
+    let bass = a.add_device(ChainRef::Track(track), BASS, Some("up"), None).unwrap();
+    assert!(a.wait_until_opened(Duration::from_secs(20)));
+    a.share();
+    let up = a.project().device(bass).unwrap().state.clone();
+    b.take_song(&a.whole_song()).unwrap();
+    a.take_said();
+    chores(&mut b, "the bass is there", |b| b.arriving().is_none() && !b.making_devices());
+    assert_eq!(b.project().device(bass).unwrap().state, up);
+
+    // Its window is opened in the first program, and a knob is turned in
+    // it: nobody asked the session for anything.
+    let options = EditorOptions { title: String::new(), owner: None, position: None, activate: false };
+    a.open_device_editor(bass, &options).unwrap();
+    let (revision, steps) = (b.revision(), a.can_undo());
+    assert_eq!(in_a.turned_in_its_window("soft"), 1);
+    assert!(a.take_said().is_empty(), "nothing is said of a window that was opened");
+    // The chores read the plugin until it has stayed the same for a
+    // moment, and its state is said then, whole.
+    chores(&mut a, "what the plugin came to is in the song", |a| a.project().device(bass).unwrap().state != up);
+    let soft = a.project().device(bass).unwrap().state.clone();
+    assert!(soft.is_some() && a.can_undo() == steps, "and it was no step");
+    assert_eq!(pass(&mut a, &mut b, "Ada"), 1, "said once");
+    assert!(b.revision() != revision);
+    chores(&mut b, "the bass is made from it", |b| b.arriving().is_none() && !b.making_devices() && !b.is_coming(bass));
+    assert_eq!(b.project().device(bass).unwrap().state, soft);
+    assert_eq!(in_b.made().len(), 2, "the other's bass was made again once: {:?}", in_b.made());
+
+    // While the window stays open and nothing is turned, nothing more is
+    // said; and the other's own reading of its plugin is not news.
+    let until = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < until {
+        a.housekeeping();
+        b.housekeeping();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(a.take_said().is_empty() && b.take_said().is_empty(), "a state that was said is not said again");
+    // Another turn of the knob is another state, said when it has settled.
+    assert_eq!(in_a.turned_in_its_window("up"), 1);
+    chores(&mut a, "the plugin is read again", |a| a.project().device(bass).unwrap().state == up);
+    assert_eq!(pass(&mut a, &mut b, "Ada"), 1);
+    a.close_device_editor(bass);
     meet(&mut a, &mut b);
 }
 

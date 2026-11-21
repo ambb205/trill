@@ -32,6 +32,11 @@ const MAX_IN_WINDOW: u32 = 4000;
 const WINDOW: Duration = Duration::from_secs(5);
 /// How long connecting to an address may take.
 const CONNECTING: Duration = Duration::from_secs(8);
+/// How many connections may be proving at once that they have the
+/// invitation. One that has not is held for as long as that takes it (ten
+/// seconds at the most), on a thread of its own: whoever opens many
+/// without it gets no more threads than this.
+const MAX_MEETING: usize = 16;
 
 /// Where to listen.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -209,9 +214,12 @@ impl Net {
         let stop = Arc::new(AtomicBool::new(false));
         let (key, stopped) = (invitation.key(), stop.clone());
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
+        let meeting = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new().name("trill-together-listen".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let stream = match listener.accept() {
+                    // (As many as may be proving who they are: let go of.)
+                    Ok(_) if meeting.load(Ordering::Relaxed) >= MAX_MEETING => continue,
                     Ok((stream, _)) => stream,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(40));
@@ -225,9 +233,13 @@ impl Net {
                 // Proving who it is takes the other side's time, not the
                 // listener's: each on a thread of its own.
                 let (links, last, happened) = (links.clone(), last.clone(), happened.clone());
-                let _ = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
+                let proving = meeting.clone();
+                proving.fetch_add(1, Ordering::Relaxed);
+                let met = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
                     let _ = stream.set_nonblocking(false);
-                    match secure(stream, &key, false) {
+                    let secured = secure(stream, &key, false);
+                    proving.fetch_sub(1, Ordering::Relaxed);
+                    match secured {
                         Ok(pair) => {
                             if let Err(error) = open(pair, false, &links, &last, &happened) {
                                 log::warn!("a program that connected could not be heard: {error}");
@@ -238,6 +250,9 @@ impl Net {
                         Err(broken) => log::info!("a connection was not taken: {broken}"),
                     }
                 });
+                if met.is_err() {
+                    meeting.fetch_sub(1, Ordering::Relaxed);
+                }
             }
         })?;
         self.listening = Some(Listening { invitation: invitation.clone(), stop });
