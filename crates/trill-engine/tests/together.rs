@@ -11,11 +11,11 @@ use trill_core::device::{CompositeFactory, DeviceFactory, EditorOptions};
 use trill_core::journal::Author;
 use trill_core::merge::lot::{Lot, any_edit, check, note};
 use trill_core::merge::{Change, Op, Said, Stamp, TrackOp, TrackSet};
-use trill_core::project::{AutomationPoint, AutomationTarget};
-use trill_core::{ChainRef, ClipId, DeviceId, Project, TrackId, TrackKind};
+use trill_core::project::{AudioContent, AutomationPoint, AutomationTarget};
+use trill_core::{ChainRef, ClipId, DeviceId, Project, TrackId, TrackInput, TrackKind};
 use trill_dsp::BuiltinFactory;
 use trill_engine::scripted::{BASS, Loading, ScriptedFactory};
-use trill_engine::{AudioBackend, Session};
+use trill_engine::{AudioBackend, Problem, Session};
 
 fn session() -> Session {
     let mut session = Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
@@ -192,6 +192,194 @@ fn what_is_changed_in_a_plugins_own_window_reaches_the_other_once_it_has_settled
     assert_eq!(pass(&mut a, &mut b, "Ada"), 1);
     a.close_device_editor(bass);
     meet(&mut a, &mut b);
+}
+
+// ---- what is recorded --------------------------------------------------------
+
+/// What a track plays of recordings: where each lies, and its file.
+fn plays(session: &Session, track: TrackId) -> Vec<(f64, f64, String)> {
+    let track = session.project().track(track).unwrap();
+    track.clips.iter().filter_map(|clip| Some((clip.start, clip.end(), clip.audio()?.path.clone()))).collect()
+}
+
+/// The takes kept beside a track: each one's lane and name, lane by lane.
+fn lanes(session: &Session, track: TrackId) -> Vec<(u32, String)> {
+    let track = session.project().track(track).unwrap();
+    let mut takes: Vec<(u32, String)> = track.takes.iter().map(|take| (take.lane, take.clip.name.clone())).collect();
+    takes.sort();
+    takes
+}
+
+fn recording(name: &str) -> AudioContent {
+    AudioContent::new(format!("{name}.wav"))
+}
+
+#[test]
+fn takes_and_what_is_made_of_them_are_the_songs_and_which_input_a_track_records_is_ones_own() {
+    let (mut a, mut b) = two();
+    let bass = track(&a, "Bass");
+    a.edit(|song| song.add_audio_clip(bass, "Bed", 0.0, 16.0, recording("bed")).map(drop)).unwrap();
+    let first = a.edit(|song| song.add_take(bass, "Take 1", 0.0, 8.0, recording("one"))).unwrap();
+    let second = a.edit(|song| song.add_take(bass, "Take 2", 4.0, 8.0, recording("two"))).unwrap();
+    a.edit(|song| song.comp_take(second, 6.0, 10.0).map(drop)).unwrap();
+    a.edit(|song| song.rename_take(first, "The good one")).unwrap();
+    meet(&mut a, &mut b);
+    // (What the stretch covered of the bed is kept as a take first.)
+    let kept = [(0, "The good one".to_owned()), (1, "Take 2".to_owned()), (2, "Bed".to_owned())];
+    assert_eq!(lanes(&b, bass), kept);
+    let played = plays(&b, bass);
+    assert_eq!(
+        played.iter().map(|(start, end, _)| (*start, *end)).collect::<Vec<_>>(),
+        [(0.0, 6.0), (6.0, 10.0), (10.0, 16.0)]
+    );
+    assert_eq!(played[1].2, "two.wav");
+    // The seams are faded across, there as here: that is the clip's.
+    let faded = |session: &Session| -> Vec<bool> {
+        let clips = &session.project().track(bass).unwrap().clips;
+        clips.iter().filter_map(|clip| Some(clip.audio()?.crossfade)).collect()
+    };
+    assert_eq!(faded(&b), [false, true, true]);
+    assert_eq!(faded(&a), faded(&b));
+    // The other chooses the first take over all of it, and removes the second.
+    b.edit(|song| song.choose_take(first).map(drop)).unwrap();
+    b.edit(|song| song.remove_take(second).map(drop)).unwrap();
+    meet(&mut a, &mut b);
+    assert_eq!(plays(&a, bass)[0], (0.0, 8.0, "one.wav".to_owned()));
+    assert!(a.project().track(bass).unwrap().take(second).is_none());
+
+    // Which input of the machine's a track records is said to nobody,
+    // and nobody's is taken from anyone.
+    let mine = TrackInput { channel: 3, stereo: true, monitor: Default::default() };
+    a.edit(|song| song.set_track_input(bass, Some(mine))).unwrap();
+    assert!(a.take_said().is_empty(), "one's own input is not said");
+    b.edit(|song| song.set_track_input(bass, Some(TrackInput::mono(1)))).unwrap();
+    meet(&mut a, &mut b);
+    assert_eq!(a.project().track(bass).unwrap().input, Some(mine));
+    assert_eq!(b.project().track(bass).unwrap().input, Some(TrackInput::mono(1)));
+    assert!(!a.whole_song().contains("\"input\""), "and it is not in the song that is handed to whoever joins");
+    let someone =
+        Change { stamp: Stamp(900, 77), ops: vec![Op::Track(bass, TrackOp::Set(TrackSet::Input(Some(mine))))] };
+    let refused = b.merge("someone", vec![Said { change: someone, knew: None }], None, None).unwrap_err();
+    assert!(refused.to_string().contains("one's own"), "{refused}");
+    // Each undoes their own: the input, and nothing of the other's.
+    assert!(a.undo());
+    assert_eq!(a.project().track(bass).unwrap().input, None);
+    meet(&mut a, &mut b);
+    assert_eq!(b.project().track(bass).unwrap().input, Some(TrackInput::mono(1)));
+}
+
+#[test]
+fn two_takes_put_in_one_lane_at_the_same_moment_lie_in_two_and_one_goes_back_when_there_is_room() {
+    let (mut a, mut b) = two();
+    let bass = track(&a, "Bass");
+    a.edit(|song| song.add_take(bass, "Ada's", 0.0, 8.0, recording("ada")).map(drop)).unwrap();
+    b.edit(|song| song.add_take(bass, "Ben's", 4.0, 8.0, recording("ben")).map(drop)).unwrap();
+    assert_eq!((lanes(&a, bass)[0].0, lanes(&b, bass)[0].0), (0, 0), "each in the first lane, where it was made");
+    meet(&mut a, &mut b);
+    let both = lanes(&a, bass);
+    assert_eq!(both.iter().map(|(lane, _)| *lane).collect::<Vec<_>>(), [0, 1], "{both:?}");
+    assert_eq!(lanes(&b, bass), both);
+    // Whoever has the first lane removes theirs: the other lies where it
+    // was put, here at once and there when it hears of it.
+    let in_first = both[0].1.clone();
+    let (first, other) = match in_first.as_str() {
+        "Ada's" => (&mut a, &mut b),
+        _ => (&mut b, &mut a),
+    };
+    let take = first.project().track(bass).unwrap().takes.iter().find(|take| take.lane == 0).unwrap().clip.id;
+    first.edit(|song| song.remove_take(take).map(drop)).unwrap();
+    assert_eq!(lanes(first, bass), [(0, both[1].1.clone())]);
+    meet(first, other);
+    assert_eq!(lanes(other, bass), [(0, both[1].1.clone())]);
+    // Taken back, it has its lane again and the other gives way again.
+    assert!(first.undo());
+    meet(first, other);
+    assert_eq!(lanes(other, bass), both);
+}
+
+#[test]
+fn of_two_recordings_put_over_one_stretch_at_the_same_moment_the_later_plays_and_the_other_can_be_put_back() {
+    let (mut a, mut b) = two();
+    let bass = track(&a, "Bass");
+    a.edit(|song| song.add_audio_clip(bass, "Bed", 0.0, 16.0, recording("bed")).map(drop)).unwrap();
+    let one = a.edit(|song| song.add_take(bass, "Take 1", 0.0, 16.0, recording("one"))).unwrap();
+    let two = a.edit(|song| song.add_take(bass, "Take 2", 0.0, 16.0, recording("two"))).unwrap();
+    meet(&mut a, &mut b);
+    // Each puts a stretch of a take over beats 4 to 8, neither knowing of
+    // the other. Ben's is the later: he had done something else first.
+    a.edit(|song| song.comp_take(one, 4.0, 8.0).map(drop)).unwrap();
+    b.edit(|song| song.set_track_pan(bass, 0.1)).unwrap();
+    b.edit(|song| song.comp_take(two, 4.0, 8.0).map(drop)).unwrap();
+    let with = |file: &str| -> Vec<(f64, f64, String)> {
+        vec![(0.0, 4.0, "bed.wav".to_owned()), (4.0, 8.0, format!("{file}.wav")), (8.0, 16.0, "bed.wav".to_owned())]
+    };
+    assert_eq!((plays(&a, bass), plays(&b, bass)), (with("one"), with("two")));
+
+    // The later of the two is told nothing, and gives way to nothing:
+    // it has only what it did itself to say.
+    pass(&mut a, &mut b, "Ada");
+    assert!(b.notices().is_empty(), "{:?}", b.notices());
+    // The earlier makes room under the later, as if that had been made
+    // after it, and is told once.
+    assert_eq!(pass(&mut b, &mut a, "Ben"), 2);
+    assert_eq!(plays(&a, bass), with("two"), "the later is what the track plays");
+    let notices = a.notices().to_vec();
+    assert_eq!(notices.len(), 1, "one sentence for the stretch, not one a clip: {notices:?}");
+    assert!(notices[0].text.contains("Ben put a recording on the track \u{201C}Bass\u{201D} over the same stretch"));
+    assert!(notices[0].text.contains("Yours is kept as a take"), "{}", notices[0].text);
+    assert_eq!(notices[0].remedy.as_ref().map(|remedy| remedy.label.as_str()), Some("Put mine back"));
+    meet(&mut a, &mut b);
+    assert_eq!(plays(&b, bass), with("two"), "and the same everywhere");
+    assert!(b.notices().is_empty());
+    for take in [one, two] {
+        assert!(b.project().track(bass).unwrap().take(take).is_some(), "nothing that was recorded is lost");
+    }
+
+    // Put back: one edit, which covers theirs as a recording that lands
+    // there does, and which its maker can take back.
+    a.remedy(notices[0].id).unwrap();
+    assert_eq!(plays(&a, bass), with("one"));
+    assert!(a.notices().is_empty());
+    meet(&mut a, &mut b);
+    assert_eq!(plays(&b, bass), with("one"));
+    assert!(a.undo());
+    meet(&mut a, &mut b);
+    assert_eq!(plays(&b, bass), with("two"));
+}
+
+#[test]
+fn a_take_whose_file_the_other_has_not_got_is_a_missing_file_there_and_plays_when_the_file_is() {
+    let (mut a, mut b) = two();
+    let bass = track(&a, "Bass");
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("takes").join("Bass.wav");
+    let named = AudioContent::new(file.to_string_lossy());
+    let take = a.edit(|song| song.add_take(bass, "Take", 0.0, 4.0, named)).unwrap();
+    a.edit(|song| song.choose_take(take).map(drop)).unwrap();
+    meet(&mut a, &mut b);
+    // The other has the take and what the track plays of it; the file it
+    // has not got is a file that is missing, said of the clip that plays
+    // it, and the song goes on.
+    assert_eq!(lanes(&b, bass), [(0, "Take".to_owned())]);
+    let missing = |session: &Session| -> Vec<String> {
+        let files = session.problems().iter().filter_map(|problem| match problem {
+            Problem::AudioFile { path, .. } => Some(path.clone()),
+            _ => None,
+        });
+        files.collect()
+    };
+    assert_eq!(missing(&b), [file.to_string_lossy()], "{:?}", b.problems());
+    b.edit(|song| song.set_track_volume(bass, -3.0)).unwrap();
+    b.edit(|song| song.rename_take(take, "Ada's take")).unwrap();
+    meet(&mut a, &mut b);
+    assert_eq!(lanes(&a, bass), [(0, "Ada's take".to_owned())]);
+    // The file is there: it plays.
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let tone: Vec<f32> = (0..48_000).map(|n| (n as f32 * 0.05).sin() * 0.2).collect();
+    let buffer = trill_core::audio::AudioBuffer { sample_rate: 48_000.0, left: tone.clone(), right: tone };
+    trill_media::write_wav(&file, &buffer, trill_media::WavFormat::Float32).unwrap();
+    b.edit(|song| song.set_track_volume(bass, -4.0)).unwrap();
+    assert!(missing(&b).is_empty(), "{:?}", b.problems());
 }
 
 #[test]
@@ -625,15 +813,26 @@ fn three_sessions_that_took_the_same_changes_in_any_order_hold_the_same_song() {
                         break;
                     }
                     sessions[to].merge("someone", vec![said], None, None).unwrap();
-                    assert!(sessions[to].take_said().is_empty(), "taking a change in says nothing new");
+                    // (Taking a change in says nothing new, but where it
+                    // made room under a recording that was put over one
+                    // of its own: that is a change like any other.)
+                    for more in sessions[to].take_said() {
+                        for other in (0..3).filter(|other| *other != to) {
+                            on_the_way[other].push(more.clone());
+                        }
+                    }
                 }
             }
         }
         assert!(made > 15, "seed {seed}: enough of the edits were allowed ({made})");
-        for (to, waiting) in on_the_way.iter_mut().enumerate() {
-            while !waiting.is_empty() {
-                let said = waiting.swap_remove(lot.below(waiting.len()));
-                sessions[to].merge("someone", vec![said], None, None).unwrap();
+        while let Some(to) = (0..3).find(|to| !on_the_way[*to].is_empty()) {
+            let at = lot.below(on_the_way[to].len());
+            let said = on_the_way[to].swap_remove(at);
+            sessions[to].merge("someone", vec![said], None, None).unwrap();
+            for more in sessions[to].take_said() {
+                for other in (0..3).filter(|other| *other != to) {
+                    on_the_way[other].push(more.clone());
+                }
             }
         }
         let texts: Vec<String> = sessions.iter().map(text).collect();

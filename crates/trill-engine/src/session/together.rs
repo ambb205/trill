@@ -29,7 +29,7 @@
 
 use super::history::Done;
 use super::{Scope, Session, SessionError};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, Instant};
 use trill_core::journal::words::quoted;
@@ -38,7 +38,7 @@ use trill_core::merge::{
     Said, SongId, Stamp, Thing, TrackOp, TrackSet, Why,
 };
 use trill_core::project::AutomationTarget;
-use trill_core::{DeviceId, Project};
+use trill_core::{Clip, ClipId, DeviceId, Project, TrackId};
 
 /// How many of the changes made here are remembered for telling whose
 /// work was in something that someone removed.
@@ -54,6 +54,10 @@ pub struct Remedy {
     /// What the action is called: "Put mine back".
     pub label: String,
     ops: Vec<Op>,
+    /// Recordings of one's own to put back on a track over whatever lies
+    /// there now, each as it was: what the track had under them is taken
+    /// off as a recording that lands there takes it off.
+    over: Option<(TrackId, Vec<Clip>)>,
 }
 
 /// Something that happened to one's own work because someone else was
@@ -74,6 +78,8 @@ pub struct Notice {
 enum About {
     Key(Key),
     Thing(Thing),
+    /// The recordings a track plays, where two were put over one stretch.
+    Stretch(TrackId),
 }
 
 impl Notice {
@@ -81,7 +87,7 @@ impl Notice {
     /// one: `action` is what its button is called, and does nothing.
     #[doc(hidden)]
     pub fn made_up(id: u64, text: impl Into<String>, action: Option<&str>) -> Self {
-        let remedy = action.map(|label| Remedy { label: label.to_owned(), ops: Vec::new() });
+        let remedy = action.map(|label| Remedy { label: label.to_owned(), ops: Vec::new(), over: None });
         Notice { id, text: text.into(), remedy, about: About::Thing(Thing::Marker(0)) }
     }
 }
@@ -639,6 +645,10 @@ impl Session {
         let mine = self.sharing.mine.clone();
         let mut news = Vec::new();
         let mut only_params = true;
+        // The notices this batch raises, and the recordings it puts on
+        // tracks with what was written here that their makers had not seen.
+        let mut raised: Vec<u64> = Vec::new();
+        let mut recorded: Vec<(Vec<ClipId>, Vec<ClipId>)> = Vec::new();
         for Said { change, knew } in checked {
             let stamp = change.stamp;
             // Whether its maker had seen a change made here.
@@ -666,11 +676,29 @@ impl Session {
                     if let Some((_, Some(was))) = over.iter().find(|(held, _)| *held == key)
                         && *was != part.op
                     {
-                        self.say_overridden(by, &key, was.clone(), &part.op);
+                        raised.push(self.say_overridden(by, &key, was.clone(), &part.op));
                     }
                     if let Some(thing) = key.thing().filter(|thing| part.op == thing.set_alive(false)) {
-                        self.say_removed(by, &thing);
+                        raised.extend(self.say_removed(by, &thing));
                     }
+                }
+            }
+            let made: Vec<ClipId> = (taken.won.iter())
+                .filter_map(|part| match &part.op {
+                    Op::Clip(id, ClipOp::Whole(clip, _)) if clip.audio().is_some() => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            if !made.is_empty() {
+                let earlier = |(own, _): &&(Stamp, Key)| *own < stamp && !seen(*own);
+                let unseen: Vec<ClipId> = (self.sharing.recent.iter().filter(earlier))
+                    .filter_map(|(_, key)| match key {
+                        Key::Clip(id, _) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                if !unseen.is_empty() {
+                    recorded.push((made, unseen));
                 }
             }
             let own = taken.won.into_iter().filter(|part| part.stamp == stamp).map(|part| part.op);
@@ -694,6 +722,9 @@ impl Session {
         self.sync(&before, if only_params { Scope::ParamsOnly } else { Scope::Everything });
         self.revision += 1;
         self.record_of_another(by, &before);
+        for (theirs, unseen) in recorded {
+            self.give_way(by, &theirs, &unseen, &raised);
+        }
         Ok(news)
     }
 
@@ -728,18 +759,31 @@ impl Session {
             return Err(SessionError::Io("that has been dealt with already".into()));
         };
         let notice = self.sharing.notices.remove(at);
-        if let Some(remedy) = notice.remedy {
-            self.act(remedy.ops);
+        let Some(remedy) = notice.remedy else { return Ok(()) };
+        if let Some((track, mine)) = remedy.over {
+            // One's own recordings back over whatever lies there now, as
+            // a recording that lands there: one edit, which keeps what it
+            // covers as a take.
+            self.edit(|project| {
+                for clip in &mine {
+                    project.cover(track, clip.start, clip.end())?;
+                }
+                let found = project.track_mut(track)?;
+                found.clips.retain(|clip| !mine.iter().any(|own| own.id == clip.id));
+                found.clips.extend(mine.iter().cloned());
+                Ok(())
+            })?;
         }
+        self.act(remedy.ops);
         Ok(())
     }
 
-    fn notice(&mut self, about: About, text: String, remedy: Option<Remedy>) {
+    fn notice(&mut self, about: About, text: String, remedy: Option<Remedy>) -> u64 {
         // Once for a thing: what is said of it again takes the place of
         // what was said.
         if let Some(held) = self.sharing.notices.iter_mut().find(|notice| notice.about == about) {
             (held.text, held.remedy) = (text, remedy);
-            return;
+            return held.id;
         }
         // What is said of a thing a second time, after the first was
         // dealt with, goes by the number the first went by: whoever shows
@@ -753,30 +797,124 @@ impl Session {
             }
         };
         self.sharing.notices.push(Notice { id, text, remedy, about });
+        id
+    }
+
+    // ---- two recordings over one stretch ------------------------------------
+
+    /// Someone put a recording on a track (a take landed there, or a
+    /// stretch of one was put there) at the moment something was done to
+    /// that track's recordings here, neither knowing of the other. A track
+    /// that keeps takes plays one recording at a time, so one of the two
+    /// has the stretch: **the one that was made later, as if it had been
+    /// made after the other and had covered it.** Making that so is the
+    /// business of the program whose work was the earlier, which is this
+    /// one: it makes room under theirs ([`Project::cover`], which keeps
+    /// whatever loses anything as a take first), says so once, and can put
+    /// its own back over theirs. Everyone else hears of it as a change
+    /// like any other.
+    ///
+    /// `theirs` are the recordings their change made, `unseen` the clips
+    /// that were written here before it without its maker knowing, and
+    /// `raised` the notices this batch of changes has raised: what was
+    /// said of single properties of the clips is said by this instead.
+    fn give_way(&mut self, by: &str, theirs: &[ClipId], unseen: &[ClipId], raised: &[u64]) {
+        let mut tracks: BTreeMap<TrackId, Vec<ClipId>> = BTreeMap::new();
+        for track in self.project.tracks.iter().filter(|track| !track.takes.is_empty()) {
+            let on = |clip: &&Clip| clip.audio().is_some() && theirs.contains(&clip.id);
+            let here: Vec<ClipId> = track.clips.iter().filter(on).map(|clip| clip.id).collect();
+            if !here.is_empty() {
+                tracks.insert(track.id, here);
+            }
+        }
+        for (track, theirs) in tracks {
+            let holder = Some(Thing::Track(track));
+            let touched: Vec<ClipId> =
+                unseen.iter().copied().filter(|id| self.doc.holder(&Thing::Clip(*id)) == holder).collect();
+            if touched.is_empty() {
+                continue;
+            }
+            self.ready_ids();
+            let before = self.project.clone();
+            // Theirs are taken off for a moment: room is made under them,
+            // not of them.
+            let Ok(found) = self.project.track_mut(track) else { continue };
+            let (kept, rest): (Vec<Clip>, Vec<Clip>) =
+                std::mem::take(&mut found.clips).into_iter().partition(|clip| theirs.contains(&clip.id));
+            found.clips = rest;
+            let mut cut = 0;
+            for clip in &kept {
+                cut += self.project.cover(track, clip.start, clip.end()).unwrap_or(0);
+            }
+            if let Ok(found) = self.project.track_mut(track) {
+                found.clips.extend(kept);
+            }
+            self.project.settle(Some(&before));
+            let ops = merge::diff(&before, &self.project, &self.doc);
+            if cut == 0 || ops.is_empty() {
+                let next = self.project.next_id();
+                self.project = before;
+                self.project.count_ids_from(next);
+                continue;
+            }
+            // What of this program's own lost anything, as it was.
+            let now = self.project.track(track).map(|found| found.clips.clone()).unwrap_or_default();
+            let lost = |clip: &&Clip| {
+                touched.contains(&clip.id)
+                    && now.iter().find(|left| left.id == clip.id).is_none_or(|left| left != *clip)
+            };
+            let mine: Vec<Clip> =
+                before.track(track).map(|found| found.clips.iter().filter(lost).cloned().collect()).unwrap_or_default();
+            self.write_quietly(ops);
+            match !self.sharing.aside.is_empty() || self.sharing.displaced > 0 {
+                true => drop(self.rederive()),
+                false => self.hold_to_its_properties(),
+            }
+            self.sync(&before, Scope::Everything);
+            self.revision += 1;
+            self.record_of_another(by, &before);
+            let doc = &self.doc;
+            let of_these = |about: &About| match about {
+                About::Key(Key::Clip(id, _)) | About::Thing(Thing::Clip(id)) => {
+                    doc.holder(&Thing::Clip(*id)) == Some(Thing::Track(track))
+                }
+                _ => false,
+            };
+            self.sharing.notices.retain(|notice| !(raised.contains(&notice.id) && of_these(&notice.about)));
+            if !mine.is_empty() {
+                let text = format!(
+                    "{by} put a recording on {} over the same stretch at the same moment as you, and theirs is what \
+                     the track plays there. Yours is kept as a take.",
+                    named(&self.doc, &Thing::Track(track))
+                );
+                let remedy = Remedy { label: "Put mine back".to_owned(), ops: Vec::new(), over: Some((track, mine)) };
+                self.notice(About::Stretch(track), text, Some(remedy));
+            }
+        }
     }
 
     /// Someone set a property that had been set here, without having
     /// seen that.
-    fn say_overridden(&mut self, by: &str, key: &Key, mine: Op, theirs: &Op) {
+    fn say_overridden(&mut self, by: &str, key: &Key, mine: Op, theirs: &Op) -> u64 {
         let about = what(&self.doc, key, theirs);
         let text = format!("{by} set {about} at the same moment as you, and theirs is what the song has.");
-        let remedy = Remedy { label: "Put mine back".to_owned(), ops: vec![mine] };
-        self.notice(About::Key(key.clone()), text, Some(remedy));
+        let remedy = Remedy { label: "Put mine back".to_owned(), ops: vec![mine], over: None };
+        self.notice(About::Key(key.clone()), text, Some(remedy))
     }
 
     /// Someone removed a thing: said if work done here is in it, whether
     /// or not they had seen it. (Taking back the step that made a thing
     /// removes it with everyone's work in it.)
-    fn say_removed(&mut self, by: &str, thing: &Thing) {
+    fn say_removed(&mut self, by: &str, thing: &Thing) -> Option<u64> {
         let doc = &self.doc;
         let own = |(stamp, key): &(Stamp, Key)| doc.stamp(key) == *stamp && doc.is_within(key, thing);
         if !self.sharing.recent.iter().any(own) {
-            return;
+            return None;
         }
         let name = named(doc, thing);
         let text = format!("{by} removed {name}, which you had worked in. It is held, with your work in it.");
-        let remedy = Remedy { label: "Bring it back".to_owned(), ops: vec![thing.set_alive(true)] };
-        self.notice(About::Thing(thing.clone()), text, Some(remedy));
+        let remedy = Remedy { label: "Bring it back".to_owned(), ops: vec![thing.set_alive(true)], over: None };
+        Some(self.notice(About::Thing(thing.clone()), text, Some(remedy)))
     }
 
     /// An edit made here that the song as it stands sets aside is said,
@@ -805,7 +943,7 @@ impl Session {
                 ),
             };
             let ops = found.by.as_ref().and_then(cleared).map(|clear| vec![clear, mine]);
-            let remedy = ops.map(|ops| Remedy { label: "Have mine instead".to_owned(), ops });
+            let remedy = ops.map(|ops| Remedy { label: "Have mine instead".to_owned(), ops, over: None });
             self.notice(About::Key(found.key), reason, remedy);
         }
     }

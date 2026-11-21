@@ -562,6 +562,101 @@ fn what_is_written_again_as_it_was_is_what_it_was_and_not_that_gone_and_another_
     );
 }
 
+// ---- what is recorded, and the order of the envelopes --------------------------
+
+fn lanes_of(project: &Project, track: TrackId) -> Vec<(u32, String)> {
+    let takes = &project.track(track).unwrap().takes;
+    let mut takes: Vec<(u32, String)> = takes.iter().map(|take| (take.lane, take.clip.name.clone())).collect();
+    takes.sort();
+    takes
+}
+
+#[test]
+fn takes_are_clips_kept_beside_their_track_and_two_put_in_one_lane_at_once_lie_in_two() {
+    let (mut a, mut b) = two();
+    let bass = find_track(&a.project, "Bass");
+    let recording = |name: &str| AudioContent::new(format!("{name}.wav"));
+    let from_a = a.edit(|song| song.add_take(bass, "Ada's", 0.0, 8.0, recording("ada")).map(drop)).unwrap();
+    let made = matches!(&from_a.ops[..], [Op::Clip(_, ClipOp::Whole(..)), Op::Clip(_, ClipOp::Lane(Some(0)))]);
+    assert!(made, "a clip is made, and said to lie in its lane: {:?}", from_a.ops);
+    let from_b = b.edit(|song| song.add_take(bass, "Ben's", 4.0, 8.0, recording("ben")).map(drop)).unwrap();
+    meet(&mut a, &mut b, std::slice::from_ref(&from_a), std::slice::from_ref(&from_b));
+    // The one made first has the lane, and the other lies in the next.
+    assert_eq!(lanes_of(&a.project, bass), [(0, "Ada's".to_owned()), (1, "Ben's".to_owned())]);
+    assert_eq!((a.displaced, b.displaced), (1, 1));
+
+    // A file keeps the lane each was put in, though one lies in another.
+    let kept = a.doc.kept(SongId(7), &a.project);
+    let read: Kept = serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
+    assert_eq!(Doc::from_kept(&a.project, &read), a.doc);
+    // And a program that has the song as it began is handed the takes.
+    let mut late = Peer::new(&song(), 70_009);
+    for change in &a.doc.since(late.doc.floors()) {
+        late.take(change);
+    }
+    assert_eq!(late.text(), a.text());
+
+    // The first is removed: the other lies where it was put, everywhere.
+    let first = a.project.track(bass).unwrap().takes.iter().find(|take| take.lane == 0).unwrap().clip.id;
+    let gone = a.edit(|song| song.remove_take(first).map(drop)).unwrap();
+    b.take(&gone);
+    assert_eq!(lanes_of(&a.project, bass), [(0, "Ben's".to_owned())]);
+    assert_eq!(lanes_of(&b.project, bass), [(0, "Ben's".to_owned())]);
+    assert_eq!((a.displaced, b.displaced), (0, 0));
+
+    // A notes clip that someone says is a take is a clip all the same,
+    // and a lane beyond any is refused.
+    let verse = find_clip(&a.project, "Verse");
+    let odd = a.write(vec![Op::Clip(verse, ClipOp::Lane(Some(3)))]);
+    b.take(&odd);
+    assert!(a.project.clip(verse).is_ok() && b.project.clip(verse).is_ok());
+    assert!(Op::Clip(verse, ClipOp::Lane(Some(1 << 20))).checked().is_err());
+}
+
+#[test]
+fn envelopes_are_held_in_the_order_they_were_made_in_wherever_the_song_is_held() {
+    let (mut a, mut b) = two();
+    let (keys, bass) = (find_track(&a.project, "Keys"), find_track(&a.project, "Bass"));
+    let points = || vec![AutomationPoint::new(0.0, -0.5), AutomationPoint::new(4.0, 0.5)];
+    // Made in an order that is not the order of what they move.
+    let targets = [
+        AutomationTarget::MasterVolume,
+        AutomationTarget::TrackPan { track: bass },
+        AutomationTarget::TrackVolume { track: keys },
+    ];
+    let order = |project: &Project| -> Vec<AutomationTarget> {
+        project.automation.iter().map(|lane| lane.target.clone()).collect()
+    };
+    let mut said = Vec::new();
+    for target in &targets {
+        said.extend(a.edit(|song| song.set_automation(target.clone(), points())));
+    }
+    assert_eq!(order(&a.project), targets);
+    for change in &said {
+        b.take(change);
+    }
+    assert_eq!(order(&b.project), targets, "in that order wherever the song is held");
+    // A song that is opened holds them in the order its file has them in.
+    assert_eq!(order(&Peer::new(&a.project, 70_005).project), targets);
+
+    // One that loses its points is gone, and is the last when it is made again.
+    let again = [targets[1].clone(), targets[2].clone(), targets[0].clone()];
+    let mut said = Vec::new();
+    said.extend(a.edit(|song| song.set_automation(targets[0].clone(), Vec::new())));
+    said.extend(a.edit(|song| song.set_automation(targets[0].clone(), points())));
+    assert_eq!(order(&a.project), again);
+    for change in &said {
+        b.take(change);
+    }
+    assert_eq!(order(&b.project), again);
+    // A track that goes takes its envelope with it: nothing is said of
+    // the order, and what is left is in the order it was in.
+    let gone = a.edit(|song| song.remove_track(bass).map(drop)).unwrap();
+    assert_eq!(gone.ops.len(), 1, "{:?}", gone.ops);
+    b.take(&gone);
+    assert_eq!(order(&b.project), [targets[2].clone(), targets[0].clone()]);
+}
+
 // ---- a file, and a program that was away ------------------------------------
 
 #[test]
@@ -700,7 +795,7 @@ fn any_op(lot: &mut Lot, project: &Project) -> Op {
         _ => AutomationTarget::Send { track: track(lot), to: track(lot) },
     };
     let kinds = [TrackKind::Normal, TrackKind::Group, TrackKind::Return];
-    match lot.below(22) {
+    match lot.below(25) {
         0 => {
             let mut made = Project::new("made");
             let id = made.add_track_of_kind("Wild", kinds[lot.below(3)]);
@@ -752,6 +847,8 @@ fn any_op(lot: &mut Lot, project: &Project) -> Op {
         18 => Op::Tempo(1.0 + beat(lot), lot.chance(2), lot.chance(5).then_some(90.0).or(Some(130.0))),
         19 => Op::Meter(1.0 + beat(lot), Some(crate::TimeSignature { numerator: 3, denominator: 4 })),
         20 => Op::Marker(wild(lot), MarkerOp::Whole(crate::Marker { beat: beat(lot), name: "Wild".into(), id: 0 })),
+        21 | 22 => Op::Clip(clip(lot), ClipOp::Lane(lot.chance(4).then_some(lot.below(3) as u32).xor(Some(0)))),
+        23 => Op::Envelopes(vec![target(lot), target(lot), target(lot)]),
         _ => Op::Track(track(lot), TrackOp::Set(TrackSet::Profile(InstrumentProfile::default()))),
     }
 }

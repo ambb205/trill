@@ -2052,3 +2052,59 @@ fn an_input_on_the_outputs_clock_at_its_rate_is_recorded_as_the_device_gave_it_t
         assert_eq!(other, None, "exclusive: {exclusive}; the first frame that is not what the device gave");
     }
 }
+
+// ---- a song that others hold too ----------------------------------------------
+
+#[test]
+fn a_take_is_said_to_whoever_else_has_the_song_when_it_has_landed_and_is_its_makers_to_take_back() {
+    let (mut rig, voice, _folder) = toned_rig();
+    // Another program is handed the song, and hears what is changed in it.
+    rig.session.hear_changes(true);
+    rig.session.share();
+    let null = trill_engine::AudioBackend::Null { sample_rate: 48_000 };
+    let mut other = Session::new(Arc::new(trill_dsp::BuiltinFactory), null).unwrap();
+    other.hear_changes(true);
+    other.take_song(&rig.session.whole_song()).unwrap();
+    rig.session.take_said();
+    assert_eq!(rig.session.project().track(voice).unwrap().input, Some(TrackInput::mono(1)));
+    assert_eq!(other.project().track(voice).unwrap().input, None, "which input a track records is one's own");
+
+    // While the take is recorded nothing of it is said, whatever the
+    // session's chores come to know of it meanwhile.
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    rig.run_until(rig.now() + 48_000.0);
+    rig.session.housekeeping();
+    assert!(rig.session.is_recording());
+    assert!(rig.session.take_said().is_empty(), "a take that is being recorded is nobody else's yet");
+    rig.run_until(rig.now() + 48_000.0);
+    rig.session.stop();
+    let file = rig.session.last_recording().unwrap().takes[0].file.clone();
+
+    // Landed: said, and the other has the take in its lane and what the
+    // track plays of it, naming the file where its maker has it.
+    let said = rig.session.take_said();
+    assert!(!said.is_empty());
+    let floors = rig.session.floors();
+    other.merge("Ada", said, Some(&floors), rig.session.replica()).unwrap();
+    let held = |session: &Session| -> (Vec<(u32, ClipId)>, Vec<ClipId>) {
+        let track = session.project().track(voice).unwrap();
+        let takes = track.takes.iter().map(|take| (take.lane, take.clip.id)).collect();
+        (takes, track.clips.iter().map(|clip| clip.id).collect())
+    };
+    assert_eq!(held(&other), held(&rig.session));
+    assert_eq!((held(&other).0.len(), held(&other).1.len()), (1, 1), "a take, and the clip that plays it");
+    assert_eq!(take_paths(&other, voice), [file]);
+    assert_eq!(other.project().track(voice).unwrap().input, None);
+    assert!(other.input_status().open.is_none(), "and nothing of it opens an input there");
+
+    // The step is its maker's: taken back there, the take is gone here
+    // too, and nobody else's undo has it.
+    assert!(!other.can_undo());
+    assert!(rig.session.undo());
+    let said = rig.session.take_said();
+    let floors = rig.session.floors();
+    other.merge("Ada", said, Some(&floors), rig.session.replica()).unwrap();
+    assert_eq!(held(&other), (Vec::new(), Vec::new()));
+}

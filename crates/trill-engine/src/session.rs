@@ -604,20 +604,30 @@ impl Session {
             // Something was set aside that this edit may have let in, or
             // a take lies where this edit may have made room.
             let _ = self.rederive();
-        } else if checks_merge() {
-            let derived = self.doc.derive();
-            let (mut worked_out, mut made) = (derived.project, self.project.clone());
-            worked_out.count_ids_from(0);
-            made.count_ids_from(0);
-            assert!(
-                worked_out.to_json() == made.to_json() && derived.aside.is_empty() && derived.displaced == 0,
-                "the song worked out from its properties is not the song the edit made:\n{}\n---- the edit made ----\n{}",
-                worked_out.to_json(),
-                made.to_json()
-            );
+        } else {
+            self.hold_to_its_properties();
         }
         self.sync(&before, scope);
         self.finish_step(before, done);
+    }
+
+    /// Where every edit is held against the song worked out from its
+    /// properties ([`checks_merge`]): the song as an edit just left it is
+    /// that song, or this ends the test.
+    pub(super) fn hold_to_its_properties(&self) {
+        if !checks_merge() {
+            return;
+        }
+        let derived = self.doc.derive();
+        let (mut worked_out, mut made) = (derived.project, self.project.clone());
+        worked_out.count_ids_from(0);
+        made.count_ids_from(0);
+        assert!(
+            worked_out.to_json() == made.to_json() && derived.aside.is_empty() && derived.displaced == 0,
+            "the song worked out from its properties is not the song the edit made:\n{}\n---- the edit made ----\n{}",
+            worked_out.to_json(),
+            made.to_json()
+        );
     }
 
     /// Makes what was just done to the song, which turned `before` into

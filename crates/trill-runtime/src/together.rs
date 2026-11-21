@@ -321,6 +321,8 @@ impl Driver {
                          build {mine}; the other {protocol}, build {build}): both need the same build of Trill"
                     );
                     self.say(format!("No connection: {why}."));
+                    // (Said: its going is nothing more to say.)
+                    self.peers.remove(&link);
                     self.net.close(link, &why);
                     return;
                 }
@@ -509,12 +511,19 @@ impl Driver {
                     for person in gone {
                         self.say_to_greeted(&Message::Gone { person }, None);
                     }
-                    if let Some(person) = peer.person {
-                        match why.as_str() {
+                    match peer.person {
+                        Some(person) => match why.as_str() {
                             LEFT => self.say(format!("{} left.", person.name)),
                             CLOSED => self.say(format!("{} closed their Trill.", person.name)),
                             why => self.say(format!("{} is no longer here: {why}.", person.name)),
-                        }
+                        },
+                        // A connection this program asked for, gone
+                        // before the other had said who it is: the join
+                        // came to nothing, and a failure is a sentence.
+                        None if peer.joined => self.say(format!(
+                            "Not joined: the connection ended before the other program had said who it is ({why}).                              It may not be a Trill, or it stopped sharing its song; ask for the invitation again."
+                        )),
+                        None => {}
                     }
                     self.shared.lock().status.revision += 1;
                 }

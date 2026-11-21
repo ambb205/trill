@@ -14,6 +14,9 @@
 //! microseconds. On a machine that is busy with something else the
 //! fastest is the one to hold two builds by.
 //!
+//! Two builds are held beside one another from the same folder: where a
+//! song's recordings are found decides how long it takes to open.
+//!
 //! It uses nothing of the session that an earlier build has not got, so
 //! that the same file measures two builds: copy it into the other
 //! checkout's `crates/trill-engine/examples` and run it there on the same
@@ -58,15 +61,26 @@ fn main() {
     let mut session = Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
     let began = Instant::now();
     session.load(std::path::Path::new(&song)).expect("the song opens");
+    let opened = began.elapsed();
     let project = session.project();
     let notes: usize = project.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.notes().len()).sum();
     let clips: usize = project.tracks.iter().map(|track| track.clips.len()).sum();
+    // What opening takes is mostly reading the recordings the song plays,
+    // where it has any: a song that names them by a path from the folder
+    // it was made in finds them from there and nowhere else, and opens in
+    // a fraction of the time where it finds none. So that is said.
+    let recordings: std::collections::BTreeSet<&str> = (project.tracks.iter())
+        .flat_map(|track| &track.clips)
+        .filter_map(|clip| Some(clip.audio()?.path.as_str()))
+        .collect();
+    let found = recordings.iter().filter(|path| std::path::Path::new(path).is_file()).count();
     println!(
-        "{song}: {} tracks, {clips} clips, {notes} notes, {} devices, {} bytes as a file; opened in {:.1} s",
+        "{song}: {} tracks, {clips} clips, {notes} notes, {} devices, {} bytes as a file; opened in {:.2} s, with {found} of          its {} recordings found from this folder",
         project.tracks.len(),
         project.devices().count(),
         project.to_json().len(),
-        began.elapsed().as_secs_f64()
+        opened.as_secs_f64(),
+        recordings.len()
     );
     // Something of each kind to edit, from the middle of the song.
     let track = project.tracks.iter().filter(|track| !track.clips.is_empty()).nth(3).expect("a track with clips");

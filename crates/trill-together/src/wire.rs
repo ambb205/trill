@@ -7,7 +7,10 @@ use trill_core::{ClipId, TrackId};
 /// The version of what is said here. Two programs that speak different
 /// ones do not guess at each other: the one that hears the other's says
 /// so, in a sentence, and lets go.
-pub const PROTOCOL: u32 = 1;
+///
+/// 2: a take is said (a clip that is kept beside its track, in a lane),
+/// and the order of a song's envelopes.
+pub const PROTOCOL: u32 = 2;
 
 /// The most one message may be: a whole song with its plugins' states.
 pub const MAX_MESSAGE: usize = 256 << 20;

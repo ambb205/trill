@@ -363,3 +363,29 @@ fn opening_another_song_leaves_the_shared_one_and_the_others_go_on() {
     assert!(ben.session.lock().project().tracks.is_empty());
     assert!(ada.together().invitation.is_some(), "Ada is still sharing");
 }
+
+#[test]
+fn a_join_whose_connection_ends_before_the_two_have_greeted_each_other_says_so() {
+    let folder = tempfile::tempdir().unwrap();
+    let ben = start(folder.path(), "Ben");
+    // Something that has the invitation's secret and lets go without a
+    // word, as a program that goes down while it is joined does.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let invitation = Invitation::new("127.0.0.1", listener.local_addr().unwrap().port()).unwrap();
+    let key = invitation.key();
+    let taking = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        drop(secure::secure(stream, &key, false).unwrap());
+    });
+    ben.join(&invitation.to_string(), false).unwrap();
+    taking.join().unwrap();
+    eventually("Ben is told that the join came to nothing", || {
+        let said = said(&ben);
+        said.contains("Not joined: the connection ended before the other program had said who it is")
+    });
+    eventually("and is in no song with anyone", || {
+        let together = ben.together();
+        !together.joining && together.connected == 0 && together.people.is_empty()
+    });
+    assert!(!said(&ben).contains("You are in the song"), "{}", said(&ben));
+}
