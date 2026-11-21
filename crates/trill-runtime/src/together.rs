@@ -284,6 +284,9 @@ impl Driver {
                     let came = came
                         .map(|invitation| invitation.to_string())
                         .map_err(|error| format!("this program could not start listening for others: {error}"));
+                    // Whoever asked reads how things stand as soon as it
+                    // has its answer: that is said first.
+                    self.show();
                     self.shared.lock().shared = Some(came);
                 }
                 Ask::StopSharing => self.net.stop_listening(),
