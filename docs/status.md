@@ -31,9 +31,6 @@ Only Windows has been run so far.
 
 ## Where the tempo or the time signature changes inside a song
 
-- A plugin's position in seconds and the start of its bar. It is told the tempo, the time signature and the beat
-  of each block; the seconds and the bar line it is given are still worked out from those alone, so after a
-  change they are not the song's, and through a glide the seconds do not run evenly.
 - A warped clip under a glide without one stretched copy of its file for every step of the glide, and without
   the three-millisecond fade where two copies meet, which a held tone can show.
 - The length a sound dropped into a later section is given, which goes by the tempo the song begins at.
