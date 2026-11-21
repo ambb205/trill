@@ -51,7 +51,13 @@ async fn ok(client: &Client, tool: &'static str, arguments: Value) -> Value {
 
 /// Asks `tool` of `client` until `done` says the reply is what is waited
 /// for: what the other program did takes a moment to arrive.
-async fn until(client: &Client, tool: &'static str, arguments: Value, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+async fn until(
+    client: &Client,
+    tool: &'static str,
+    arguments: Value,
+    what: &str,
+    done: impl Fn(&Value) -> bool,
+) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         // (What is asked about may not be there yet: a refusal is "not yet".)
@@ -85,15 +91,22 @@ async fn two_clients_share_a_song_by_tools_and_each_has_what_the_other_writes() 
     assert_eq!((alone["shared"].clone(), alone["here"].clone()), (json!(false), json!([])), "{alone}");
     let shared = ok(&ada.client, "shared_song", json!({ "action": "share", "name": "Ada" })).await;
     let invitation = shared["invitation"].as_str().expect("an invitation to hand to someone").to_owned();
-    assert!(invitation.starts_with("trill:127.0.0.1:"), "on this machine, unless the network is asked for: {invitation}");
+    assert!(
+        invitation.starts_with("trill:127.0.0.1:"),
+        "on this machine, unless the network is asked for: {invitation}"
+    );
     assert_eq!(shared["shared"], json!(true));
 
     // Ben's client joins by it, and has the song.
-    let joined = ok(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "name": "Ben" })).await;
+    let joined =
+        ok(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "name": "Ben" })).await;
     assert_eq!(names(&joined), ["Ada"], "{joined}");
     let song = ok(&ben.client, "get_project", json!({})).await;
     assert_eq!(song["tracks"][0]["name"], "Keys", "{song}");
-    let here = until(&ada.client, "shared_song", json!({ "action": "status" }), "Ada sees Ben", |reply| names(reply) == ["Ben"]).await;
+    let here = until(&ada.client, "shared_song", json!({ "action": "status" }), "Ada sees Ben", |reply| {
+        names(reply) == ["Ben"]
+    })
+    .await;
     assert_ne!(here["me"]["colour"], here["here"][0]["colour"], "{here}");
 
     // Both write at once, into the same clip and elsewhere.
@@ -110,14 +123,18 @@ async fn two_clients_share_a_song_by_tools_and_each_has_what_the_other_writes() 
     for client in [&ada.client, &ben.client] {
         let all = |reply: &Value| reply["notes"].as_array().is_some_and(|notes| notes.len() == 4);
         until(client, "get_notes", json!({ "clip": verse }), "all four notes are there", all).await;
-        let whole = |reply: &Value| reply["tempo"] == json!(98.0) && reply["tracks"].as_array().is_some_and(|tracks| tracks.len() == 2);
+        let whole = |reply: &Value| {
+            reply["tempo"] == json!(98.0) && reply["tracks"].as_array().is_some_and(|tracks| tracks.len() == 2)
+        };
         until(client, "get_project", json!({}), "the tempo and the track are there", whole).await;
     }
 
     // Each undoes their own: Ben takes back his tempo, and Ada's track stays.
     let undone = ok(&ben.client, "history", json!({ "action": "undo" })).await;
     assert_eq!(undone["steps_applied"], 1);
-    let back = |reply: &Value| reply["tempo"] == json!(120.0) && reply["tracks"].as_array().is_some_and(|tracks| tracks.len() == 2);
+    let back = |reply: &Value| {
+        reply["tempo"] == json!(120.0) && reply["tracks"].as_array().is_some_and(|tracks| tracks.len() == 2)
+    };
     until(&ada.client, "get_project", json!({}), "the tempo is back and the track is still there", back).await;
 
     // A clash is a notice with the way back: Ada removes the track Ben is
@@ -150,7 +167,10 @@ async fn two_clients_share_a_song_by_tools_and_each_has_what_the_other_writes() 
     let left = ok(&ben.client, "shared_song", json!({ "action": "leave" })).await;
     assert_eq!((left["connected_programs"].clone(), left["here"].clone()), (json!(0), json!([])), "{left}");
     assert_eq!(left["shared"], json!(true), "it is still a song that merges");
-    until(&ada.client, "shared_song", json!({ "action": "status" }), "Ada sees him go", |reply| names(reply).is_empty()).await;
+    until(&ada.client, "shared_song", json!({ "action": "status" }), "Ada sees him go", |reply| {
+        names(reply).is_empty()
+    })
+    .await;
     let lately = ok(&ada.client, "shared_song", json!({ "action": "status" })).await["lately"].to_string();
     assert!(lately.contains("Ben is here.") && lately.contains("Ben left."), "{lately}");
     drop((ada.runtime, ben.runtime));
@@ -161,24 +181,34 @@ async fn what_goes_wrong_with_sharing_and_joining_is_a_sentence_that_says_what_t
     let (ada, ben) = (program().await, program().await);
     let refused = call(&ben.client, "shared_song", json!({ "action": "join" })).await.unwrap_err();
     assert!(refused.contains("trill:HOST:PORT:SECRET"), "{refused}");
-    let refused = call(&ben.client, "shared_song", json!({ "action": "join", "invitation": "trill:nowhere" })).await.unwrap_err();
+    let refused =
+        call(&ben.client, "shared_song", json!({ "action": "join", "invitation": "trill:nowhere" })).await.unwrap_err();
     assert!(refused.contains("trill:HOST:PORT:SECRET"), "{refused}");
-    let refused = call(&ada.client, "shared_song", json!({ "action": "share", "reach": "everywhere" })).await.unwrap_err();
+    let refused =
+        call(&ada.client, "shared_song", json!({ "action": "share", "reach": "everywhere" })).await.unwrap_err();
     assert!(refused.contains("`this_machine` or `network`"), "{refused}");
 
-    let invitation = ok(&ada.client, "shared_song", json!({ "action": "share" })).await["invitation"].as_str().unwrap().to_owned();
+    let invitation =
+        ok(&ada.client, "shared_song", json!({ "action": "share" })).await["invitation"].as_str().unwrap().to_owned();
     // A song with changes that are not saved is not replaced unless that
     // is said.
     ok(&ben.client, "create_track", json!({ "name": "Ben's own" })).await;
-    let refused = call(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation })).await.unwrap_err();
+    let refused =
+        call(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation })).await.unwrap_err();
     assert!(refused.contains("changes that are not saved"), "{refused}");
     assert_eq!(ok(&ben.client, "get_project", json!({})).await["tracks"][0]["name"], "Ben's own");
-    let joined = call(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "replace_unsaved": true })).await;
+    let joined = call(
+        &ben.client,
+        "shared_song",
+        json!({ "action": "join", "invitation": invitation, "replace_unsaved": true }),
+    )
+    .await;
     assert!(joined.is_ok(), "{joined:?}");
     // Once the invitation is taken back it is no longer one.
     ok(&ben.client, "shared_song", json!({ "action": "leave" })).await;
     let stopped = ok(&ada.client, "shared_song", json!({ "action": "stop_sharing" })).await;
     assert!(stopped.get("invitation").is_none(), "{stopped}");
-    let refused = call(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation })).await.unwrap_err();
+    let refused =
+        call(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation })).await.unwrap_err();
     assert!(refused.starts_with("Not joined"), "{refused}");
 }

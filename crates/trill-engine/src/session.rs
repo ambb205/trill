@@ -568,6 +568,12 @@ impl Session {
             self.keep_leaving_state(&mut before);
         }
         let ops = merge::diff(&before, &self.project, &self.doc);
+        self.commit_found(before, ops, scope);
+    }
+
+    /// [`Session::commit`] of an edit whose changes are known: `ops` is
+    /// what turned `before` into the project as it is now.
+    fn commit_found(&mut self, before: Project, ops: Vec<Op>, scope: Scope) {
         if ops.is_empty() {
             // Nothing of the song changed. (An id may have been spent.)
             let next = self.project.next_id();
@@ -585,7 +591,7 @@ impl Session {
         let done = history::Done::of(&taken.won);
         if waited {
             // Something was set aside that this edit may have let in.
-            self.rederive();
+            let _ = self.rederive();
         } else if checks_merge() {
             let derived = self.doc.derive();
             let (mut worked_out, mut made) = (derived.project, self.project.clone());
@@ -669,9 +675,8 @@ impl Session {
         let at_stake = Self::devices_at_stake(&last.done);
         self.keep_states_of(at_stake);
         let Some(Step { id, done, story }) = self.undo.pop() else { return Turned::default() };
-        let leaving = self.project.clone();
         let (ops, theirs) = done.back(&self.doc, self.mine());
-        self.turn(&leaving, ops);
+        let leaving = self.turn(ops);
         let story = if self.retract_step(&story, true) {
             story::Story::default()
         } else {
@@ -694,9 +699,8 @@ impl Session {
         let at_stake = Self::devices_at_stake(&last.done);
         self.keep_states_of(at_stake);
         let Some(Step { id, done, story }) = self.redo.pop() else { return Turned::default() };
-        let leaving = self.project.clone();
         let (ops, theirs) = done.again(&self.doc, self.mine());
-        self.turn(&leaving, ops);
+        let leaving = self.turn(ops);
         self.record_reversal(Reversal::Redo, &story, &leaving);
         self.undo.push(Step { id, done, story });
         self.revision += 1;
@@ -704,14 +708,15 @@ impl Session {
     }
 
     /// Sets what taking a step back or bringing it back sets, and brings
-    /// the engine in line.
-    fn turn(&mut self, leaving: &Project, ops: Vec<Op>) {
+    /// the engine in line. Returns the song as it was until then.
+    fn turn(&mut self, ops: Vec<Op>) -> Project {
         if ops.is_empty() {
-            return;
+            return self.project.clone();
         }
         self.write(ops);
-        self.rederive();
-        self.sync(leaving, Scope::Everything);
+        let leaving = self.rederive();
+        self.sync(&leaving, Scope::Everything);
+        leaving
     }
 
     /// Takes back the step that was just made and forgets it: for an
@@ -722,9 +727,8 @@ impl Session {
         let at_stake = Self::devices_at_stake(&last.done);
         self.keep_states_of(at_stake);
         let Some(Step { done, story, .. }) = self.undo.pop() else { return };
-        let leaving = self.project.clone();
         let (ops, _) = done.back(&self.doc, self.mine());
-        self.turn(&leaving, ops);
+        let leaving = self.turn(ops);
         if !self.retract_step(&story, false) {
             self.record_reversal(Reversal::Undo, &story, &leaving);
         }
@@ -982,10 +986,21 @@ impl Session {
             resolved.push((key.clone(), state.info.clamp(*value)));
         }
         self.remember_plugin_values(id, &states, &resolved);
-        self.edit_scoped(Scope::ParamsOnly, |project| {
-            project.device_mut(id)?.params.extend(resolved);
-            Ok(())
-        })
+        // An edit whose every change is known: nothing of the song is
+        // compared to find what it did. (Of a parameter named twice the
+        // last value is the one that is set.)
+        let values: std::collections::BTreeMap<String, f64> = resolved.into_iter().collect();
+        let before = self.project.clone();
+        let device = self.project.device_mut(id).map_err(SessionError::from)?;
+        let mut ops = Vec::with_capacity(values.len());
+        for (name, value) in values {
+            if device.params.get(&name) != Some(&value) {
+                device.params.insert(name.clone(), value);
+                ops.push(Op::Param(id, name, Some(value)));
+            }
+        }
+        self.commit_found(before, ops, Scope::ParamsOnly);
+        Ok(())
     }
 
     // ---- transport -----------------------------------------------------
@@ -1241,7 +1256,7 @@ impl Session {
         self.begin_sharing_of(kept.as_ref().map(|kept| kept.song));
         if kept.is_some() {
             // The song is what its properties come to.
-            self.rederive();
+            let _ = self.rederive();
         }
         self.undo.clear();
         self.redo.clear();
@@ -1339,7 +1354,9 @@ impl Session {
             for (index, info) in meta.params.iter().enumerate() {
                 let value = device.params.get(&info.id);
                 if value != previous.params.get(&info.id) {
-                    let value = value.copied().unwrap_or(info.default);
+                    // (Held to its range: a value may have been set by
+                    // another program, which is not trusted with it.)
+                    let value = value.map_or(info.default, |value| info.clamp(*value));
                     self.engine.send(Message::Param { device: device.id, index, value });
                 }
             }

@@ -92,6 +92,9 @@ pub struct Together {
     pub people: Vec<Here>,
     /// Goes up whenever anything of this changes.
     pub revision: u64,
+    /// How many bytes this program has said to the others, and in how
+    /// many messages: for whoever measures.
+    pub said: (u64, u64),
 }
 
 impl Together {
@@ -144,7 +147,9 @@ pub(crate) struct Sharing {
 /// A number by lot that a number in JSON holds exactly.
 fn lot() -> u64 {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos()));
+    hasher.write_u128(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos()),
+    );
     hasher.finish() & ((1 << 53) - 1)
 }
 
@@ -276,9 +281,9 @@ impl Driver {
                         session.hear_changes(true);
                         self.epoch = Some(session.song_epoch());
                     }
-                    let came = came.map(|invitation| invitation.to_string()).map_err(|error| {
-                        format!("this program could not start listening for others: {error}")
-                    });
+                    let came = came
+                        .map(|invitation| invitation.to_string())
+                        .map_err(|error| format!("this program could not start listening for others: {error}"));
                     self.shared.lock().shared = Some(came);
                 }
                 Ask::StopSharing => self.net.stop_listening(),
@@ -293,9 +298,8 @@ impl Driver {
                 Ask::Leave => {
                     if self.is_live() {
                         // Nothing is said here of what one did oneself.
-                        let gone: Vec<LinkId> = self.peers.keys().copied().collect();
                         self.leave(LEFT);
-                        self.net.events().retain(|event| !matches!(event, Event::Lost { link, .. } if gone.contains(link)));
+                        let _ = self.net.events();
                     }
                 }
             }
@@ -459,8 +463,12 @@ impl Driver {
     }
 
     fn say_to_synced(&mut self, message: &Message, except: Option<LinkId>) {
-        let to: Vec<LinkId> =
-            self.peers.iter().filter(|(link, peer)| peer.synced && Some(**link) != except).map(|(link, _)| *link).collect();
+        let to: Vec<LinkId> = self
+            .peers
+            .iter()
+            .filter(|(link, peer)| peer.synced && Some(**link) != except)
+            .map(|(link, _)| *link)
+            .collect();
         for link in to {
             self.net.say(link, message);
         }
@@ -480,8 +488,12 @@ impl Driver {
                 Event::Lost { link, why } => {
                     let Some(peer) = self.peers.remove(&link) else { continue };
                     // Whoever was heard of through it is gone with it.
-                    let gone: Vec<u64> =
-                        self.people.iter().filter(|(_, via, _)| *via == link).map(|(here, ..)| here.person.id).collect();
+                    let gone: Vec<u64> = self
+                        .people
+                        .iter()
+                        .filter(|(_, via, _)| *via == link)
+                        .map(|(here, ..)| here.person.id)
+                        .collect();
                     self.people.retain(|(_, via, _)| *via != link);
                     for person in gone {
                         self.net.say_to_all(&Message::Gone { person }, None);
@@ -570,6 +582,7 @@ impl Driver {
             connected: self.peers.len(),
             people,
             revision: shared.status.revision,
+            said: self.net.said(),
         };
         if status != shared.status {
             shared.status = Together { revision: shared.status.revision + 1, ..status };
@@ -577,13 +590,19 @@ impl Driver {
     }
 
     fn run(mut self, stop: Arc<AtomicBool>) {
+        let mut told = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             self.asks();
             if self.is_live() {
+                // What arrives is taken in as it arrives; what was changed
+                // here is said once a tick, which is what thins a drag.
                 self.events();
-                self.tell();
+                if told.elapsed() >= TICK {
+                    self.tell();
+                    told = Instant::now();
+                }
                 self.show();
-                std::thread::sleep(TICK);
+                self.net.wait(TICK.saturating_sub(told.elapsed()).max(Duration::from_millis(1)));
             } else {
                 self.show();
                 // Nothing to do until someone shares or joins.
@@ -626,8 +645,17 @@ impl Sharing {
     pub fn new(session: SharedSession, name: Option<String>) -> Self {
         let name = name.filter(|name| !name.trim().is_empty()).unwrap_or_else(name_on_this_machine);
         let me = Person { id: lot(), name, colour: 0 };
-        let status = Together { me, invitation: None, joining: false, connected: 0, people: Vec::new(), revision: 0 };
-        let shared = Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
+        let status = Together {
+            me,
+            invitation: None,
+            joining: false,
+            connected: 0,
+            people: Vec::new(),
+            revision: 0,
+            said: (0, 0),
+        };
+        let shared =
+            Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
         Self {
             shared: Arc::new(Mutex::new(shared)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -656,7 +684,8 @@ impl Sharing {
                 };
                 let stop = self.stop.clone();
                 let started = std::thread::Builder::new().name("trill-together".into()).spawn(move || driver.run(stop));
-                *thread = Some(started.map_err(|error| format!("no thread could be started to work together: {error}"))?);
+                *thread =
+                    Some(started.map_err(|error| format!("no thread could be started to work together: {error}"))?);
             }
         }
         Ok(())
@@ -792,7 +821,10 @@ mod tests {
     fn of_the_changes_a_drag_made_between_two_looks_the_last_is_said() {
         use trill_core::merge::{Change, Op, Stamp, TrackOp, TrackSet};
         let volume = |clock: u64, to: f32| Said {
-            change: Change { stamp: Stamp(clock, 5), ops: vec![Op::Track(TrackId(1), TrackOp::Set(TrackSet::Volume(to)))] },
+            change: Change {
+                stamp: Stamp(clock, 5),
+                ops: vec![Op::Track(TrackId(1), TrackOp::Set(TrackSet::Volume(to)))],
+            },
             knew: None,
         };
         let pan = Said {

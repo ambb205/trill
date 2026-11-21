@@ -73,7 +73,11 @@ fn two_windows_joined_in_one_song_change_it_at_once_and_each_says_who_is_here_an
     assert!(ada.is_on_screen("Shared song: Here: Ben") && ben.is_on_screen("Shared song: Here: Ada"));
     assert_eq!(ben.app.snapshot().project.tracks.len(), 2);
     let said = |harness: &Harness| harness.app.state().toasts.texts().join(" | ");
-    assert!(said(&ada).contains("Ben is here.") && said(&ben).contains("You are in the song with Ada."), "{}", said(&ben));
+    assert!(
+        said(&ada).contains("Ben is here.") && said(&ben).contains("You are in the song with Ada."),
+        "{}",
+        said(&ben)
+    );
     ben.key(Modifiers::NONE, Key::Escape);
 
     // Both change it at once: Ada in her window, Ben in his.
@@ -185,7 +189,8 @@ fn taking_a_step_back_says_what_stays_as_someone_else_set_it() {
         let mut session = ada.session.lock();
         let knew = session.floors();
         let clock = knew.0.values().copied().max().unwrap_or(0) + 1;
-        let change = Change { stamp: Stamp(clock, 77_777), ops: vec![Op::Track(one, TrackOp::Set(TrackSet::Volume(-20.0)))] };
+        let change =
+            Change { stamp: Stamp(clock, 77_777), ops: vec![Op::Track(one, TrackOp::Set(TrackSet::Volume(-20.0)))] };
         session.merge("Ben", vec![Said { change, knew: Some(knew) }], None, None).unwrap();
     }
     ada.idle(2);
@@ -206,7 +211,7 @@ fn company_that_is_made_up_is_shown_as_company_is() {
     harness.click_label("Shared song: Here: Jo, Sam");
     harness.idle(2);
     assert!(harness.is_on_screen("Jo: has hold of the volume of the track \u{201C}Bass\u{201D}"));
-    assert!(harness.is_on_screen("Allen: you"));
+    assert!(harness.is_on_screen("Kit: you"));
     // The invitation is there to hand to a third.
     assert!(harness.labels.iter().any(|(label, _)| label.starts_with("Invitation: trill:192.168.1.20:47474:")));
     let seen = &harness.app.live().together;

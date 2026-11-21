@@ -318,7 +318,9 @@ impl Key {
     /// Whether this is one's own, and never anyone else's.
     pub fn is_personal(&self) -> bool {
         match self {
-            Key::Song(prop) => *prop == SongSet::Loop(crate::LoopRegion { enabled: false, start: 0.0, end: 1.0 }).prop(),
+            Key::Song(prop) => {
+                *prop == SongSet::Loop(crate::LoopRegion { enabled: false, start: 0.0, end: 1.0 }).prop()
+            }
             Key::Track(_, prop) => *prop == LISTENING || *prop == TrackSet::Solo(false).prop(),
             _ => false,
         }

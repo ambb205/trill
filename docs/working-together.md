@@ -107,10 +107,11 @@ saved); joining the song you already share merges the two.
 ## Plugins
 
 What you set on a device in Trill travels value by value. What you change in a plugin's own window travels as
-the plugin's whole state, once it has settled for about a second, and the other program makes its copy of the
-plugin again from that state in the background while the old one keeps playing. A plugin does not always write
-out the bytes it was given, so a state is news only when the plugin was changed in your program: two programs do
-not make each other's plugins again for ever.
+the plugin's whole state, once it has stayed the same for a second or two, and the other program makes its copy
+of the plugin again from that state in the background while the old one keeps playing. A plugin does not always
+write out the bytes it was given, so a state is news only when the plugin was changed in your program: two
+programs do not make each other's plugins again for ever. When you share a song, every plugin's state is read
+once first, so that whoever joins is handed each plugin as it is running in your program.
 
 ## For an AI
 
@@ -132,7 +133,42 @@ hold three programs that take the same real edits shuffled, late and twice, acro
 
 ## What it costs
 
-MEASURED
+Measured on a long song without plugins (57 tracks, 1,544 clips, 36,864 notes, 183 devices; 6.2 MB as a file
+before notes had ids), with both programs on one machine that was building other things meanwhile. Two examples
+print these: `cargo run -p trill-engine --example edit_cost -- SONG.trill` and
+`cargo run -p trill-runtime --example together -- SONG.trill`.
+
+**Working alone costs what it did**, with two exceptions that are said here. The fastest of three hundred, and the
+middle one, in milliseconds, against the build before:
+
+| | Before | Now |
+|---|---|---|
+| A note written into a clip | 1.7, 2.7 to 3.1 | 1.8 to 2.0, 2.6 to 3.1 |
+| A clip moved | 1.8, 2.4 to 3.0 | 1.7 to 1.8, 2.2 to 2.7 |
+| A fader set | 1.7 to 1.9, 2.2 to 3.3 | 1.8, 2.3 to 2.8 |
+| A device's parameter set | 0.4, 0.6 to 0.9 | 0.3 to 0.4, 0.6 |
+| A step taken back | 1.4 to 1.6, 1.7 to 2.6 | 2.0, 2.8 to 3.0 |
+| A step brought back | 1.4 to 1.5, 1.9 to 2.4 | 2.0, 2.6 to 3.0 |
+
+Undo and redo cost half a millisecond more on this song: a step is no longer a whole song kept to be swapped in,
+and the song is worked out again from its properties. And the file of a song with many notes is larger, here by a
+sixth (7.3 MB): every note carries its id.
+
+**Together:**
+
+- Joining: the song was in the other program 1.0 to 2.5 s after it asked, and 8.0 MB were said for it. That is
+  what opening the song takes; a song with plugins then makes them in the background, as an opened one does.
+- From an edit in one program to the other's graph swapped in: 21 to 25 ms in the middle, 33 to 46 ms for nine in
+  ten. What is changed is said once every 25 ms, and taken in as it arrives.
+- Taking in someone else's change costs what making it costs: 2.6 to 3.7 ms on this song against 2.4 to 3.0 ms
+  for the one who made it. The session is held for that long and for nothing that waits on the network.
+- A fader or a clip dragged, at sixty edits a second: 6 kB a second, in 33 messages a second of 180 bytes. Of the
+  sixty values a second the other is told the latest every 25 ms.
+- Nothing changed: 107 bytes a second, which is who is here.
+- An hour of work, an edit a second (3,600: six in ten write notes, the others remove some, move a clip, set a
+  fader or a parameter): 0.7 MB said. Each one's file grew by 1.7 MB, of which 0.8 MB is the song itself grown and
+  0.8 MB is what a shared song keeps to merge again: when each property was last set, and the notes that were
+  removed. A song that was never shared keeps none of that.
 
 ## What is not built
 

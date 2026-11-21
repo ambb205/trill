@@ -17,8 +17,9 @@ const WAIT: Duration = Duration::from_secs(30);
 /// plugins, nothing of the user's.
 fn start(folder: &Path, name: &str) -> Runtime {
     let storage = Storage::At { settings: folder.join(name).join("settings.json"), library_index: None };
-    let runtime = Runtime::start(RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage })
-        .expect("the runtime starts");
+    let runtime =
+        Runtime::start(RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage })
+            .expect("the runtime starts");
     runtime.set_name_together(name);
     runtime
 }
@@ -87,7 +88,11 @@ fn two_programs_share_a_song_see_each_other_and_part_and_meet_again_with_both_se
     assert_eq!(at_ada.me.colour, at_ben.people[0].person.colour);
     assert_eq!(at_ben.me.colour, at_ada.people[0].person.colour);
     assert_ne!(at_ada.me.colour, at_ben.me.colour);
-    assert!(said(&ada).contains("Ben is here.") && said(&ben).contains("You are in the song with Ada."), "{}", said(&ben));
+    assert!(
+        said(&ada).contains("Ben is here.") && said(&ben).contains("You are in the song with Ada."),
+        "{}",
+        said(&ben)
+    );
     assert_eq!(ada.session.lock().shared_song(), ben.session.lock().shared_song());
     assert!(ben.session.lock().is_modified(), "a song that was handed over is one to save");
 
@@ -103,7 +108,12 @@ fn two_programs_share_a_song_see_each_other_and_part_and_meet_again_with_both_se
 
     // What one holds, the other sees: a selection, a hand on a fader,
     // where their song stands.
-    ben.holding(Mine { tracks: vec![keys], clips: vec![verse], notes: vec![(verse, 7)], holding: Some("the volume of Keys".into()) });
+    ben.holding(Mine {
+        tracks: vec![keys],
+        clips: vec![verse],
+        notes: vec![(verse, 7)],
+        holding: Some("the volume of Keys".into()),
+    });
     ben.session.lock().seek(12.0);
     eventually("Ada sees what Ben holds", || {
         let people = ada.together().people;
@@ -123,7 +133,9 @@ fn two_programs_share_a_song_see_each_other_and_part_and_meet_again_with_both_se
         }
         session.end_gesture();
     }
-    eventually("the fader is where Ben left it", || ada.session.lock().project().track(keys).unwrap().volume_db == -20.0);
+    eventually("the fader is where Ben left it", || {
+        ada.session.lock().project().track(keys).unwrap().volume_db == -20.0
+    });
 
     // Ben leaves, and both go on alone.
     ben.leave();
@@ -279,7 +291,8 @@ fn a_program_that_says_what_no_edit_could_have_made_is_let_go_of_and_the_song_is
 
     // A change nothing could have made: a pan that is no pan.
     let bad = Change { stamp: Stamp(50, 77), ops: vec![Op::Track(keys, TrackOp::Set(TrackSet::Pan(-9.0)))] };
-    let changes = Message::Changes { said: vec![Said { change: bad, knew: None }], floors: Floors::default(), replica: Some(77) };
+    let changes =
+        Message::Changes { said: vec![Said { change: bad, knew: None }], floors: Floors::default(), replica: Some(77) };
     say.say(&changes.encode()).unwrap();
     let (_, why) = until_bye(&mut hear);
     assert!(why.contains("no edit could have made"), "{why}");

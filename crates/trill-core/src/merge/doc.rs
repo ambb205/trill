@@ -3,14 +3,14 @@
 
 use super::props::{AudioSet, ClipSet, DeviceSet, LaneSet, MarkerSet, MidiSet, NoteSet, PointSet, SongSet, TrackSet};
 use super::{
-    ALIVE, Beside, Change, ClipOp, DeviceOp, FIRST_AUDIO, FIRST_MIDI, Floors, Home, KIND, Key, LISTENING,
-    MarkerOp, NoteOp, Op, PLACE, Place, PointOp, REFERENCE, SongId, Stamp, Thing, TrackOp,
+    ALIVE, Beside, Change, ClipOp, DeviceOp, FIRST_AUDIO, FIRST_MIDI, Floors, Home, KIND, Key, LISTENING, MarkerOp,
+    NoteOp, Op, PLACE, Place, PointOp, REFERENCE, SongId, Stamp, Thing, TrackOp,
 };
 use crate::channel::Channel;
 use crate::controllers::{ControllerCurve, ControllerKind};
 use crate::project::{
-    AutomationPoint, AutomationTarget, ChainRef, Clip, ClipContent, Device, FORMAT_VERSION, Marker,
-    Master, MidiContent, Note, Project, Reference, Track,
+    AutomationPoint, AutomationTarget, ChainRef, Clip, ClipContent, Device, FORMAT_VERSION, Marker, Master,
+    MidiContent, Note, Project, Reference, Track,
 };
 use crate::time::TimeSignature;
 use crate::travel::Travel;
@@ -371,7 +371,9 @@ impl Doc {
                 self.clips.get(clip).and_then(|clip| clip.notes.get(id)).is_some_and(|held| held.alive)
             }
             Thing::Device(id) => self.devices.get(id).is_some_and(|held| held.held.alive),
-            Thing::Point(home, id) => self.points(home).and_then(|points| points.get(id)).is_some_and(|held| held.alive),
+            Thing::Point(home, id) => {
+                self.points(home).and_then(|points| points.get(id)).is_some_and(|held| held.alive)
+            }
         }
     }
 
@@ -464,9 +466,7 @@ impl Doc {
         Some(match key {
             Key::Song(prop) => Op::Song(SongSet::read(&self.song, *prop)?),
             Key::MasterVolume => Op::MasterVolume(self.song.master.volume_db),
-            Key::Tempo(beat, ramp) => {
-                Op::Tempo(f64::from_bits(*beat), *ramp, self.tempo.get(&(*beat, *ramp)).copied())
-            }
+            Key::Tempo(beat, ramp) => Op::Tempo(f64::from_bits(*beat), *ramp, self.tempo.get(&(*beat, *ramp)).copied()),
             Key::Meter(beat) => Op::Meter(f64::from_bits(*beat), self.meter.get(beat).copied()),
             Key::Marker(id, prop) => {
                 let held = self.markers.get(id)?;
@@ -535,7 +535,9 @@ impl Doc {
                     },
                 )
             }
-            Key::Param(id, name) => Op::Param(*id, name.clone(), self.devices.get(id)?.held.it.params.get(name).copied()),
+            Key::Param(id, name) => {
+                Op::Param(*id, name.clone(), self.devices.get(id)?.held.it.params.get(name).copied())
+            }
             Key::Lane(target, prop) => {
                 let default = LaneHeld::default();
                 let lane = self.lanes.get(target).unwrap_or(&default);
@@ -823,7 +825,8 @@ impl Doc {
                         sets.extend(TrackSet::all(&track).into_iter().map(|set| Op::Track(*id, TrackOp::Set(set))));
                         // What it sends, and what it no longer does.
                         let held: Vec<TrackId> = self.tracks[id].sends.keys().copied().collect();
-                        let level = |to: TrackId| track.sends.iter().find(|send| send.to == to).map(|send| send.level_db);
+                        let level =
+                            |to: TrackId| track.sends.iter().find(|send| send.to == to).map(|send| send.level_db);
                         let named = track.sends.iter().map(|send| send.to).chain(held);
                         sets.extend(named.map(|to| Op::Send(*id, to, level(to))));
                         let mut any = self.remake(stamp, made, sets);
@@ -865,8 +868,9 @@ impl Doc {
                             any = true;
                         }
                         match &clip.content {
-                            ClipContent::Midi(midi) => sets
-                                .extend(MidiSet::all(midi).into_iter().map(|set| Op::Clip(*id, ClipOp::Midi(set)))),
+                            ClipContent::Midi(midi) => {
+                                sets.extend(MidiSet::all(midi).into_iter().map(|set| Op::Clip(*id, ClipOp::Midi(set))))
+                            }
                             ClipContent::Audio(audio) => sets
                                 .extend(AudioSet::all(audio).into_iter().map(|set| Op::Clip(*id, ClipOp::Audio(set)))),
                         }
@@ -1096,9 +1100,8 @@ impl Doc {
                     if base.held.it != clip.held.it || base.track != clip.track {
                         hidden.push(Op::Clip(*id, ClipOp::Whole(Box::new(clip.held.it.clone()), clip.track)));
                     }
-                    let as_held = |note: &&Held<Note>| {
-                        base.notes.get(&note.it.id).is_none_or(|base| base.it != note.it)
-                    };
+                    let as_held =
+                        |note: &&Held<Note>| base.notes.get(&note.it.id).is_none_or(|base| base.it != note.it);
                     let notes: Vec<Note> = clip.notes.values().filter(as_held).map(|note| note.it).collect();
                     if !notes.is_empty() {
                         hidden.push(Op::Notes(*id, notes));
@@ -1305,12 +1308,7 @@ pub(super) fn impersonal(mut track: Track) -> Track {
     track
 }
 
-fn points_since(
-    home: &Home,
-    points: &Points,
-    lacks: &impl Fn(Stamp) -> bool,
-    changes: &mut BTreeMap<Stamp, Vec<Op>>,
-) {
+fn points_since(home: &Home, points: &Points, lacks: &impl Fn(Stamp) -> bool, changes: &mut BTreeMap<Stamp, Vec<Op>>) {
     let mut made: BTreeMap<Stamp, Vec<AutomationPoint>> = BTreeMap::new();
     for held in points.values().filter(|held| lacks(held.made)) {
         made.entry(held.made).or_default().push(held.it);

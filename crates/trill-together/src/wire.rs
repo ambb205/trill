@@ -55,7 +55,16 @@ pub struct Presence {
 impl Presence {
     /// Someone who is there and holds nothing.
     pub fn of(person: Person) -> Self {
-        Self { person, seq: 0, beat: 0.0, playing: false, tracks: Vec::new(), clips: Vec::new(), notes: Vec::new(), holding: None }
+        Self {
+            person,
+            seq: 0,
+            beat: 0.0,
+            playing: false,
+            tracks: Vec::new(),
+            clips: Vec::new(),
+            notes: Vec::new(),
+            holding: None,
+        }
     }
 
     /// The presence held to what one may be: a name of a length, a

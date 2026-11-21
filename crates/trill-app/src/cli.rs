@@ -36,6 +36,8 @@ Options:
   --missing-files         Open with the list of the song's missing files up
   --credits               Open with the credits up: what the song owes for its sampled instruments
   --load SCENE            Open with the playback load up, on a made-up load (calm or short): for pictures
+  --together SCENE        Show made-up company in the song (two or waiting): for pictures
+  --sharing               Open with the panel of File, Share this song up
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
@@ -342,7 +344,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 let known: Vec<&str> = crate::ui::TogetherScene::ALL.iter().map(|(name, _)| *name).collect();
                 let scene = crate::ui::TogetherScene::named(&name);
                 cli.together = Some(
-                    scene.with_context(|| format!("unknown company '{name}' (expected one of {})", known.join(", ")))?,
+                    scene
+                        .with_context(|| format!("unknown company '{name}' (expected one of {})", known.join(", ")))?,
                 );
             }
             "--sharing" => cli.sharing = true,

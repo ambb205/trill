@@ -214,6 +214,17 @@ shot opening-arriving-devices "$song" --opening arriving --select Lead --tab dev
 shot opening-arriving-waiting "$song" --opening arriving --select Arp --tab devices
 shot graphite-opening-arriving "$song" --opening arriving --select Lead --tab devices --theme graphite
 
+# A song that others have open too, with company that is made up: two
+# friends, each with something selected in their colour, their playheads in
+# the ruler and who is here in the status bar; the notes one has selected in
+# the piano roll; the panel that says who is here and what each holds; and a
+# song that is shared and that nobody has joined yet, with its invitation.
+shot together-two "$song" --together two --select Lead
+shot together-two-notes "$song" --together two --select Lead --size 1920x1080
+shot together-panel "$song" --together two --select Lead --sharing
+shot together-waiting "$song" --together waiting --select Lead --sharing
+shot graphite-together-panel "$song" --together two --select Lead --sharing --theme graphite
+
 # Missing files: the same song after its pack was moved. The line in the
 # status bar and the clips marked, with the library pointed at where the
 # pack is now; the list it opens, with what was found for each file and one

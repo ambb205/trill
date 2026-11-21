@@ -109,11 +109,8 @@ fn what_either_of_two_sessions_changes_the_other_has() {
     assert!(b.project().tempo_changes.is_empty() && b.project().tempo == 96.0);
     // It is in the journal, under their name.
     let journal = b.journal().expect("a journal is kept");
-    let theirs: Vec<String> = journal
-        .entries()
-        .filter(|entry| entry.by == Author::Other("Ada".into()))
-        .map(|entry| entry.line())
-        .collect();
+    let theirs: Vec<String> =
+        journal.entries().filter(|entry| entry.by == Author::Other("Ada".into())).map(|entry| entry.line()).collect();
     assert!(theirs.iter().any(|line| line.contains("Lead")), "{theirs:?}");
 
     // Ids made in a shared song are each program's own, and exact as
@@ -142,7 +139,11 @@ fn of_two_moves_of_one_clip_the_later_holds_and_the_other_is_told_once_and_can_p
     };
     assert!(winner.notices().is_empty());
     let [notice] = loser.notices() else { panic!("one sentence: {:?}", loser.notices()) };
-    assert!(notice.text.contains(name) && notice.text.contains("where the clip \u{201C}Verse\u{201D} starts"), "{}", notice.text);
+    assert!(
+        notice.text.contains(name) && notice.text.contains("where the clip \u{201C}Verse\u{201D} starts"),
+        "{}",
+        notice.text
+    );
     assert_eq!(notice.remedy.as_ref().unwrap().label, "Put mine back");
     let mine = if name == "Ada" { 16.0 } else { 8.0 };
     // Putting one's own back is an ordinary edit: it travels, and it is a
@@ -370,7 +371,11 @@ fn a_shared_song_that_is_saved_closed_and_opened_again_merges_with_what_the_othe
     assert_eq!((song.track(keys).unwrap().volume_db, song.track(keys).unwrap().pan), (-6.0, 0.5));
     assert!(song.clip(verse).is_err(), "the clip a removed is gone");
     // b wrote a note in it while apart, and is told with the way back.
-    assert!(b.notices().iter().any(|notice| notice.text.contains("the clip \u{201C}Verse\u{201D}")), "{:?}", b.notices());
+    assert!(
+        b.notices().iter().any(|notice| notice.text.contains("the clip \u{201C}Verse\u{201D}")),
+        "{:?}",
+        b.notices()
+    );
     assert_eq!(a.floors(), b.floors());
     // And from here on they are together again.
     b.edit(|song| song.set_tempo(101.0)).unwrap();
@@ -409,7 +414,10 @@ fn what_no_edit_could_have_made_is_refused_whole_and_the_song_is_as_it_was() {
     a.edit(|song| song.set_track_volume(keys, -6.0)).unwrap();
     let mut said = a.take_said();
     // A batch with one good change and one that no edit could have made.
-    let bad = Change { stamp: Stamp(said[0].change.stamp.0 + 1, 99_999), ops: vec![Op::Track(keys, TrackOp::Set(TrackSet::Pan(7.0)))] };
+    let bad = Change {
+        stamp: Stamp(said[0].change.stamp.0 + 1, 99_999),
+        ops: vec![Op::Track(keys, TrackOp::Set(TrackSet::Pan(7.0)))],
+    };
     said.push(Said { change: bad, knew: None });
     let refused = b.merge("Mallory", said, None, None).unwrap_err();
     assert!(refused.to_string().contains("pan"), "{refused}");

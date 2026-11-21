@@ -60,7 +60,12 @@ impl Peer {
         }
         let change = Change { stamp: Stamp(self.doc.clock() + 1, self.replica), ops };
         let taken = self.doc.apply(&change);
-        assert_eq!(taken.won.len(), change.ops.len(), "every part of one's own change sets something: {:?}", change.ops);
+        assert_eq!(
+            taken.won.len(),
+            change.ops.len(),
+            "every part of one's own change sets something: {:?}",
+            change.ops
+        );
         assert!(taken.waiting.is_empty(), "and none of it waits for anything");
         let derived = self.doc.derive();
         if self.aside.is_empty() && derived.aside.is_empty() {
@@ -274,7 +279,8 @@ fn a_track_deleted_while_another_writes_notes_in_it_is_gone_and_comes_back_whole
     let mut as_it_was = Peer::new(&song(), 1);
     as_it_was.edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
     let _ = before;
-    let same_but_ids = |text: String| text.lines().filter(|line| !line.contains("\"id\"")).collect::<Vec<_>>().join("\n");
+    let same_but_ids =
+        |text: String| text.lines().filter(|line| !line.contains("\"id\"")).collect::<Vec<_>>().join("\n");
     assert_eq!(same_but_ids(a.text()), same_but_ids(as_it_was.text()), "nothing of it was lost");
 }
 
@@ -508,6 +514,51 @@ fn a_note_that_is_copied_in_its_clip_is_another_note_and_the_one_that_stayed_kee
     assert!(matches!(&change.ops[..], [Op::Notes(_, made)] if made.len() == 1), "one note was made: {:?}", change.ops);
 }
 
+#[test]
+fn what_is_written_again_as_it_was_is_what_it_was_and_not_that_gone_and_another_come() {
+    let mut peer = Peer::new(&song(), 70_001);
+    let verse = find_clip(&peer.project, "Verse");
+    let were = peer.project.clip(verse).unwrap().notes().to_vec();
+    // As a tool that writes a clip's notes whole does: it says no ids.
+    let plain = |notes: &[Note]| -> Vec<Note> { notes.iter().map(|note| Note { id: 0, ..*note }).collect() };
+    let same = plain(&were);
+    assert!(peer.edit(|song| song.clip_mut(verse)?.set_notes(same)).is_none(), "the same notes are no change");
+    // With one more and the first of them louder: the others are the notes they were.
+    let mut more = plain(&were);
+    more[0].velocity = 31;
+    more.push(note(72, 3.5));
+    let change = peer.edit(|song| song.clip_mut(verse)?.set_notes(more)).unwrap();
+    let notes = peer.project.clip(verse).unwrap().notes();
+    for was in &were[1..] {
+        assert!(notes.iter().any(|note| note.id == was.id && note == was), "{was:?} is the note it was");
+    }
+    let made: usize = (change.ops.iter()).map(|op| if let Op::Notes(_, made) = op { made.len() } else { 0 }).sum();
+    let gone = change.ops.iter().filter(|op| matches!(op, Op::Note(_, _, NoteOp::Alive(false)))).count();
+    assert_eq!((made, gone, change.ops.len()), (2, 1, 2), "{:?}", change.ops);
+
+    // A curve and an envelope the same way, two points at one beat among them.
+    let points =
+        || vec![AutomationPoint::new(0.0, 0.2), AutomationPoint::new(2.0, 0.8), AutomationPoint::new(2.0, 0.1)];
+    let expression = ControllerKind::Controller(11);
+    peer.edit(|song| song.clip_mut(verse)?.set_controller(expression, points())).unwrap();
+    assert!(peer.edit(|song| song.clip_mut(verse)?.set_controller(expression, points())).is_none());
+    let keys = find_track(&peer.project, "Keys");
+    let volume = AutomationTarget::TrackVolume { track: keys };
+    peer.edit(|song| song.set_automation(volume.clone(), points())).unwrap();
+    assert!(
+        peer.edit(|song| song.set_automation(volume.clone(), points())).is_none(),
+        "the same envelope is no change"
+    );
+    let mut longer = points();
+    longer.push(AutomationPoint::new(4.0, 0.5));
+    let change = peer.edit(|song| song.set_automation(volume.clone(), longer)).unwrap();
+    assert!(
+        matches!(&change.ops[..], [Op::Points(_, made)] if made.len() == 1),
+        "one point was made: {:?}",
+        change.ops
+    );
+}
+
 // ---- a file, and a program that was away ------------------------------------
 
 #[test]
@@ -657,7 +708,9 @@ fn any_op(lot: &mut Lot, project: &Project) -> Op {
         }
         1 => Op::Track(track(lot), TrackOp::Alive(lot.chance(2))),
         2 => Op::Track(track(lot), TrackOp::Place(beat(lot))),
-        3 => Op::Track(track(lot), TrackOp::Set(TrackSet::Group(lot.chance(3).then(|| track(lot)).or(Some(track(lot)))))),
+        3 => {
+            Op::Track(track(lot), TrackOp::Set(TrackSet::Group(lot.chance(3).then(|| track(lot)).or(Some(track(lot))))))
+        }
         4 => Op::Track(track(lot), TrackOp::Reference(lot.chance(2).then(Beside::default))),
         5 => Op::Send(track(lot), track(lot), lot.chance(4).then_some(-6.0).or(Some(-3.0))),
         6 => {
@@ -688,7 +741,10 @@ fn any_op(lot: &mut Lot, project: &Project) -> Op {
         13 => Op::Device(device(lot), DeviceOp::Alive(lot.chance(2))),
         14 => Op::Device(device(lot), DeviceOp::At(chain(lot), beat(lot))),
         15 => Op::Device(device(lot), DeviceOp::Set(DeviceSet::Sidechain(Some(track(lot))))),
-        16 => Op::Points(Home::Lane(target(lot)), vec![AutomationPoint { id: wild(lot), ..AutomationPoint::new(beat(lot), -6.0) }]),
+        16 => Op::Points(
+            Home::Lane(target(lot)),
+            vec![AutomationPoint { id: wild(lot), ..AutomationPoint::new(beat(lot), -6.0) }],
+        ),
         17 => Op::Point(Home::Lane(target(lot)), wild(lot), PointOp::Alive(lot.chance(2))),
         18 => Op::Tempo(1.0 + beat(lot), lot.chance(2), lot.chance(5).then_some(90.0).or(Some(130.0))),
         19 => Op::Meter(1.0 + beat(lot), Some(crate::TimeSignature { numerator: 3, denominator: 4 })),
@@ -722,13 +778,20 @@ fn whatever_another_program_says_the_song_is_one_an_edit_could_have_made() {
         let differ = one.lines().zip(two.lines()).position(|(a, b)| a != b);
         let around = |text: &str| {
             let from = differ.unwrap_or(0).saturating_sub(12);
-            text.lines().skip(from).take(24).collect::<Vec<_>>().join("
-")
+            text.lines().skip(from).take(24).collect::<Vec<_>>().join(
+                "
+",
+            )
         };
-        assert!(one == two, "seed {seed}:
+        assert!(
+            one == two,
+            "seed {seed}:
 {}
 ---- and in another order ----
-{}", around(&one), around(&two));
+{}",
+            around(&one),
+            around(&two)
+        );
     }
 }
 

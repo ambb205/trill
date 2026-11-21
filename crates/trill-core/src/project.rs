@@ -738,17 +738,78 @@ impl Clip {
 /// the same notes are held.
 pub(crate) fn sort_notes(notes: &mut [Note]) {
     notes.sort_by(|a, b| {
-        (a.start.total_cmp(&b.start))
-            .then(a.pitch.cmp(&b.pitch))
-            .then(a.channel.cmp(&b.channel))
-            .then(a.id.cmp(&b.id))
+        (a.start.total_cmp(&b.start)).then(a.pitch.cmp(&b.pitch)).then(a.channel.cmp(&b.channel)).then(a.id.cmp(&b.id))
     });
 }
 
 /// Gives each note of `notes` that has no id one, and one of two that
 /// have the same another: the one that is not as the note of that id was
 /// (`was`), or else the later. Then puts them in order.
+/// Something of a clip or an envelope that is known by an id among the
+/// others there: a note, a point.
+trait Known: PartialEq {
+    fn id(&self) -> u64;
+    fn know_as(&mut self, id: u64);
+    /// Something equal things have in common, to find them by.
+    fn sort(&self) -> (u64, u8);
+}
+
+impl Known for Note {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn know_as(&mut self, id: u64) {
+        self.id = id;
+    }
+
+    fn sort(&self) -> (u64, u8) {
+        (self.start.to_bits(), self.pitch)
+    }
+}
+
+impl Known for AutomationPoint {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn know_as(&mut self, id: u64) {
+        self.id = id;
+    }
+
+    fn sort(&self) -> (u64, u8) {
+        (self.beat.to_bits(), 0)
+    }
+}
+
+/// Gives each of `now` that has no id the id of one of `was` that it is
+/// equal to and that none of `now` has: what is written again as it was
+/// is the thing it was, not that thing gone and another come. (A tool
+/// that writes a clip's notes or a curve whole says no ids; writing the
+/// same again changes nothing, and writing it with one note more adds a
+/// note.)
+fn know_again<T: Known>(now: &mut [T], was: &[T]) {
+    if was.is_empty() || now.iter().all(|it| it.id() != 0) {
+        return;
+    }
+    let held: std::collections::HashSet<u64> = now.iter().map(Known::id).filter(|id| *id != 0).collect();
+    let mut free: HashMap<(u64, u8), Vec<&T>> = HashMap::new();
+    for old in was.iter().filter(|old| !held.contains(&old.id())) {
+        free.entry(old.sort()).or_default().push(old);
+    }
+    for it in now.iter_mut().filter(|it| it.id() == 0) {
+        if let Some(found) = free.get_mut(&it.sort())
+            && let Some(at) = found.iter().position(|old| **old == *it)
+        {
+            // (The first of several that are equal: two points at one
+            // beat stay in the order they were in.)
+            it.know_as(found.remove(at).id());
+        }
+    }
+}
+
 fn settle_notes(notes: &mut [Note], was: Option<&[Note]>, next: &mut u64) {
+    know_again(notes, was.unwrap_or_default());
     let mut seen = std::collections::HashSet::with_capacity(notes.len());
     if notes.iter().any(|note| note.id == 0 || !seen.insert(note.id)) {
         let was: HashMap<u64, &Note> = was.unwrap_or_default().iter().map(|note| (note.id, note)).collect();
@@ -778,7 +839,8 @@ fn settle_notes(notes: &mut [Note], was: Option<&[Note]>, next: &mut u64) {
 /// which is left from: where the ids of such points do not rise in that
 /// order they are given new ones that do, so that the order is one order
 /// wherever the same points are held ([`sort_points`]).
-fn settle_points(points: &mut [AutomationPoint], next: &mut u64) {
+fn settle_points(points: &mut [AutomationPoint], was: Option<&[AutomationPoint]>, next: &mut u64) {
+    know_again(points, was.unwrap_or_default());
     let mut seen = std::collections::HashSet::with_capacity(points.len());
     for point in points.iter_mut() {
         if point.id == 0 || !seen.insert(point.id) {
@@ -809,11 +871,11 @@ pub(crate) fn sort_points(points: &mut [AutomationPoint]) {
 /// Whether two versions of a clip are the same to the last id: equal, and
 /// each note and point the one it was.
 pub(crate) fn same_clip(a: &Clip, b: &Clip) -> bool {
-    let ids = |clip: &Clip| {
+    fn ids(clip: &Clip) -> impl Iterator<Item = u64> + '_ {
         let points = clip.controllers().iter().flat_map(|curve| curve.points.iter().map(|point| point.id));
-        clip.notes().iter().map(|note| note.id).chain(points).collect::<Vec<u64>>()
-    };
-    a == b && (a.midi().is_none() || ids(a) == ids(b))
+        clip.notes().iter().map(|note| note.id).chain(points)
+    }
+    a == b && (a.midi().is_none() || ids(a).eq(ids(b)))
 }
 
 /// Whether two versions of an envelope are the same to the last id.
@@ -1432,8 +1494,10 @@ impl Project {
     /// markers by where they are). Nothing that is heard changes.
     ///
     /// `before` is the song as it was before the edit, where there was
-    /// one: what is as it was is not looked at again, and of two notes
-    /// that came to have one id, the one that is as it was keeps it. A
+    /// one: what is as it was is not looked at again, of two notes that
+    /// came to have one id, the one that is as it was keeps it, and a note
+    /// or a point without an id that is equal to one that was there, and
+    /// is there no longer, is that one. A
     /// session does this after every edit, and to a song it opens: a file
     /// from before there were ids opens, and has them from then on.
     pub fn settle(&mut self, before: Option<&Project>) {
@@ -1453,7 +1517,9 @@ impl Project {
                 if let ClipContent::Midi(midi) = &mut clip.content {
                     settle_notes(&mut midi.notes, was.map(Clip::notes), &mut next);
                     for curve in &mut midi.controllers {
-                        settle_points(&mut curve.points, &mut next);
+                        let was =
+                            was.and_then(Clip::midi).and_then(|was| was.controller_on(curve.channel, curve.controller));
+                        settle_points(&mut curve.points, was.map(|was| &was.points[..]), &mut next);
                     }
                     midi.controllers.sort_by_key(|curve| (curve.controller, curve.channel));
                 }
@@ -1464,7 +1530,7 @@ impl Project {
         for lane in &mut self.automation {
             let was = before.and_then(|before| before.automation.iter().find(|was| was.target == lane.target));
             if !was.is_some_and(|was| same_lane(was, lane)) {
-                settle_points(&mut lane.points, &mut next);
+                settle_points(&mut lane.points, was.map(|was| &was.points[..]), &mut next);
             }
         }
         self.automation.sort_by(|a, b| a.target.cmp(&b.target));

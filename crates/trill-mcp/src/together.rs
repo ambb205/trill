@@ -145,7 +145,8 @@ impl TrillServer {
         if !notices.is_empty() {
             out["notices"] = json!(notices);
         }
-        let said: Vec<String> = self.runtime.said_together(0).into_iter().rev().take(5).rev().map(|(_, said)| said).collect();
+        let said: Vec<String> =
+            self.runtime.said_together(0).into_iter().rev().take(5).rev().map(|(_, said)| said).collect();
         if !said.is_empty() {
             out["lately"] = json!(said);
         }

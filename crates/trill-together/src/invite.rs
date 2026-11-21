@@ -96,8 +96,10 @@ impl Invitation {
 impl fmt::Display for Invitation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let bits: Vec<u8> = self.secret.iter().flat_map(|byte| (0..8).rev().map(move |bit| byte >> bit & 1)).collect();
-        let letters: Vec<char> =
-            bits.chunks(5).map(|five| LETTERS[five.iter().fold(0usize, |value, bit| value << 1 | *bit as usize)] as char).collect();
+        let letters: Vec<char> = bits
+            .chunks(5)
+            .map(|five| LETTERS[five.iter().fold(0usize, |value, bit| value << 1 | *bit as usize)] as char)
+            .collect();
         let groups: Vec<String> = letters.chunks(4).map(|group| group.iter().collect()).collect();
         let host = match self.host.contains(':') {
             true => format!("[{}]", self.host),

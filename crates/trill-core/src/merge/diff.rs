@@ -40,7 +40,8 @@ fn places(order: &[(u64, Option<Place>)]) -> Vec<Place> {
         // Few enough things in a row for the plain way.
         let mut longest: Vec<(usize, Option<usize>)> = Vec::with_capacity(placed.len());
         for (at, (_, item)) in placed.iter().enumerate() {
-            let best = (0..at).filter(|earlier| before(placed[*earlier].1, *item)).max_by_key(|earlier| longest[*earlier].0);
+            let best =
+                (0..at).filter(|earlier| before(placed[*earlier].1, *item)).max_by_key(|earlier| longest[*earlier].0);
             longest.push((best.map_or(1, |best| longest[best].0 + 1), best));
         }
         let mut at = (0..placed.len()).max_by_key(|at| longest[*at].0);
@@ -81,7 +82,9 @@ fn points_differ(home: &Home, was: &[AutomationPoint], now: &[AutomationPoint], 
     let mut made = Vec::new();
     for point in now {
         match old.get(&point.id) {
-            Some(old) => PointSet::differing(old, point, |set| ops.push(Op::Point(home.clone(), point.id, PointOp::Set(set)))),
+            Some(old) => {
+                PointSet::differing(old, point, |set| ops.push(Op::Point(home.clone(), point.id, PointOp::Set(set))))
+            }
             None => made.push(*point),
         }
     }
@@ -155,8 +158,10 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
     }
     if before.tempo_changes != after.tempo_changes {
         let slot = |change: &crate::TempoChange| (change.beat.to_bits(), change.ramp);
-        let now: BTreeMap<(u64, bool), f64> = after.tempo_changes.iter().map(|change| (slot(change), change.tempo)).collect();
-        let was: BTreeMap<(u64, bool), f64> = before.tempo_changes.iter().map(|change| (slot(change), change.tempo)).collect();
+        let now: BTreeMap<(u64, bool), f64> =
+            after.tempo_changes.iter().map(|change| (slot(change), change.tempo)).collect();
+        let was: BTreeMap<(u64, bool), f64> =
+            before.tempo_changes.iter().map(|change| (slot(change), change.tempo)).collect();
         for ((beat, ramp), _) in was.iter().filter(|(slot, _)| !now.contains_key(slot)) {
             ops.push(Op::Tempo(f64::from_bits(*beat), *ramp, None));
         }
@@ -165,8 +170,10 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
         }
     }
     if before.meter_changes != after.meter_changes {
-        let now: BTreeMap<u64, _> = after.meter_changes.iter().map(|change| (change.beat.to_bits(), change.signature)).collect();
-        let was: BTreeMap<u64, _> = before.meter_changes.iter().map(|change| (change.beat.to_bits(), change.signature)).collect();
+        let now: BTreeMap<u64, _> =
+            after.meter_changes.iter().map(|change| (change.beat.to_bits(), change.signature)).collect();
+        let was: BTreeMap<u64, _> =
+            before.meter_changes.iter().map(|change| (change.beat.to_bits(), change.signature)).collect();
         for beat in was.keys().filter(|beat| !now.contains_key(beat)) {
             ops.push(Op::Meter(f64::from_bits(*beat), None));
         }
@@ -216,7 +223,8 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
         let placed = track_places.get(index).copied();
         let Some(old) = was_track(index, id) else {
             // New: made whole, without what it holds, which follows.
-            let place = placed.map_or_else(|| doc.place_of_track(id).unwrap_or((index + 1) as Place), |(place, _)| place);
+            let place =
+                placed.map_or_else(|| doc.place_of_track(id).unwrap_or((index + 1) as Place), |(place, _)| place);
             let whole = Track { clips: Vec::new(), devices: Vec::new(), ..track.clone() };
             ops.push(Op::Track(id, TrackOp::Whole(Box::new(whole), place)));
             continue;
@@ -228,7 +236,8 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
         }
         TrackSet::differing(old, track, |set| {
             // A group that went takes its members' grouping with it.
-            let implied = matches!((&set, old.group), (TrackSet::Group(None), Some(group)) if !tracks_now.contains(&group));
+            let implied =
+                matches!((&set, old.group), (TrackSet::Group(None), Some(group)) if !tracks_now.contains(&group));
             if !implied {
                 ops.push(Op::Track(id, TrackOp::Set(set)));
             }
@@ -309,8 +318,9 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
             if track.clips.iter().any(|clip| clip.id == old.id) {
                 continue;
             }
-            let now = clips_now
-                .get_or_insert_with(|| after.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.id).collect());
+            let now = clips_now.get_or_insert_with(|| {
+                after.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.id).collect()
+            });
             if !now.contains(&old.id) {
                 ops.push(Thing::Clip(old.id).set_alive(false));
             }
@@ -328,7 +338,9 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
         let was: &[Device] = was_track(index, track.id).map_or(&[], |was| &was.devices);
         (ChainRef::Track(track.id), &track.devices[..], was)
     });
-    for (chain, devices, was) in chains.chain([(ChainRef::Master, &after.master.devices[..], &before.master.devices[..])]) {
+    for (chain, devices, was) in
+        chains.chain([(ChainRef::Master, &after.master.devices[..], &before.master.devices[..])])
+    {
         if was == devices {
             continue;
         }
@@ -363,8 +375,7 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
             }
             DeviceSet::differing(old, device, |set| {
                 // A track that went takes the listening to it with it.
-                let implied =
-                    matches!((&set, old.sidechain), (DeviceSet::Sidechain(None), Some(to)) if !tracks_now.contains(&to));
+                let implied = matches!((&set, old.sidechain), (DeviceSet::Sidechain(None), Some(to)) if !tracks_now.contains(&to));
                 if !implied {
                     ops.push(Op::Device(id, DeviceOp::Set(set)));
                 }

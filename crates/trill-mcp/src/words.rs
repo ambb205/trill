@@ -830,7 +830,8 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
         "shared_song" => {
             // Who is here, by name.
             let here = answer.get("here").and_then(Value::as_array)?;
-            let names: Vec<&str> = here.iter().filter_map(|person| person.get("name").and_then(Value::as_str)).collect();
+            let names: Vec<&str> =
+                here.iter().filter_map(|person| person.get("name").and_then(Value::as_str)).collect();
             Some(match names.len() {
                 0 => "nobody else is here".to_owned(),
                 _ => format!("here: {}", names.join(", ")),

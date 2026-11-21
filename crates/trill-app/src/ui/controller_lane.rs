@@ -692,8 +692,12 @@ fn context_menu(
         let point = envelopes::point_at(points, map, pointer);
         let line = envelopes::segment_at(points, map, pointer).map(|ends| ends[0]);
         let shape = if map.scale.stepped() { Segment::Hold } else { Segment::Linear };
-        let place =
-            AutomationPoint { beat: frame.snapped(map.beat(pointer.x), false), value: map.value(pointer.y), shape, id: 0 };
+        let place = AutomationPoint {
+            beat: frame.snapped(map.beat(pointer.x), false),
+            value: map.value(pointer.y),
+            shape,
+            id: 0,
+        };
         // What was right-clicked is selected, so the menu's subject shows.
         if let Some(point) = point
             && !cx.state.piano.lane_points.contains(&point)

@@ -51,7 +51,9 @@ impl std::fmt::Display for Broken {
                 "the other program has not got this invitation: its secret is another, or what arrived was not what \
                  was sent"
             ),
-            Broken::TooMuch(bytes) => write!(f, "the other program said {bytes} bytes at once, which is more than is taken"),
+            Broken::TooMuch(bytes) => {
+                write!(f, "the other program said {bytes} bytes at once, which is more than is taken")
+            }
         }
     }
 }

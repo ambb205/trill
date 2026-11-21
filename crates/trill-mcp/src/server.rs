@@ -2952,7 +2952,8 @@ impl TrillServer {
             done += 1;
             theirs += turned.theirs;
         }
-        let mut reply = json!({ "steps_applied": done, "can_undo": session.can_undo(), "can_redo": session.can_redo() });
+        let mut reply =
+            json!({ "steps_applied": done, "can_undo": session.can_undo(), "can_redo": session.can_redo() });
         // In a song others are working in: what they have set since is
         // theirs, and stays.
         if theirs > 0 {

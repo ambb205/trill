@@ -1514,7 +1514,11 @@ async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_di
         saved["automation"].as_array().unwrap().iter().map(|lane| lane.get("travel").is_some()).collect();
     // (Envelopes are held in one order, by what they move: three of the
     // six follow a fader or a curve of their own, and say so.)
-    assert_eq!((said.len(), said.iter().filter(|said| **said).count()), (6, 3), "a lane straight in its units says nothing");
+    assert_eq!(
+        (said.len(), said.iter().filter(|said| **said).count()),
+        (6, 3),
+        "a lane straight in its units says nothing"
+    );
     saved["format_version"] = json!(1);
     for lane in saved["automation"].as_array_mut().unwrap() {
         lane.as_object_mut().unwrap().remove("travel");

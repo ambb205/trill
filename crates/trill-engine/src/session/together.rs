@@ -38,7 +38,7 @@ use trill_core::merge::{
     Said, SongId, Stamp, Thing, TrackOp, TrackSet, Why,
 };
 use trill_core::project::AutomationTarget;
-use trill_core::DeviceId;
+use trill_core::{DeviceId, Project};
 
 /// How many of the changes made here are remembered for telling whose
 /// work was in something that someone removed.
@@ -97,11 +97,28 @@ impl Turned {
     }
 }
 
+/// How often a plugin that is watched is asked for its state: asking
+/// takes the plugin's own time.
+const LOOK_EVERY: Duration = Duration::from_millis(1000);
+/// How often a plugin whose window is closed is asked before its state is
+/// taken never to settle: some write out something else every time.
+const LOOKS_WITHOUT_SETTLING: u32 = 12;
+
 /// A plugin whose state may have been changed in this program: watched
 /// until it has settled.
 struct Watched {
     /// What it last said its state is, and since when it has said so.
     last: Option<(Vec<u8>, Instant)>,
+    /// When it is next asked.
+    look_at: Instant,
+    /// How often it was asked and had another state than the time before.
+    unsettled: u32,
+}
+
+impl Watched {
+    fn from_now() -> Self {
+        Self { last: None, look_at: Instant::now() + LOOK_EVERY, unsettled: 0 }
+    }
 }
 
 /// What the session keeps of the song being one that others hold.
@@ -155,7 +172,9 @@ impl Sharing {
 /// different for every run and every thread of one.
 fn lot() -> u64 {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos()));
+    hasher.write_u128(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos()),
+    );
     hasher.finish()
 }
 
@@ -175,14 +194,20 @@ fn named(doc: &merge::Doc, thing: &Thing) -> String {
 
 fn envelope(doc: &merge::Doc, target: &AutomationTarget) -> String {
     match target {
-        AutomationTarget::TrackVolume { track } => format!("the volume envelope of {}", named(doc, &Thing::Track(*track))),
+        AutomationTarget::TrackVolume { track } => {
+            format!("the volume envelope of {}", named(doc, &Thing::Track(*track)))
+        }
         AutomationTarget::TrackPan { track } => format!("the pan envelope of {}", named(doc, &Thing::Track(*track))),
         AutomationTarget::DeviceParam { device, param } => {
             format!("the envelope of {param} on {}", named(doc, &Thing::Device(*device)))
         }
         AutomationTarget::MasterVolume => "the master's volume envelope".to_owned(),
         AutomationTarget::Send { track, to } => {
-            format!("the envelope of the send from {} to {}", named(doc, &Thing::Track(*track)), named(doc, &Thing::Track(*to)))
+            format!(
+                "the envelope of the send from {} to {}",
+                named(doc, &Thing::Track(*track)),
+                named(doc, &Thing::Track(*to))
+            )
         }
     }
 }
@@ -286,6 +311,21 @@ impl Session {
     pub fn share(&mut self) -> SongId {
         if let Some(song) = self.sharing.song {
             return song;
+        }
+        // While the song is still one's own every plugin's state is news
+        // to it: read them all now, so that whoever is handed the song has
+        // each plugin as it is running here. While plugins are still being
+        // made the question would wait for the making in hand with the
+        // session held: each is looked at once that is over instead, and
+        // its state said if it is not what the song has.
+        if self.making_devices() {
+            let devices: Vec<DeviceId> = self.project.devices().map(|device| device.id).collect();
+            for device in devices {
+                self.watch(device);
+            }
+        } else {
+            self.absorb_editor_edits();
+            self.capture_device_state();
         }
         let song = SongId(u128::from(lot()) << 64 | u128::from(lot()));
         self.sharing.song = Some(song);
@@ -479,30 +519,33 @@ impl Session {
         }
     }
 
-    /// Works the song out again from its properties.
-    pub(super) fn rederive(&mut self) {
+    /// Works the song out again from its properties, and returns the
+    /// song as it was held until now: nobody who needs the song before
+    /// has to copy it first.
+    pub(super) fn rederive(&mut self) -> Project {
         let next = self.project.next_id();
         let derived = self.doc.derive();
-        self.project = derived.project;
+        let before = std::mem::replace(&mut self.project, derived.project);
         self.project.count_ids_from(next);
         self.sharing.aside = derived.aside;
         self.tell_of_what_was_set_aside();
+        before
     }
 
-    /// An edit by its properties, as one undo step: what an undo, a
-    /// remedy and "bring it back" are made with.
-    pub(super) fn edit_by(&mut self, ops: Vec<Op>) -> Option<Done> {
+    /// An edit by its properties: what a remedy and "bring it back" are
+    /// made with. Returns the song before and what the edit set, for the
+    /// step it is.
+    pub(super) fn edit_by(&mut self, ops: Vec<Op>) -> Option<(Project, Done)> {
         if ops.is_empty() {
             return None;
         }
-        let before = self.project.clone();
         let taken = self.write(ops);
         if taken.won.is_empty() {
             return None;
         }
-        self.rederive();
+        let before = self.rederive();
         self.sync(&before, Scope::Everything);
-        Some(Done::of(&taken.won))
+        Some((before, Done::of(&taken.won)))
     }
 
     /// Brings back something that was removed, with whatever was done in
@@ -517,8 +560,7 @@ impl Session {
 
     /// Makes an edit that is given as the properties it sets, as a step.
     fn act(&mut self, ops: Vec<Op>) {
-        let before = self.project.clone();
-        if let Some(done) = self.edit_by(ops) {
+        if let Some((before, done)) = self.edit_by(ops) {
             self.finish_step(before, done);
         }
     }
@@ -547,7 +589,6 @@ impl Session {
         for Said { change, knew } in said {
             checked.push(Said { change: change.checked(clock)?, knew });
         }
-        let before = self.project.clone();
         let mine = self.sharing.mine.clone();
         let mut news = Vec::new();
         let mut only_params = true;
@@ -600,7 +641,7 @@ impl Session {
         if news.is_empty() {
             return Ok(news);
         }
-        self.rederive();
+        let before = self.rederive();
         if self.project == before {
             // Nothing of it is in the song as it stands (it is held in
             // something that was removed): there is nothing to play anew.
@@ -730,7 +771,7 @@ impl Session {
     /// A plugin may have been changed in this program: it is watched until
     /// its state has settled, which is then said to the others.
     pub(super) fn watch(&mut self, device: DeviceId) {
-        self.sharing.watched.entry(device).or_insert(Watched { last: None });
+        self.sharing.watched.entry(device).or_insert_with(Watched::from_now);
     }
 
     /// Whether what a plugin says its state is, is news to the song: for
@@ -757,27 +798,44 @@ impl Session {
             return;
         }
         let now = Instant::now();
-        let watched: Vec<DeviceId> = self.sharing.watched.keys().copied().collect();
-        for id in watched {
-            // A window that is still open may still be worked in.
+        let due: Vec<DeviceId> =
+            self.sharing.watched.iter().filter(|(_, watched)| watched.look_at <= now).map(|(id, _)| *id).collect();
+        for id in due {
             let Ok(held) = self.project.device(id).map(|device| device.state.clone()) else {
                 self.sharing.watched.remove(&id);
                 continue;
             };
-            let Some(live) = self.news_of_state(id, held.as_ref()) else { continue };
+            let open = self.is_device_editor_open(id);
+            let live = self.news_of_state(id, held.as_ref());
             let entry = self.sharing.watched.get_mut(&id).expect("it is watched");
+            entry.look_at = now + LOOK_EVERY;
+            let Some(live) = live else { continue };
             match &entry.last {
                 Some((last, since)) if *last == live => {
                     if now.duration_since(*since) >= SETTLED {
-                        // Settled: said, whole.
+                        // Settled: said, whole, if it is not what the song
+                        // has. A window that is still open may still be
+                        // worked in, and is watched on.
                         self.capture_state_of(id);
-                        if self.is_device_editor_open(id) {
-                            // Still open: watched on, from what it is now.
-                            self.sharing.watched.insert(id, Watched { last: Some((live, now)) });
+                        match open {
+                            true => drop(
+                                self.sharing
+                                    .watched
+                                    .insert(id, Watched { last: Some((live, now)), ..Watched::from_now() }),
+                            ),
+                            false => drop(self.sharing.watched.remove(&id)),
                         }
                     }
                 }
-                _ => entry.last = Some((live, now)),
+                _ => {
+                    entry.last = Some((live, now));
+                    entry.unsettled += 1;
+                    if !open && entry.unsettled > LOOKS_WITHOUT_SETTLING {
+                        // It writes out something else every time it is
+                        // asked: nothing of it is ever news.
+                        self.sharing.watched.remove(&id);
+                    }
+                }
             }
         }
     }

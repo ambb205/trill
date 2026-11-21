@@ -71,12 +71,27 @@ pub struct Derived {
 /// Something that says what plays through what.
 #[derive(Clone, Debug)]
 enum Wish {
-    Group { track: TrackId, group: TrackId },
-    Send { track: TrackId, to: TrackId },
+    Group {
+        track: TrackId,
+        group: TrackId,
+    },
+    Send {
+        track: TrackId,
+        to: TrackId,
+    },
     /// A send that is its envelope.
-    SendLane { track: TrackId, to: TrackId },
-    Listen { device: DeviceId, chain: ChainRef, to: TrackId },
-    Reference { track: TrackId },
+    SendLane {
+        track: TrackId,
+        to: TrackId,
+    },
+    Listen {
+        device: DeviceId,
+        chain: ChainRef,
+        to: TrackId,
+    },
+    Reference {
+        track: TrackId,
+    },
 }
 
 impl Wish {
@@ -171,8 +186,9 @@ fn admit(mut wishes: Vec<(Stamp, Key, Wish)>) -> (Vec<Wish>, Vec<Aside>) {
                 Wish::Reference { .. } => false,
             })
         };
-        let reference =
-            |of: TrackId| taken.iter().position(|(_, _, other)| matches!(other, Wish::Reference { track } if *track == of));
+        let reference = |of: TrackId| {
+            taken.iter().position(|(_, _, other)| matches!(other, Wish::Reference { track } if *track == of))
+        };
         let refused: Option<(Why, Option<usize>)> = match &wish {
             Wish::Reference { track } => feeder(*track).map(|by| (Why::Reference, Some(by))),
             Wish::Group { track, .. } | Wish::Send { track, .. } | Wish::SendLane { track, .. }
@@ -378,7 +394,9 @@ impl Doc {
                 let change = TempoChange { beat: f64::from_bits(*beat), tempo: *tempo, ramp: *ramp };
                 (change, self.stamp(&Key::Tempo(*beat, *ramp)))
             })
-            .filter(|(change, _)| change.beat.is_finite() && change.beat > SAME_BEAT && valid_tempo(change.tempo).is_ok())
+            .filter(|(change, _)| {
+                change.beat.is_finite() && change.beat > SAME_BEAT && valid_tempo(change.tempo).is_ok()
+            })
             .collect();
         tempo.sort_by(|a, b| a.0.ramp.cmp(&b.0.ramp).then(a.0.beat.total_cmp(&b.0.beat)));
         let mut tempo_changes: Vec<(TempoChange, Stamp)> = Vec::new();
@@ -396,7 +414,8 @@ impl Doc {
         sort_tempo_changes(&mut tempo_changes);
         let mut meter_changes: Vec<(MeterChange, Stamp)> = Vec::new();
         for (beat, signature) in &self.meter {
-            let found = (MeterChange { beat: f64::from_bits(*beat), signature: *signature }, self.stamp(&Key::Meter(*beat)));
+            let found =
+                (MeterChange { beat: f64::from_bits(*beat), signature: *signature }, self.stamp(&Key::Meter(*beat)));
             let valid = found.0.beat.is_finite()
                 && found.0.beat > SAME_BEAT
                 && valid_signature(signature.numerator, signature.denominator).is_ok();

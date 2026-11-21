@@ -87,6 +87,7 @@ through which files are written only into the project's folder or `Documents/Tri
 | Film | `film_plan` (what a film would be, take by take, before any of it is made; costs nothing), `film` (makes it: the song or a stretch of it with its own sound, or how it was made, as an .mp4) |
 | Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map; on a MIDI `channel` where one is asked for), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file; with `stems`, every track, group and return in files of their own from the same pass) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
+| Working together | `shared_song` (shares the open song and answers with the invitation to hand to someone; joins someone's by theirs; leaves; says who is here, what each has selected and has hold of, and the notices of where this program's work and someone else's clashed, each with the edit that puts one's own back; the assistant in the window reads it and neither shares nor joins) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
 compactly as `[pitch, start, length, velocity]`. `set_automation` takes a track's volume or pan, the master's
@@ -134,6 +135,14 @@ Every call is entered in the session's journal as it is made, under what it did 
 client gave: `get_journal` lists them, `search: "chorus"` finds the step where the chorus was written, `after`
 lists what changed since, and `get_song_at` shows the song as it was there. Undoing takes nothing out: a step
 that was undone is followed by one that takes it back.
+
+A song can be one that other people have open too ([Working together](working-together.md)). A client's edits
+are then steps of the program it talks to, said to the others as they are made, and between two of its calls the
+song may have changed: the server's instructions tell a model to read what it is about to change again, to change
+the notes it means and not write a whole clip back, and to take an id that is gone as something someone removed.
+`history` undoes that program's own steps and says how many things stayed as someone else has set them since
+(`left_as_others_set_it`). `shared_song` with `status` has the notices; `put_back` with a notice's id does what it
+offers, as one undoable edit.
 
 `film` takes minutes, so `film_plan` comes first: it lists the takes the director would shoot, each with its
 bars, its shot (`wide`, `close`, `ensemble`, `song`), the parts shown as piano rolls and whether it is cut or

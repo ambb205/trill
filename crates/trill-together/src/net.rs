@@ -49,12 +49,23 @@ pub enum Reach {
 pub enum Event {
     /// A connection is there, proved and encrypted: nothing has been said
     /// over it yet. `joined` for one this program asked for.
-    Open { link: LinkId, joined: bool },
-    Heard { link: LinkId, message: Message },
+    Open {
+        link: LinkId,
+        joined: bool,
+    },
+    Heard {
+        link: LinkId,
+        message: Message,
+    },
     /// A connection is gone, and why.
-    Lost { link: LinkId, why: String },
+    Lost {
+        link: LinkId,
+        why: String,
+    },
     /// Joining did not come to a connection.
-    Failed { why: String },
+    Failed {
+        why: String,
+    },
 }
 
 /// One connection, as the program that drives the song holds it.
@@ -73,8 +84,13 @@ struct Listening {
 /// The connections of one program.
 pub struct Net {
     links: Arc<Mutex<HashMap<LinkId, Link>>>,
+    /// How many bytes of messages were said, to every program together,
+    /// and how many messages: for whoever measures.
+    said: (u64, u64),
     last: Arc<AtomicU64>,
     events: Receiver<Event>,
+    /// What had happened when this was waited for, not yet asked for.
+    early: Vec<Event>,
     happened: Sender<Event>,
     listening: Option<Listening>,
 }
@@ -172,7 +188,8 @@ fn address_on_the_network() -> Option<String> {
 impl Net {
     pub fn new() -> Self {
         let (happened, events) = channel();
-        Self { links: Arc::default(), last: Arc::default(), events, happened, listening: None }
+        let early = Vec::new();
+        Self { links: Arc::default(), said: (0, 0), last: Arc::default(), events, early, happened, listening: None }
     }
 
     /// Starts listening for programs that have the invitation, and
@@ -297,7 +314,16 @@ impl Net {
         }
     }
 
+    /// How many bytes of messages have been said, to every program
+    /// together, and in how many messages: what goes on the wire is a
+    /// little more (sixteen bytes and two of length for every 65 519).
+    pub fn said(&self) -> (u64, u64) {
+        self.said
+    }
+
     fn say_encoded(&mut self, to: &[LinkId], bytes: Arc<Vec<u8>>) {
+        self.said.0 += (bytes.len() * to.len()) as u64;
+        self.said.1 += to.len() as u64;
         let mut behind = Vec::new();
         {
             let links = self.links.lock().unwrap();
@@ -356,7 +382,17 @@ impl Net {
 
     /// What happened since this was last asked. Never waits.
     pub fn events(&mut self) -> Vec<Event> {
-        self.events.try_iter().collect()
+        let mut events = std::mem::take(&mut self.early);
+        events.extend(self.events.try_iter());
+        events
+    }
+
+    /// Waits until something has happened, `at_most` so long: it is there
+    /// to be asked for with `events`.
+    pub fn wait(&mut self, at_most: Duration) {
+        if let Ok(event) = self.events.recv_timeout(at_most) {
+            self.early.push(event);
+        }
     }
 }
 

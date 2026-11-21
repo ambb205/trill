@@ -118,7 +118,8 @@ pub enum TogetherScene {
 }
 
 impl TogetherScene {
-    pub const ALL: [(&'static str, TogetherScene); 2] = [("two", TogetherScene::Two), ("waiting", TogetherScene::Waiting)];
+    pub const ALL: [(&'static str, TogetherScene); 2] =
+        [("two", TogetherScene::Two), ("waiting", TogetherScene::Waiting)];
 
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.iter().find(|(known, _)| *known == name).map(|(_, scene)| *scene)
@@ -127,7 +128,7 @@ impl TogetherScene {
     /// What the window would see in the scene: the same every time, from
     /// what the song holds.
     pub fn of(self, project: &Project) -> Seen {
-        let me = Person { id: 3, name: "Allen".into(), colour: 3 };
+        let me = Person { id: 3, name: "Kit".into(), colour: 3 };
         let invitation = Some("trill:192.168.1.20:47474:7Q2M-K9TX-4HNB-V3RC-8WJD-6PFA-ZY5E-1GSK".to_owned());
         if self == TogetherScene::Waiting {
             return Seen { me: Some(me), invitation, ..Seen::default() };
@@ -203,10 +204,15 @@ pub fn sync(state: &mut UiState, live: &mut Live, snapshot: &Snapshot, runtime: 
     }
     // What this window's person has selected, for the others to see.
     let project = &snapshot.project;
-    let mut mine = Mine { tracks: state.selected_track.into_iter().collect(), clips: state.selected_clips.clone(), ..Mine::default() };
+    let mut mine = Mine {
+        tracks: state.selected_track.into_iter().collect(),
+        clips: state.selected_clips.clone(),
+        ..Mine::default()
+    };
     if let Some(clip) = state.selected_clip.and_then(|id| project.clip(id).ok()) {
         // Notes are selected by what they are; the others are told which.
-        let held = |note: &trill_core::Note| clip.notes().iter().find(|found| *found == note).map(|found| (clip.id, found.id));
+        let held =
+            |note: &trill_core::Note| clip.notes().iter().find(|found| *found == note).map(|found| (clip.id, found.id));
         mine.notes = state.selected_notes.iter().filter_map(held).collect();
     }
     if state.together.said.as_ref() != Some(&mine) {
@@ -327,7 +333,9 @@ fn name_field(ui: &mut Ui, cx: &mut Cx) {
             cx.sounds.runtime.set_name_together(&name);
             let remembered = name.clone();
             cx.sounds.quietly(move |runtime| {
-                runtime.update_settings(|settings| settings.together.name = Some(remembered)).map_err(|error| error.to_string())
+                runtime
+                    .update_settings(|settings| settings.together.name = Some(remembered))
+                    .map_err(|error| error.to_string())
             });
         }
     }
@@ -382,35 +390,36 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
         .fill(theme.panel)
         .stroke(egui::Stroke::new(1.0, theme.hairline))
         .inner_margin(egui::Margin::symmetric(18, 14));
-    let modal = egui::Modal::new(egui::Id::unique("together")).frame(frame).backdrop_color(theme.backdrop).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        let (title, _) = ui.allocate_exact_size(vec2(WIDTH, 18.0), Sense::hover());
-        let words = match panel {
-            Panel::Share => "Share this song",
-            Panel::Join => "Join a song",
-        };
-        text::paint(ui.painter(), title, Align2::LEFT_CENTER, theme.text.caps, words, theme.ink);
-        text::paint(ui.painter(), title, Align2::RIGHT_CENTER, theme.text.micro, "Esc closes", theme.ink_faint);
-        ui.add_space(10.0);
-        name_field(ui, cx);
-        match panel {
-            Panel::Share => share_panel(ui, cx),
-            Panel::Join => join_panel(ui, cx),
-        }
-        if cx.live.together.is_on() {
-            heading(ui, cx, "Who is here");
-            people(ui, cx);
+    let modal =
+        egui::Modal::new(egui::Id::unique("together")).frame(frame).backdrop_color(theme.backdrop).show(ctx, |ui| {
+            ui.set_width(WIDTH);
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let (title, _) = ui.allocate_exact_size(vec2(WIDTH, 18.0), Sense::hover());
+            let words = match panel {
+                Panel::Share => "Share this song",
+                Panel::Join => "Join a song",
+            };
+            text::paint(ui.painter(), title, Align2::LEFT_CENTER, theme.text.caps, words, theme.ink);
+            text::paint(ui.painter(), title, Align2::RIGHT_CENTER, theme.text.micro, "Esc closes", theme.ink_faint);
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                if trill_noir::button(ui, theme, "Leave", Variant::Default).clicked() {
-                    cx.sounds.runtime.leave();
-                    cx.state.together.panel = None;
-                }
-            });
-        }
-    });
+            name_field(ui, cx);
+            match panel {
+                Panel::Share => share_panel(ui, cx),
+                Panel::Join => join_panel(ui, cx),
+            }
+            if cx.live.together.is_on() {
+                heading(ui, cx, "Who is here");
+                people(ui, cx);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                    if trill_noir::button(ui, theme, "Leave", Variant::Default).clicked() {
+                        cx.sounds.runtime.leave();
+                        cx.state.together.panel = None;
+                    }
+                });
+            }
+        });
     if modal.should_close() {
         cx.state.together.panel = None;
     }
@@ -460,11 +469,15 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
             paint::frame(ui.painter(), rect, theme.hairline);
             let inner = rect.shrink2(vec2(8.0, 0.0));
             text::paint(ui.painter(), inner, Align2::LEFT_CENTER, theme.text.value, &invitation, theme.ink);
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Invitation: {invitation}")));
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Invitation: {invitation}"))
+            });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                if trill_noir::button(ui, theme, "Copy the invitation", Variant::Primary).clicked() || response.clicked() {
+                if trill_noir::button(ui, theme, "Copy the invitation", Variant::Primary).clicked()
+                    || response.clicked()
+                {
                     ui.ctx().copy_text(invitation.clone());
                     cx.state.toasts.info("The invitation is on the clipboard.");
                 }

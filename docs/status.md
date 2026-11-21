@@ -99,6 +99,26 @@ Only Windows has been run so far.
 - Warps free of what a corner in the cycle adds. Sync, bend and squeeze leave 42 to 57 dB under the note what
   does not belong to it and is heard, two octaves over middle C; FM by a bright wave far more.
 
+## Working in one song together
+
+- Audio files that travel between machines. Each person needs the files where the song names them.
+- Hearing a plugin one has not got (a stem from whoever has it). Its place is kept and its settings are carried.
+- A meeting point for two home networks. A program joins wherever it can open a connection: the same machine, a
+  local network, a VPN, a forwarded port.
+- A view of what happened while one was away. The notices say where work clashed; the journal has every step
+  with who made it.
+- The assistant as a person of its own in the song. It acts as its user.
+- Versions of a song that are kept apart and merged back.
+- Throwing away what a shared song keeps of removed things and of when each property was set. Its file only
+  grows.
+- What a tool call is doing as something the others see. They see a person's selection, what a drag has hold
+  of and where their song stands.
+- The window's own drag of a note or a clip shown to the others as it moves in any way but by its result
+  arriving.
+- A journal that keeps what it keeps by the comparison everything else uses. It still has its own, coarser one;
+  a step that arrives from someone else is entered under their name.
+- A second machine. Everything was run with both programs on one computer, over its loopback.
+
 ## Sounds of more than one device
 
 - What is in front of the instrument.

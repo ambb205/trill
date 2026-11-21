@@ -64,7 +64,10 @@ pub fn check(project: &Project) {
         if track.reference.is_some() {
             let sent = |lane: &crate::AutomationLane| matches!(lane.target, AutomationTarget::Send { track: from, .. } if from == track.id);
             assert!(track.group.is_none() && track.sends.is_empty() && !project.automation.iter().any(sent));
-            assert!(project.devices().all(|device| device.sidechain != Some(track.id)), "nothing listens to a reference");
+            assert!(
+                project.devices().all(|device| device.sidechain != Some(track.id)),
+                "nothing listens to a reference"
+            );
         }
         assert!(track.volume_db.is_finite() && (-1.0..=1.0).contains(&track.pan));
         let mut last = (f64::NEG_INFINITY, ClipId(0));
@@ -112,7 +115,10 @@ pub fn check(project: &Project) {
     }
     for pair in project.tempo_changes.windows(2) {
         let same = (pair[1].beat - pair[0].beat).abs() <= crate::tempo::SAME_BEAT;
-        assert!(!same || (pair[0].ramp && !pair[1].ramp), "one beat holds a glide that arrives and a tempo that takes over");
+        assert!(
+            !same || (pair[0].ramp && !pair[1].ramp),
+            "one beat holds a glide that arrives and a tempo that takes over"
+        );
     }
     for pair in project.meter_changes.windows(2) {
         assert!(pair[1].beat - pair[0].beat > crate::tempo::SAME_BEAT);
@@ -200,7 +206,9 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Box<dyn FnOnce(&mut Project
         8 => Box::new(move |song| song.set_send(track, other, (a % 4 != 0).then_some(level))),
         9 => Box::new(move |song| song.set_reference(track, (a % 2 == 0).then(Reference::default))),
         10 | 11 => Box::new(move |song| song.add_midi_clip(track, format!("Clip {a}"), beat, 4.0).map(drop)),
-        12 => Box::new(move |song| song.add_audio_clip(track, "Audio", beat, 2.0, AudioContent::new("a.wav")).map(drop)),
+        12 => {
+            Box::new(move |song| song.add_audio_clip(track, "Audio", beat, 2.0, AudioContent::new("a.wav")).map(drop))
+        }
         13 => Box::new(move |song| song.remove_clip(clip).map(drop)),
         14 => Box::new(move |song| song.move_clip(clip, (a % 2 == 0).then_some(track), beat)),
         15 => Box::new(move |song| song.set_clip_span(clip, beat, 1.0 + (a % 8) as f64)),
@@ -214,10 +222,13 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Box<dyn FnOnce(&mut Project
             Ok(())
         }),
         21..=24 => Box::new(move |song| {
-            let notes: Vec<Note> = (0..1 + a % 4).map(|n| note(48 + ((b + n * 7) % 36) as u8, (c % 16 + n) as f64 / 2.0)).collect();
+            let notes: Vec<Note> =
+                (0..1 + a % 4).map(|n| note(48 + ((b + n * 7) % 36) as u8, (c % 16 + n) as f64 / 2.0)).collect();
             song.clip_mut(clip)?.add_notes(&notes)
         }),
-        25 => Box::new(move |song| song.clip_mut(clip)?.remove_notes(|note| usize::from(note.pitch) % 3 == a % 3).map(drop)),
+        25 => Box::new(move |song| {
+            song.clip_mut(clip)?.remove_notes(|note| usize::from(note.pitch) % 3 == a % 3).map(drop)
+        }),
         26 | 27 => Box::new(move |song| {
             // Some notes moved, some made louder: as a drag does.
             let mut notes = song.clip(clip)?.notes().to_vec();
@@ -288,4 +299,3 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Box<dyn FnOnce(&mut Project
         }),
     }
 }
-
