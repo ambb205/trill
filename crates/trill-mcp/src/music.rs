@@ -960,7 +960,7 @@ fn write(
                 let kind = ControllerKind::PitchBend;
                 let existing = clip.controller_on(channel, kind).map(|curve| curve.points.clone()).unwrap_or_default();
                 // A line without ornaments still takes the wheel back from what was there.
-                let rest = vec![AutomationPoint { beat: offset, value: 0.0, shape: Segment::Hold }];
+                let rest = vec![AutomationPoint { beat: offset, value: 0.0, shape: Segment::Hold, id: 0 }];
                 let piece = if wheel.is_empty() { &rest } else { wheel };
                 if !(wheel.is_empty() && existing.is_empty()) {
                     let points = match existing.is_empty() {
@@ -2011,7 +2011,7 @@ fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Repl
             .copied()
             .collect();
         if piece.first().is_none_or(|first| first.beat > from + EPSILON) {
-            piece.insert(0, AutomationPoint { beat: from, value: wanted.rest, shape: Segment::Hold });
+            piece.insert(0, AutomationPoint { beat: from, value: wanted.rest, shape: Segment::Hold, id: 0 });
         }
         let existing = clip.controller_on(channel, kind).map(|curve| curve.points.clone()).unwrap_or_default();
         splice(&existing, from, Some(to), &piece)

@@ -36,6 +36,8 @@ Trill is an early build and has only been run on Windows. [Status](docs/status.m
 - **A recording taken apart**: stems, beats, lyrics, loops and MIDI from a recording, found by models that run on
   your own machine. ([Sounds, listening and studies](docs/sounds-and-studies.md))
 - **An assistant in the window**, and an MCP server for one outside it. ([Working with an AI](docs/ai-and-mcp.md))
+- **A song worked on together**: two or more people in one song at once, each in a Trill of their own, connected
+  directly by invitation, each undoing their own work. ([Working together](docs/working-together.md))
 - **A replay of how a song was made**, a cinematic view of the song, and a film of either as an `.mp4`.
   ([The making-of, the stage and films](docs/making-of-and-film.md))
 
@@ -143,7 +145,7 @@ owes the makers of the sampled instruments it plays.
 ## Development
 
 ```sh
-cargo test --workspace                    # about 2,700 tests; needs nothing installed
+cargo test --workspace                    # about 2,900 tests; needs nothing installed
 cargo clippy --workspace --all-targets    # must be clean
 cargo fmt --all -- --check
 ```

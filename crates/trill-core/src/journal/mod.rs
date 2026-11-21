@@ -69,6 +69,9 @@ pub enum Author {
     Assistant,
     /// A client of the MCP server, by the name it gave.
     Client(String),
+    /// Someone else who holds the song and changed it in a program of
+    /// their own, by the name they go by.
+    Other(String),
 }
 
 impl Author {
@@ -78,7 +81,8 @@ impl Author {
             Author::Person => "you",
             Author::Assistant => "the assistant",
             Author::Client(name) if name.is_empty() => "a client",
-            Author::Client(name) => name,
+            Author::Other(name) if name.is_empty() => "someone else",
+            Author::Client(name) | Author::Other(name) => name,
         }
     }
 }
@@ -632,6 +636,44 @@ impl Journal {
         let places = place::of_change(&change, after);
         let step = Step { label, places, tool, heard: None, reverses: None, aside: false, change };
         let seq = self.push(at, by, What::Step(step), open);
+        Some(Mark { seq, from: 0, to })
+    }
+
+    /// Records that the song went from `before` to `after` at the hands of
+    /// someone else who holds it: a step of theirs, as it arrived. What
+    /// arrives from one person in quick succession (a drag of theirs) is
+    /// one step.
+    pub fn record_of(&mut self, at: u64, by: Author, before: &Project, after: &Project) -> Option<Mark> {
+        /// How long one person's changes may lie apart and be one step.
+        const ONE_STEP_MS: u64 = 1500;
+        let change = Change::between(before, after, &mut self.blobs);
+        if change.is_empty() {
+            return None;
+        }
+        if let Some(last) = self.entries.back_mut()
+            && last.open.is_none()
+            && last.by == by
+            && at.saturating_sub(last.at) <= ONE_STEP_MS
+            && let What::Step(step) = &mut last.what
+            && step.reverses.is_none()
+            && step.tool.is_none()
+            && !step.aside
+        {
+            let from = step.change.len();
+            for place in place::of_change(&change, after) {
+                if !step.places.contains(&place) {
+                    step.places.push(place);
+                }
+            }
+            step.change.then(change);
+            (last.at, last.size) = (at, 0);
+            return Some(Mark { seq: last.seq, from, to: step.change.len() });
+        }
+        let label = words::describe(before, after, &change);
+        let to = change.len();
+        let places = place::of_change(&change, after);
+        let step = Step { label, places, tool: None, heard: None, reverses: None, aside: false, change };
+        let seq = self.push(at, by, What::Step(step), None);
         Some(Mark { seq, from: 0, to })
     }
 

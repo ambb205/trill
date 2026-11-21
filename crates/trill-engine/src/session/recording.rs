@@ -52,6 +52,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use trill_core::merge::Thing;
 use trill_core::project::AudioContent;
 use trill_core::{ClipId, Monitoring, Project, TrackId, TrackInput};
 
@@ -1377,13 +1378,31 @@ impl Session {
         self.recording.notice = Some(sentence);
     }
 
-    /// Calls `look` with the song as it is and as every state undo and
-    /// redo can reach has it.
+    /// Calls `look` with songs that between them name every file the
+    /// song names, or would name in a state that can be come back to: the
+    /// song as it is; the song with whatever a step that is taken back or
+    /// brought again puts in it again; and one of nothing but what the
+    /// steps set a file's name from or to. In a song that others hold too
+    /// anything that was removed can be brought back by someone, so all
+    /// of it counts.
     pub(super) fn each_state(&self, mut look: impl FnMut(&Project)) {
         look(&self.project);
-        for step in self.undo.iter().chain(&self.redo) {
-            look(&step.project);
+        let ops = || self.undo.iter().chain(&self.redo).flat_map(|step| step.done.ops());
+        match self.shared_song() {
+            Some(_) => look(&self.doc.with_everything()),
+            None => {
+                // (A step that made or removed a thing set whether it is there.)
+                let back: Vec<Thing> = (ops())
+                    .filter_map(|op| {
+                        let key = op.key()?;
+                        let thing = key.thing()?;
+                        (thing.alive() == key).then_some(thing)
+                    })
+                    .collect();
+                look(&self.doc.with_also(back.iter()));
+            }
         }
+        look(&super::beside::of_values(&self.doc, ops()));
     }
 
     /// The recordings in the song's own folder that neither the song nor

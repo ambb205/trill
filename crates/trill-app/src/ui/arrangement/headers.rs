@@ -124,6 +124,8 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     let background = ui.interact(rect, id.with("background"), Sense::click_and_drag());
     let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, surface);
+    // Someone else has the track selected: their colour down its edge.
+    crate::ui::together::mark_track(&painter, cx, rect.with_min_x(rect.left() + HEADER_STRIP), track.id);
     paint::hline_above(&painter, rect.x_range(), rect.bottom(), theme.hairline);
     let strip = Rect::from_min_max(rect.min, pos2(rect.left() + HEADER_STRIP, rect.bottom() - 1.0));
     painter.rect_filled(strip, 0.0, if track.mute { fade(color, 0.35) } else { color });

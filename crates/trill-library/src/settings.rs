@@ -42,6 +42,15 @@ pub struct Settings {
     #[serde(serialize_with = "paths::serialize_map")]
     pub fetched: BTreeMap<String, PathBuf>,
     pub ui: UiSettings,
+    pub together: TogetherSettings,
+}
+
+/// What is remembered for working in a song with others.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TogetherSettings {
+    /// The name this person goes by among the others. `None` is the name
+    /// they are signed in to the machine by.
+    pub name: Option<String>,
 }
 
 /// The sound library's part of the settings; see
@@ -296,6 +305,9 @@ impl Reader {
             self.value(studies, "studies.folder", &mut settings.studies.folder);
         }
         self.value(document, "fetched", &mut settings.fetched);
+        if let Some(together) = self.section(document, "together") {
+            self.value(together, "together.name", &mut settings.together.name);
+        }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
             self.value(ui, "ui.browser_width", &mut settings.ui.browser_width);
@@ -489,6 +501,7 @@ mod tests {
             studies: StudySettings { folder: Some("/big disk/studies".into()) },
             fetched: [("models".to_owned(), PathBuf::from("/big disk/models"))].into_iter().collect(),
             ui: UiSettings { theme: "noir".into(), browser_width: 312.5, window_size: Some([1600.0, 900.0]) },
+            together: TogetherSettings { name: Some("Jo".into()) },
         }
     }
 

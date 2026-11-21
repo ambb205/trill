@@ -299,7 +299,7 @@ fn parse_note(
                 .to_string());
         }
     };
-    Ok((Note { pitch, start, length, velocity, channel }, how))
+    Ok((Note { pitch, start, length, velocity, channel, id: 0 }, how))
 }
 
 pub fn parse_notes(notes: &[NoteInput]) -> Result<Vec<Note>, String> {
@@ -428,7 +428,7 @@ fn parse_point_values<'a>(
             let located = |error: String| format!("points[{index}]: {error}");
             match (beat.and_then(Value::as_f64), value.and_then(Value::as_f64)) {
                 (Some(beat), Some(value)) => {
-                    Ok(AutomationPoint { beat, value, shape: parse_shape(shape, unsaid).map_err(located)? })
+                    Ok(AutomationPoint { beat, value, shape: parse_shape(shape, unsaid).map_err(located)?, id: 0 })
                 }
                 _ => Err(located("expected {beat, value, shape?} or [beat, value, shape?]".to_string())),
             }

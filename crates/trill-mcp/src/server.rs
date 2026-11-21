@@ -490,6 +490,7 @@ impl TrillServer {
             + Self::catalogue_router()
             + Self::playing_router()
             + Self::recording_router()
+            + Self::together_router()
     }
 
     /// The names of the tools the server offers.
@@ -3011,22 +3012,34 @@ impl TrillServer {
     }
 
     /// Step backwards or forwards through the edit history. Every change made through these tools is undoable.
+    /// The steps are this program's own: in a song that other people are working in too, what they did is not
+    /// undone, and something a step set that someone else has set since stays as they set it
+    /// (`left_as_others_set_it` counts those).
     #[tool(annotations(title = "Undo / redo"))]
     fn history(&self, Parameters(request): Parameters<HistoryRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let wanted = request.steps.unwrap_or(1).clamp(1, 1000);
-        let mut done = 0;
+        let (mut done, mut theirs) = (0, 0);
         for _ in 0..wanted {
-            let moved = match request.action {
-                HistoryAction::Undo => session.undo(),
-                HistoryAction::Redo => session.redo(),
+            let turned = match request.action {
+                HistoryAction::Undo => session.take_back(),
+                HistoryAction::Redo => session.bring_again(),
             };
-            if !moved {
+            if !turned.done {
                 break;
             }
             done += 1;
+            theirs += turned.theirs;
         }
-        finish(Ok(json!({ "steps_applied": done, "can_undo": session.can_undo(), "can_redo": session.can_redo() })))
+        let mut reply =
+            json!({ "steps_applied": done, "can_undo": session.can_undo(), "can_redo": session.can_redo() });
+        // In a song others are working in: what they have set since is
+        // theirs, and stays.
+        if theirs > 0 {
+            reply["left_as_others_set_it"] = json!(theirs);
+            reply["note"] = json!(trill_engine::Turned { done: true, theirs }.sentence());
+        }
+        finish(Ok(reply))
     }
 
     /// Save the project to a file.
@@ -3651,7 +3664,7 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::catalogue::INSTRUCTIONS,
                 crate::listening::INSTRUCTIONS,
@@ -3664,6 +3677,7 @@ impl ServerHandler for TrillServer {
                 crate::playing::INSTRUCTIONS,
                 crate::recording::INSTRUCTIONS,
                 crate::story::INSTRUCTIONS,
+                crate::together::INSTRUCTIONS,
                 crate::film::INSTRUCTIONS
             ))
     }

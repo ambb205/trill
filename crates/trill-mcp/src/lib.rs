@@ -34,6 +34,7 @@ mod sounds;
 mod story;
 mod studying;
 mod taking;
+mod together;
 mod view;
 mod wavetable;
 pub mod words;

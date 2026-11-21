@@ -1003,6 +1003,7 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
     // The notes that say their channel, where channels are shown.
     let mut marked: Vec<(Rect, Channel)> = Vec::new();
     let chosen = cx.state.piano.channel;
+    let mut theirs: Vec<(Rect, u64)> = Vec::new();
     for note in &midi.notes {
         if note.start > last_beat {
             // Sorted by start: nothing further right is visible either.
@@ -1028,8 +1029,15 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
         if cx.state.selected_notes.contains(note) {
             outlines.push(body);
         }
+        if cx.live.together.on_note(clip.id, note.id).is_some() {
+            theirs.push((body, note.id));
+        }
     }
     painter.add(Shape::mesh(bodies));
+    // The notes someone else has selected, in their colour.
+    for (body, note) in theirs {
+        super::together::mark_note(&painter, cx, body.intersect(grid), clip.id, note);
+    }
     for (body, channel) in marked {
         let inside = body.shrink2(vec2(3.0, 0.0)).intersect(grid);
         // Dark on a note of the chosen channel, which is lit; light on the
@@ -1452,6 +1460,7 @@ fn grid_interaction(
                     length: cx.state.piano.note_length,
                     velocity: cx.state.piano.note_velocity,
                     channel: cx.state.piano.channel,
+                    id: 0,
                 };
                 if swap_notes(cx, clip.id, &[], &[note]) {
                     cx.state.selected_notes = vec![note];

@@ -238,6 +238,9 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     if MenuItem::new("Watch one from a file\u{2026}").show(ui, theme).clicked() {
         files::watch_story(ui.ctx(), cx);
     }
+    // The song with someone else in it, each in a Trill of their own.
+    trill_noir::menu_separator(ui, theme);
+    super::together::menu(ui, cx);
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Audio and MIDI\u{2026}", Command::AudioSettings, true) {
         audio_settings::open(cx);
@@ -265,10 +268,10 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
         MenuItem::new(label).shortcut(&shortcuts::keys(command)).enabled(enabled).show(ui, theme).clicked()
     };
     if item(ui, "Undo", Command::Undo, cx.snap.can_undo) {
-        cx.with_session(|session| session.undo());
+        super::app::undo(cx);
     }
     if item(ui, "Redo", Command::Redo, cx.snap.can_redo) {
-        cx.with_session(|session| session.redo());
+        super::app::redo(cx);
     }
     trill_noir::menu_separator(ui, theme);
 

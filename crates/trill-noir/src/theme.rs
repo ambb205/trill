@@ -134,6 +134,11 @@ pub struct Theme {
     pub data: Color32,
     /// Track hues, in the order new tracks take them.
     pub tracks: [Color32; TRACK_HUES],
+    /// The colours other people who have the song open are shown in: what
+    /// each has selected, where their song stands, their name. Louder
+    /// than the track hues they are drawn over, and clear of `signal`,
+    /// which is one's own playhead. See [`crate::people`].
+    pub people: [Color32; crate::people::PEOPLE],
     /// Text on a track hue or another accent fill.
     pub on_accent: Color32,
     /// Opacity of the text and marks of a control that is disabled, or
@@ -221,6 +226,16 @@ impl Theme {
             info: sky,
             data: teal,
             tracks: [violet, sky, teal, sage, amber, rose, slate, clay, iris, aqua],
+            people: [
+                rgb(0xFF6FB5),
+                rgb(0x35D6F0),
+                rgb(0xC4E23A),
+                rgb(0xC48BFF),
+                rgb(0x3FE0B0),
+                rgb(0xF7D74A),
+                rgb(0x6EA8FF),
+                rgb(0x7EE06A),
+            ],
             on_accent: rgb(0x101013),
             disabled: 0.6,
             key_white: rgb(0xC9C9D1),
@@ -263,6 +278,16 @@ impl Theme {
             info: sky,
             data: teal,
             tracks: [violet, sky, teal, sage, amber, rose, slate, clay, iris, aqua],
+            people: [
+                rgb(0x87094A),
+                rgb(0x004B5D),
+                rgb(0x414800),
+                rgb(0x591EA4),
+                rgb(0x004F36),
+                rgb(0x5B3F00),
+                rgb(0x133D9A),
+                rgb(0x1B4F0A),
+            ],
             on_accent: rgb(0xF4F4F6),
             disabled: 0.6,
             key_white: rgb(0xE6E6E8),
@@ -452,7 +477,9 @@ mod tests {
         each(|t| {
             let accents = [("signal", t.signal), ("ok", t.ok), ("warn", t.warn), ("info", t.info), ("data", t.data)];
             let tracks = t.tracks.iter().map(|hue| ("track", *hue));
-            for (name, accent) in accents.into_iter().chain(tracks) {
+            // A person's name on their colour, and their marks on the bars.
+            let people = t.people.iter().map(|hue| ("person", *hue));
+            for (name, accent) in accents.into_iter().chain(tracks).chain(people) {
                 // A clip's name strip, a lit mute chip.
                 let on_it = contrast_ratio(t.on_accent, accent);
                 assert!(on_it >= AA, "{}: text on {name} {accent:?} is {on_it:.2}:1", t.name);

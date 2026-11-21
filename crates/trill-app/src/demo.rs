@@ -108,7 +108,7 @@ fn build(session: &mut Session) -> Result<ClipId, SessionError> {
         // and eases back under the melody.
         let filter = project.track(pad)?.devices[0].id;
         let cutoff = AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() };
-        let opening = AutomationPoint { beat: 0.0, value: 380.0, shape: Segment::Curve(-0.35) };
+        let opening = AutomationPoint { beat: 0.0, value: 380.0, shape: Segment::Curve(-0.35), id: 0 };
         let points = vec![opening, AutomationPoint::new(8.0 * BAR, 2600.0), AutomationPoint::new(16.0 * BAR, 1400.0)];
         project.set_automation(cutoff, points)
     })?;
@@ -274,7 +274,7 @@ fn melody() -> Vec<Note> {
 /// The melody's dynamics, as the clip's expression: each half of the
 /// phrase swells into its long note, and the whole falls away at the end.
 fn melody_dynamics() -> Vec<AutomationPoint> {
-    let bent = |beat: Beats, value: f64, bend: f32| AutomationPoint { beat, value, shape: Segment::Curve(bend) };
+    let bent = |beat: Beats, value: f64, bend: f32| AutomationPoint { beat, value, shape: Segment::Curve(bend), id: 0 };
     vec![
         bent(0.0, 0.62, -0.3),
         AutomationPoint::new(2.0, 0.94),
@@ -289,7 +289,7 @@ fn melody_dynamics() -> Vec<AutomationPoint> {
 /// The mod wheel on the melody's two long notes: up as each is held, and
 /// back at rest for the note after it.
 fn melody_vibrato() -> Vec<AutomationPoint> {
-    let held = |beat: Beats, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+    let held = |beat: Beats, value: f64| AutomationPoint { beat, value, shape: Segment::Hold, id: 0 };
     vec![
         AutomationPoint::new(1.0, 0.0),
         AutomationPoint::new(2.75, 0.45),

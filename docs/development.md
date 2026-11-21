@@ -6,7 +6,7 @@ reads as well for people.
 
 ## Building and testing
 
-`cargo test --workspace` runs about 2,700 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,900 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -77,8 +77,9 @@ first one has already built, and the first build compiles only Trill's own crate
 
 ```
 crates/
-  trill-core      Project model, edit operations, the device API, and the journal of a session with its replay.
-                  No audio or UI dependencies.
+  trill-core      Project model, edit operations, the device API, the journal of a session with its replay, and
+                  the song as properties that several programs change at once (`merge`). No audio or UI
+                  dependencies.
   trill-dsp       Built-in instruments and effects, and offline time-stretching.
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
@@ -96,7 +97,10 @@ crates/
   trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
                   and VST3, and the readers of the presets some makers keep in files of their own.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
-                  safety copies of unsaved work.
+                  safety copies of unsaved work, and the thread that connects the session to other programs
+                  in the same song.
+  trill-together  The wire between programs that hold the same song: invitations, an encrypted connection
+                  (the Noise protocol, through `snow`), the messages. Nothing of the song.
   trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, ornaments,
                   articulations, analysis.
   trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
@@ -111,6 +115,8 @@ Three ideas hold it together:
 
 1. **One front door.** `Session` owns the project, its undo history and the engine. The GUI and the MCP server are
    both thin clients of it, so there is exactly one implementation of every edit and the two can never disagree.
+   What an edit changed is found by comparing the song before and after, and is what an undo step keeps and what
+   another program in the same song is told ([Working in one song together](working-together.md)).
 2. **The audio thread only plays.** Edits happen off the audio thread. After each one the project is compiled into
    an immutable render graph and handed over through a lock-free queue; the audio thread swaps it in between
    blocks, carries running devices and sounding notes across, and sends the old graph back to be freed elsewhere.

@@ -206,6 +206,7 @@ async fn tools_are_listed_with_schemas() {
         "takes",
         "recording_latency",
         "unused_recordings",
+        "shared_song",
         "listen",
         "transcribe",
         "study",
@@ -1516,6 +1517,7 @@ async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_di
     assert_eq!(saved["format_version"], trill_core::project::FORMAT_VERSION, "this version's file says which it is");
     let said: Vec<bool> =
         saved["automation"].as_array().unwrap().iter().map(|lane| lane.get("travel").is_some()).collect();
+    // (In the order they were made in, which is the order a file has them in.)
     assert_eq!(said, [false, true, false, true, true, false], "a lane straight in its units says nothing");
     saved["format_version"] = json!(1);
     for lane in saved["automation"].as_array_mut().unwrap() {

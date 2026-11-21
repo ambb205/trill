@@ -33,8 +33,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use trill_core::Project;
 use trill_core::files::Relink;
+use trill_core::merge::{self, AudioSet, ClipOp, DeviceOp, DeviceSet, Doc, Op};
+use trill_core::project::AudioContent;
+use trill_core::{ChainRef, Project};
 use trill_dsp::SampleFiles;
 
 /// A path as two spellings of it are told to be one: Windows minds
@@ -69,6 +71,54 @@ pub(super) fn rename(project: &mut Project, moved: &[(String, String)]) {
     }
     if let Err(error) = project.relink(&relinks, &SampleFiles) {
         log::error!("a recording could not be named where it now is: {error}");
+    }
+}
+
+/// A song of nothing but what `ops` name by themselves: a clip for every
+/// file a clip was said to play, a device for every state one was given.
+/// For asking what values that a step keeps name ([`named_by`]), and for
+/// naming it anew ([`rename`]).
+pub(super) fn of_values<'a>(doc: &Doc, ops: impl Iterator<Item = &'a Op>) -> Project {
+    let mut song = Project::new("what steps keep");
+    let track = song.add_track("values");
+    for op in ops {
+        match op {
+            Op::Clip(_, ClipOp::Audio(AudioSet::Path(path))) => {
+                let _ = song.add_audio_clip(track, "value", 0.0, 1.0, AudioContent::new(path.clone()));
+            }
+            Op::Device(id, DeviceOp::Set(DeviceSet::State(state))) => {
+                if let Some(held) = doc.held_device(*id)
+                    && let Ok(made) = song.add_device(ChainRef::Track(track), &held.uri, held.name, None)
+                    && let Ok(device) = song.device_mut(made)
+                {
+                    device.state = state.0.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    song
+}
+
+/// `op` as it is once the files of `moved` (old, new) are named where
+/// they now are, if it names one of them.
+fn renamed(doc: &Doc, op: &Op, moved: &[(String, String)]) -> Option<Op> {
+    let mut song = of_values(doc, std::iter::once(op));
+    let before = song.clone();
+    rename(&mut song, moved);
+    if song == before {
+        return None;
+    }
+    match op {
+        Op::Clip(id, ClipOp::Audio(AudioSet::Path(_))) => {
+            let path = song.tracks.first()?.clips.first()?.audio()?.path.clone();
+            Some(Op::Clip(*id, ClipOp::Audio(AudioSet::Path(path))))
+        }
+        Op::Device(id, DeviceOp::Set(DeviceSet::State(_))) => {
+            let state = song.tracks.first()?.devices.first()?.state.clone();
+            Some(Op::Device(*id, DeviceOp::Set(DeviceSet::State(state.into()))))
+        }
+        _ => None,
     }
 }
 
@@ -219,9 +269,24 @@ impl Session {
         if moved.is_empty() {
             return;
         }
-        rename(&mut self.project, moved);
-        for step in self.undo.iter_mut().chain(&mut self.redo) {
-            rename(&mut step.project, moved);
+        // Everything the song holds, removed or not: what a step that is
+        // taken back brings back names the file where it now is. Written
+        // as the properties it is, so that whoever else has the song hears
+        // of it; no step, and the steps that had set a name follow.
+        let all = self.doc.with_everything();
+        let mut named = all.clone();
+        rename(&mut named, moved);
+        let ops = merge::diff(&all, &named, &self.doc);
+        if !ops.is_empty() {
+            self.write_quietly(ops);
+            let _ = self.rederive();
+        }
+        // And what a step set a name from, where that is not what it is now.
+        let doc = &self.doc;
+        for op in self.undo.iter_mut().chain(&mut self.redo).flat_map(|step| step.done.ops_mut()) {
+            if let Some(now) = renamed(doc, op, moved) {
+                *op = now;
+            }
         }
         for (old, new) in moved {
             self.audio.media().forget(Path::new(old));

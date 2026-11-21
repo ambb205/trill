@@ -463,7 +463,7 @@ fn a_return_fed_by_sends_that_move_is_heard_alone_as_it_is_in_the_whole_song() {
     let pad = part(&mut project, "Pad", "builtin:polysynth", &[note(48, 0.0, 4.0)]);
     let drums = part(&mut project, "Drums", DRUMS, &[note(36, 0.0, 0.25), note(38, 1.0, 0.25)]);
     let point = AutomationPoint::new;
-    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold, id: 0 };
     let send = |track: TrackId| AutomationTarget::Send { track, to: echo };
     let throw = vec![point(0.0, -70.0), point(1.75, -70.0), point(2.0, -3.0), held(3.0, -3.0), point(3.0, -70.0)];
     project.set_automation(send(keys), throw).unwrap();

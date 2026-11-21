@@ -363,7 +363,8 @@ fn who(author: &Author) -> &str {
         Author::Person => "You",
         Author::Assistant => "The assistant",
         Author::Client(name) if name.is_empty() => "A client",
-        Author::Client(name) => name,
+        Author::Other(name) if name.is_empty() => "Someone else",
+        Author::Client(name) | Author::Other(name) => name,
     }
 }
 

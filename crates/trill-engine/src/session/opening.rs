@@ -607,6 +607,11 @@ impl Session {
             // not made a second time.
             self.opening.shared.queue.lock().makes.retain(|make| make.device.id != from.id);
             self.bank.arrived.insert(from.id, made);
+            if from.from_preset.is_some() {
+                // It loaded what it was to start from, here: the state it
+                // came to is news to whoever else has the song.
+                self.watch(from.id);
+            }
             news.push((from, took, failed, reported));
         }
         self.compile_and_swap();

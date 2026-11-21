@@ -33,7 +33,7 @@ fn point(beat: f64, value: f64) -> AutomationPoint {
 }
 
 fn held(beat: f64, value: f64) -> AutomationPoint {
-    AutomationPoint { beat, value, shape: Segment::Hold }
+    AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
@@ -672,7 +672,7 @@ fn controllers_play_the_same_at_any_buffer_size_and_in_a_render() {
             EXPRESSION,
             vec![
                 point(0.0, 0.2),
-                AutomationPoint { beat: 3.0, value: 1.0, shape: Segment::Curve(0.6) },
+                AutomationPoint { beat: 3.0, value: 1.0, shape: Segment::Curve(0.6), id: 0 },
                 point(8.0, 0.3),
             ],
         ),

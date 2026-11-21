@@ -234,8 +234,8 @@ fn playing_envelopes_never_touches_the_allocator() {
         .map(|beat| AutomationPoint::new(beat, -12.0 * (-(beat.fract()) * 6.0).exp()))
         .collect();
     let point = AutomationPoint::new;
-    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
-    let bent = AutomationPoint { beat: 1.25, value: -3.0, shape: Segment::Curve(-0.6) };
+    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold, id: 0 };
+    let bent = AutomationPoint { beat: 1.25, value: -3.0, shape: Segment::Curve(-0.6), id: 0 };
     let throw = AutomationTarget::Send { track, to: echo };
     project.set_automation(AutomationTarget::TrackVolume { track }, dips.clone()).unwrap();
     project.set_automation(AutomationTarget::TrackPan { track }, vec![point(0.0, -1.0), point(8.0, 1.0)]).unwrap();
@@ -714,12 +714,12 @@ fn playing_by_hand_and_recording_never_touch_the_allocator() {
             use trill_core::project::{AutomationPoint, Segment};
             use trill_core::{ControllerKind, Note};
             let point = AutomationPoint::new;
-            let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+            let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold, id: 0 };
             for (track, start, length) in [(keys, 0.0, 4.0), (drums, 0.0, 4.0)] {
                 let id = project.add_midi_clip(track, "curves", start, length)?;
                 let clip = project.clip_mut(id)?;
                 clip.add_notes(&[Note { pitch: 40, start: 0.25, length: 0.5, velocity: 90, ..Default::default() }])?;
-                let bent = AutomationPoint { beat: 0.5, value: 0.1, shape: Segment::Curve(0.7) };
+                let bent = AutomationPoint { beat: 0.5, value: 0.1, shape: Segment::Curve(0.7), id: 0 };
                 clip.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.4), bent, point(1.75, 1.0)])?;
                 clip.set_controller(ControllerKind::SUSTAIN, vec![held(0.25, 1.0), held(1.5, 0.0)])?;
                 clip.set_controller(ControllerKind::PitchBend, vec![point(0.0, 0.0), point(1.0, 0.5), held(1.0, 0.0)])?;

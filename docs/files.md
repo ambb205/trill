@@ -62,3 +62,10 @@ found for sure, as one undo step; `Use` takes a file that is only likely, one at
 file by hand and `Look in a folder` at a folder to search, and what either says about where a folder went finds
 the rest. A folder of the sound library that is gone is listed there too (and marked in the browser), and is
 pointed at its new place along with the song's files.
+
+**A song that is shared** ([Working in one song together](working-together.md)) is saved with what it takes to
+merge it again with someone else's copy: a `shared` section beside the song that says which song it is, when each
+of its properties was last set, and what was removed from it. A song that was never shared has none. Every note,
+automation point and marker in a file carries an id, which is how two people change the same note at once; a
+file from before they had ids opens as it always did and is given them. That makes the file of a song with many
+notes larger, by a sixth for one of 37,000 notes.

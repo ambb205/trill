@@ -1256,7 +1256,8 @@ fn song_on_two_channels(instrument: String) -> Project {
     clip.add_notes(&[key(0.25).on(sixth), key(0.5).on(second)]).unwrap();
     let wheel = vec![AutomationPoint::new(1.0, 0.0), AutomationPoint::new(1.75, 1.0)];
     clip.set_controller_on(sixth, ControllerKind::PitchBend, wheel).unwrap();
-    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: trill_core::project::Segment::Hold };
+    let held =
+        |beat: f64, value: f64| AutomationPoint { beat, value, shape: trill_core::project::Segment::Hold, id: 0 };
     let pedal = vec![held(0.75, 1.0), held(3.0, 0.0)];
     clip.set_controller_on(second, ControllerKind::SUSTAIN, pedal).unwrap();
     project

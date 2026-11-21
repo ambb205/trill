@@ -604,7 +604,7 @@ fn audio_fades_and_master_automation_shape_the_level() {
     // Master volume: held at -60 dB for the first beat, then a jump to 0 dB.
     project.set_clip_fades(clip, 0.0, 0.0).unwrap();
     let points = vec![
-        AutomationPoint { beat: 0.0, value: -60.0, shape: trill_core::Segment::Hold },
+        AutomationPoint { beat: 0.0, value: -60.0, shape: trill_core::Segment::Hold, id: 0 },
         AutomationPoint::new(1.0, 0.0),
     ];
     project.set_automation(AutomationTarget::MasterVolume, points).unwrap();

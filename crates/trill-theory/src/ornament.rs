@@ -128,7 +128,7 @@ impl Wheel {
         let beat = self.points.last().map_or(beat, |last| beat.max(last.beat));
         match self.points.last_mut() {
             Some(last) if (last.beat - beat).abs() < 1e-9 && last.value == value => last.shape = shape,
-            _ => self.points.push(AutomationPoint { beat, value, shape }),
+            _ => self.points.push(AutomationPoint { beat, value, shape, id: 0 }),
         }
         self.value = value;
         self.widest = self.widest.max(value.abs());
@@ -138,7 +138,7 @@ impl Wheel {
     fn step(&mut self, beat: f64, value: f64) {
         if self.points.is_empty() && value != 0.0 {
             // The course begins at rest, whoever reads it.
-            self.points.push(AutomationPoint { beat, value: 0.0, shape: Segment::Hold });
+            self.points.push(AutomationPoint { beat, value: 0.0, shape: Segment::Hold, id: 0 });
         }
         self.push(beat, value, Segment::Hold);
     }

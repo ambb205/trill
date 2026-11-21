@@ -173,9 +173,11 @@ fn code(note: &Note) -> NoteCode {
 fn note(code: NoteCode) -> Note {
     match code {
         NoteCode::First(pitch, start, length, velocity) => {
-            Note { pitch, start, length, velocity, channel: crate::Channel::FIRST }
+            Note { pitch, start, length, velocity, channel: crate::Channel::FIRST, id: 0 }
         }
-        NoteCode::On(pitch, start, length, velocity, channel) => Note { pitch, start, length, velocity, channel },
+        NoteCode::On(pitch, start, length, velocity, channel) => {
+            Note { pitch, start, length, velocity, channel, id: 0 }
+        }
     }
 }
 

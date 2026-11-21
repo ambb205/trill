@@ -520,6 +520,9 @@ impl Session {
         // input is opened, before anything else is. What cannot be says so.
         self.begin_audio_take(id, &tracks, punch)?;
         let group = self.begin_group();
+        // What it writes while it is played is said to whoever else has
+        // the song when it has landed, as the one step it is.
+        self.hold_what_is_said();
         // In the journal, what is played is one step however often it is
         // written down while it is played.
         self.begin_run("Recorded a take");
@@ -719,10 +722,16 @@ impl Session {
             self.end_run();
             self.end_group(active.group);
         }
+        self.say_what_was_held();
         if punched {
             // The song goes round its loop again.
             self.compile_and_swap();
         }
+    }
+
+    /// Whether a take is being recorded.
+    pub(super) fn take_is_open(&self) -> bool {
+        self.playing.take.is_some()
     }
 
     /// Drops a take without writing it: the project it belonged to is
@@ -733,6 +742,7 @@ impl Session {
             self.end_run();
             self.end_group(active.group);
         }
+        self.say_what_was_held();
     }
 }
 

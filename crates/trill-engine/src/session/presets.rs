@@ -30,6 +30,7 @@ use crate::ready::Plugins;
 use crate::saved::{Change, Saved, SavedPresets};
 use std::sync::Arc;
 use trill_core::device::PresetLoadError;
+use trill_core::merge::{DeviceOp, DeviceSet, Op};
 use trill_core::presets::{
     Brought, PresetFile, PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus, SavedPreset, SoundDevice,
 };
@@ -435,8 +436,10 @@ impl Session {
         // from the song to load, once its state is in the song.
         device.from_preset = None;
         // The running plugin has made the change itself: there is nothing
-        // to bring the engine in line with.
-        self.make_step(before);
+        // to bring the engine in line with. What it came to is its own
+        // until it is read back, which for a song others hold is soon.
+        self.commit(before, super::Scope::Nothing);
+        self.watch(id);
         Ok(())
     }
 
@@ -448,7 +451,11 @@ impl Session {
         self.ask_to_load(id, preset).map_err(|error| {
             SessionError::Device(format!("'{uri}' did not load the preset '{}': {error}", preset.name))
         })?;
-        self.project.device_mut(id)?.preset = Some(preset.reference());
+        // Part of the step that added the device, which is made already.
+        let reference = Some(preset.reference());
+        self.project.device_mut(id)?.preset.clone_from(&reference);
+        self.write_quietly(vec![Op::Device(id, DeviceOp::Set(DeviceSet::Preset(reference)))]);
+        self.watch(id);
         Ok(())
     }
 
@@ -514,7 +521,8 @@ impl Session {
         // The state is the running plugin's until it is next captured,
         // as after a preset it loaded itself.
         self.project.device_mut(id)?.state = None;
-        self.make_step(before);
+        self.commit(before, super::Scope::Nothing);
+        self.watch(id);
         Ok(())
     }
 

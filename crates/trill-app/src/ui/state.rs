@@ -780,6 +780,8 @@ pub struct UiState {
     pub credits_open: bool,
     /// Whether the playback load is up: how the machine keeps up with the
     /// song, and what each track costs.
+    /// Working in the song with others: the panel, and what was last said.
+    pub together: super::together::TogetherState,
     pub load_open: bool,
     /// Which time the song fell short was last said in a notice: see
     /// `load::notice`.
@@ -887,6 +889,7 @@ impl UiState {
             copied_text: None,
             shortcuts_open: false,
             credits_open: false,
+            together: super::together::TogetherState::default(),
             load_open: false,
             load_said: None,
             stage_open: false,

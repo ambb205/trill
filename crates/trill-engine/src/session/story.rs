@@ -399,6 +399,16 @@ impl Session {
         done
     }
 
+    /// Enters a step that someone else who holds the song made, under the
+    /// name they go by: it turned `before` into the project as it is. No
+    /// step of this session's history: it is theirs to take back.
+    pub(super) fn record_of_another(&mut self, by: &str, before: &Project) {
+        let at = self.story.now();
+        if let Some(journal) = &mut self.story.journal {
+            journal.record_of(at, Author::Other(by.to_owned()), before, &self.project);
+        }
+    }
+
     /// Enters what a device came to on its own in its editor's window:
     /// its state if `state_changed`, and the values it has. Nobody's edit,
     /// and not shown as a step; kept so that the song as it was can be

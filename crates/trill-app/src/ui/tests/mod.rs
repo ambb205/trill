@@ -34,6 +34,7 @@ mod sounds;
 mod stage;
 mod study;
 mod takes;
+mod together;
 mod tracks;
 mod wavetable;
 

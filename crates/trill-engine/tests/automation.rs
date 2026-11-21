@@ -26,7 +26,7 @@ fn point(beat: f64, value: f64) -> AutomationPoint {
 }
 
 fn held(beat: f64, value: f64) -> AutomationPoint {
-    AutomationPoint { beat, value, shape: Segment::Hold }
+    AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
 }
 
 /// A track that plays one steady sine for `beats` beats.
@@ -179,7 +179,7 @@ fn a_line_between_two_points_is_straight_along_the_travel_of_what_it_moves() {
     assert!(straight == rendered(&project));
 
     // A bend still bends, along the fader: more of the fall comes late.
-    let bent = vec![AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Curve(0.5) }, point(16.0, -60.0)];
+    let bent = vec![AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Curve(0.5), id: 0 }, point(16.0, -60.0)];
     project.write_automation(volume.clone(), bent, Travel::FADER).unwrap();
     let late = gain_db(&rendered(&project), &plain, 8.0);
     assert!(late > -12.0 && late < -4.0, "{late}");
@@ -439,7 +439,7 @@ fn moving_everything(sweep: bool) -> Project {
     let echo = project.add_track_of_kind("Echo", TrackKind::Return);
     project.add_device(ChainRef::Track(echo), "builtin:delay", "Delay", None).unwrap();
 
-    let bent = |beat: f64, value: f64, bend: f32| AutomationPoint { beat, value, shape: Segment::Curve(bend) };
+    let bent = |beat: f64, value: f64, bend: f32| AutomationPoint { beat, value, shape: Segment::Curve(bend), id: 0 };
     project
         .set_automation(
             AutomationTarget::TrackVolume { track },
@@ -547,7 +547,7 @@ fn a_tape_stop_is_the_same_samples_at_any_buffer_size_in_a_render_and_on_any_num
     for name in ["One", "Two"] {
         let track = sine_track(&mut project, name, 8.0);
         let tape = project.add_device(ChainRef::Track(track), "builtin:tapestop", "Tape Stop", None).unwrap();
-        let bent = AutomationPoint { beat: 5.0, value: 0.4, shape: Segment::Curve(0.5) };
+        let bent = AutomationPoint { beat: 5.0, value: 0.4, shape: Segment::Curve(0.5), id: 0 };
         let line = vec![
             held(0.0, 1.0),
             point(1.0, 1.0),

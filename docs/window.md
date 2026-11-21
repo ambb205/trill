@@ -205,6 +205,13 @@ removes a recording by itself: `Remove` asks first and says where they go, and o
 the system's Recycle Bin, from where they can be had back. (Where a system has no bin, and in a run on a
 profile folder, they go into a `removed` folder beside the takes.) Nothing is ever deleted outright.
 
+## Working together
+
+**File, Share this song** and **File, Join a song** put two or more people in one song, each in a Trill of their
+own: who is here is in the status bar, what each has selected is outlined in their colour, and where work
+clashes a notice says so with the button that puts yours back. [Working in one song together](working-together.md)
+has all of it.
+
 ## Playback load
 
 **CPU in the top bar** is the share of each buffer's time that making it takes. A click on it opens what is

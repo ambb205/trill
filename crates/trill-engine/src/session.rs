@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{DeviceDescriptor, DeviceFactory, EventKind, ParamInfo};
 use trill_core::journal::Reversal;
+use trill_core::merge::{self, Blob, DeviceOp, DeviceSet, Doc, Op};
 use trill_core::presets::PresetInfo;
 use trill_core::project::AutomationTarget;
 use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
@@ -27,6 +28,7 @@ mod controllers;
 mod cores;
 mod editors;
 mod files;
+mod history;
 mod instruments;
 mod opening;
 mod params;
@@ -37,6 +39,7 @@ mod recording;
 mod sounds;
 mod story;
 mod take;
+mod together;
 mod wavetable;
 
 pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_after};
@@ -54,6 +57,7 @@ pub use recording::{
     Correction, GrowingTake, InputClock, InputStatus, Measured, Measurement, Recorded, RecordedTake, RecordingLatency,
 };
 pub use take::TakeClip;
+pub use together::{Notice, Remedy, Turned};
 
 const UNDO_LIMIT: usize = 200;
 const LIMITER_URI: &str = "builtin:limiter";
@@ -113,11 +117,13 @@ pub struct UndoStep(u64);
 #[must_use = "an undo group stays open until it is handed to Session::end_group"]
 pub struct UndoGroup(u64);
 
-/// One step of the undo history: the project as it was before the step on
-/// the undo side, as it was after it on the redo side.
+/// One step of the undo history: what it set, each property with what it
+/// was before (see [`history`]). Not the song as it was: taking a step
+/// back puts back what the step changed and leaves everything else, which
+/// is what lets each of several people undo their own work.
 struct Step {
     id: UndoStep,
-    project: Project,
+    done: history::Done,
     /// What the step is in the journal.
     story: story::Story,
     /// Whether the user's own hand made the step, all of it
@@ -145,10 +151,26 @@ enum Scope {
     /// Only device parameter values, which running devices take directly.
     /// Skipping the recompile keeps slider drags cheap on large projects.
     ParamsOnly,
+    /// Nothing: the running device has made the change itself.
+    Nothing,
+}
+
+/// Whether the song is worked out again from its properties after every
+/// edit and held against what the edit made of it: for finding out that
+/// the two ever differ. Asked for by `TRILL_CHECK_MERGE`.
+fn checks_merge() -> bool {
+    static CHECKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CHECKS.get_or_init(|| std::env::var_os("TRILL_CHECK_MERGE").is_some())
 }
 
 pub struct Session {
+    /// The song as it stands: what every edit reads and writes, and what
+    /// is played. It is what `doc` comes to ([`Doc::derive`]).
     project: Project,
+    /// The song as the properties it is made of, each with when it was
+    /// last set: what changes are taken into, an edit's own like anyone
+    /// else's (`trill_core::merge`).
+    doc: Doc,
     undo: Vec<Step>,
     redo: Vec<Step>,
     /// The undo groups that are open; see [`Session::begin_group`].
@@ -204,6 +226,8 @@ pub struct Session {
     /// What was written down about the files the song plays when it was
     /// last saved or opened; see `session/files.rs`.
     files: trill_core::FileTable,
+    /// What is kept of the song being one that others hold too.
+    sharing: together::Sharing,
 }
 
 impl Session {
@@ -251,6 +275,7 @@ impl Session {
         let factory: Arc<dyn DeviceFactory> = Arc::new(WithSaved::new(factory, saved.clone()));
         let mut session = Self {
             project: Project::default(),
+            doc: Doc::from_project(&Project::default()),
             undo: Vec::new(),
             redo: Vec::new(),
             groups: Vec::new(),
@@ -278,6 +303,7 @@ impl Session {
             another_song: false,
             opening,
             files: trill_core::FileTable::default(),
+            sharing: together::Sharing::new(),
         };
         session.replace_project(Self::blank_project("Untitled"));
         Ok(session)
@@ -450,6 +476,9 @@ impl Session {
         scope: Scope,
         edit: impl FnOnce(&mut Project) -> Result<T, EditError>,
     ) -> Result<T, SessionError> {
+        // What the edit makes in a song others hold is given ids that
+        // are this program's own.
+        self.ready_ids();
         let before = self.project.clone();
         match edit(&mut self.project) {
             Ok(value) => {
@@ -512,14 +541,15 @@ impl Session {
         if self.undo.len() <= floor {
             return None;
         }
-        // The oldest of the group's steps holds the project as it was
-        // before any of them; the rest are the stops along the way. In the
-        // journal the one step is all of theirs.
+        // The group's steps become one that did what they all did, one
+        // after the other. In the journal the one step is all of theirs.
         let story = story::Story::joined(self.undo[floor..].iter().map(|step| &step.story));
         let by_hand = self.undo[floor..].iter().all(|step| step.by_hand);
-        self.undo.truncate(floor + 1);
+        for later in self.undo.split_off(floor + 1) {
+            self.undo[floor].done.and(later.done);
+        }
         (self.undo[floor].story, self.undo[floor].by_hand) = (story, by_hand);
-        let unchanged = self.undo[floor].project == self.project;
+        let unchanged = self.undo[floor].done.is_nothing();
         if unchanged {
             self.undo.truncate(floor);
         }
@@ -544,25 +574,84 @@ impl Session {
         self.last_id
     }
 
+    /// What an edit did to the project, `before` being the project as it
+    /// was, becomes a change like anyone's: it is found by comparing the
+    /// two, taken into the song's properties, played, and kept as an undo
+    /// step. With [`Scope::Nothing`] the running devices are as the edit
+    /// has them already.
     fn commit(&mut self, mut before: Project, scope: Scope) {
-        if self.project == before {
-            return;
+        // Every note and point the edit made has an id, and the song is
+        // in the order it is held in wherever it is held.
+        self.project.settle(Some(&before));
+        if scope != Scope::Nothing {
+            self.keep_leaving_state(&mut before);
         }
-        self.keep_leaving_state(&mut before);
-        self.sync(&before, scope, crate::hand::is_by_hand());
-        self.make_step(before);
+        let ops = merge::diff(&before, &self.project, &self.doc);
+        self.commit_found(before, ops, scope);
     }
 
-    /// Makes the change from `before` to the project as it is now an undo
-    /// step. The engine is the caller's to have brought in line.
-    fn make_step(&mut self, before: Project) {
+    /// [`Session::commit`] of an edit whose changes are known: `ops` is
+    /// what turned `before` into the project as it is now.
+    fn commit_found(&mut self, before: Project, ops: Vec<Op>, scope: Scope) {
+        if ops.is_empty() {
+            // Nothing of the song changed. (An id may have been spent.)
+            let next = self.project.next_id();
+            self.project = before;
+            self.project.count_ids_from(next);
+            return;
+        }
+        let scope = match scope {
+            Scope::Nothing => Scope::Nothing,
+            _ if ops.iter().all(Op::is_param) => Scope::ParamsOnly,
+            _ => Scope::Everything,
+        };
+        let waited = !self.sharing.aside.is_empty() || self.sharing.displaced > 0;
+        let taken = self.write(ops);
+        let done = history::Done::of(&taken.won);
+        if waited {
+            // Something was set aside that this edit may have let in, or
+            // a take lies where this edit may have made room.
+            let _ = self.rederive();
+        } else {
+            self.hold_to_its_properties();
+        }
+        self.sync(&before, scope, crate::hand::is_by_hand());
+        self.finish_step(before, done);
+    }
+
+    /// Where every edit is held against the song worked out from its
+    /// properties ([`checks_merge`]): the song as an edit just left it is
+    /// that song, or this ends the test.
+    pub(super) fn hold_to_its_properties(&self) {
+        if !checks_merge() {
+            return;
+        }
+        let derived = self.doc.derive();
+        let (mut worked_out, mut made) = (derived.project, self.project.clone());
+        worked_out.count_ids_from(0);
+        made.count_ids_from(0);
+        assert!(
+            worked_out.to_json() == made.to_json() && derived.aside.is_empty() && derived.displaced == 0,
+            "the song worked out from its properties is not the song the edit made:\n{}\n---- the edit made ----\n{}",
+            worked_out.to_json(),
+            made.to_json()
+        );
+    }
+
+    /// Makes what was just done to the song, which turned `before` into
+    /// the project as it is now, an undo step. The engine is the caller's
+    /// to have brought in line.
+    fn finish_step(&mut self, before: Project, done: history::Done) {
         let story = self.record_step(&before);
-        // Inside a gesture only the state before its first edit is kept.
-        if self.gesture != Some(true) {
-            self.push_step(before, story);
-        } else if let Some(step) = self.undo.last_mut() {
-            step.story.and(story);
-            step.by_hand &= crate::hand::is_by_hand();
+        // Inside a gesture the edits are one step: what the first set
+        // from, and what the last set to.
+        match (self.gesture, self.undo.last_mut()) {
+            (Some(true), Some(step)) => {
+                step.done.and(done);
+                step.story.and(story);
+                step.by_hand &= crate::hand::is_by_hand();
+            }
+            _ => self.push_step(done, story),
         }
         if let Some(has_step) = &mut self.gesture {
             *has_step = true;
@@ -573,7 +662,7 @@ impl Session {
 
     /// Puts a step on the undo history, forgetting the oldest one when
     /// there are too many.
-    fn push_step(&mut self, before: Project, story: story::Story) {
+    fn push_step(&mut self, done: history::Done, story: story::Story) {
         // Steps older than a group may have been undone since it opened.
         // An edit made from there is the group's, and so is its step.
         let depth = self.undo.len();
@@ -581,7 +670,7 @@ impl Session {
             open.floor = open.floor.min(depth);
         }
         let id = UndoStep(self.fresh_id());
-        self.undo.push(Step { id, project: before, story, by_hand: crate::hand::is_by_hand() });
+        self.undo.push(Step { id, done, story, by_hand: crate::hand::is_by_hand() });
         if self.undo.len() > UNDO_LIMIT {
             // The oldest step goes, unless it is where an open group began:
             // that group must still be able to undo all the way back, so
@@ -600,43 +689,81 @@ impl Session {
     /// by one that takes it back; a call that undoes what it has just done
     /// itself backs out of it instead, and leaves no trace.
     pub fn undo(&mut self) -> bool {
-        let Some(Step { id, project: previous, story, by_hand }) = self.undo.pop() else { return false };
-        let mut current = std::mem::replace(&mut self.project, previous);
-        self.keep_leaving_state(&mut current);
+        self.take_back().done
+    }
+
+    /// [`Session::undo`], saying what it came to. The step is this
+    /// session's own, whoever else has the song: what it set is put back
+    /// where it is still as the step left it, and a property someone else
+    /// has set since stays theirs ([`Turned::theirs`]). A thing the step
+    /// made goes, even if someone has worked in it since (it is held, and
+    /// they can bring it back); a thing it removed comes back with what
+    /// was done in it meanwhile.
+    pub fn take_back(&mut self) -> Turned {
+        let Some(last) = self.undo.last() else { return Turned::default() };
+        // What the step takes out of the song, or gives another state, is
+        // kept as it is running: bringing the step back restores it so.
+        let at_stake = Self::devices_at_stake(&last.done);
+        self.keep_states_of(at_stake);
+        let Some(Step { id, done, story, by_hand }) = self.undo.pop() else { return Turned::default() };
+        let (ops, theirs) = done.back(&self.doc, self.mine());
         // The hand's own only if the step was: see `Step::by_hand`.
-        self.sync(&current, Scope::Everything, by_hand && crate::hand::is_by_hand());
+        let leaving = self.turn(ops, by_hand && crate::hand::is_by_hand());
         let story = if self.retract_step(&story, true) {
             story::Story::default()
         } else {
-            self.record_reversal(Reversal::Undo, &story, &current);
+            self.record_reversal(Reversal::Undo, &story, &leaving);
             Self::settled(story)
         };
-        self.redo.push(Step { id, project: current, story, by_hand });
+        self.redo.push(Step { id, done, story, by_hand });
         self.revision += 1;
-        true
+        Turned { done: true, theirs }
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(Step { id, project: next, story, by_hand }) = self.redo.pop() else { return false };
-        let mut current = std::mem::replace(&mut self.project, next);
-        self.keep_leaving_state(&mut current);
-        self.sync(&current, Scope::Everything, by_hand && crate::hand::is_by_hand());
-        self.record_reversal(Reversal::Redo, &story, &current);
-        self.undo.push(Step { id, project: current, story, by_hand });
+        self.bring_again().done
+    }
+
+    /// [`Session::redo`], saying what it came to: as
+    /// [`Session::take_back`], the other way.
+    pub fn bring_again(&mut self) -> Turned {
+        let Some(last) = self.redo.last() else { return Turned::default() };
+        let at_stake = Self::devices_at_stake(&last.done);
+        self.keep_states_of(at_stake);
+        let Some(Step { id, done, story, by_hand }) = self.redo.pop() else { return Turned::default() };
+        let (ops, theirs) = done.again(&self.doc, self.mine());
+        // The hand's own only if the step was: see `Step::by_hand`.
+        let leaving = self.turn(ops, by_hand && crate::hand::is_by_hand());
+        self.record_reversal(Reversal::Redo, &story, &leaving);
+        self.undo.push(Step { id, done, story, by_hand });
         self.revision += 1;
-        true
+        Turned { done: true, theirs }
+    }
+
+    /// Sets what taking a step back or bringing it back sets, and brings
+    /// the engine in line. Returns the song as it was until then.
+    fn turn(&mut self, ops: Vec<Op>, by_hand: bool) -> Project {
+        if ops.is_empty() {
+            return self.project.clone();
+        }
+        self.write(ops);
+        let leaving = self.rederive();
+        self.sync(&leaving, Scope::Everything, by_hand);
+        leaving
     }
 
     /// Takes back the step that was just made and forgets it: for an
     /// operation that could not be finished. Nothing is left to redo, and
     /// the journal has it as if it had not been made.
     fn back_out(&mut self) {
-        let Some(Step { project: previous, story, by_hand, .. }) = self.undo.pop() else { return };
-        let mut current = std::mem::replace(&mut self.project, previous);
-        self.keep_leaving_state(&mut current);
-        self.sync(&current, Scope::Everything, by_hand && crate::hand::is_by_hand());
+        let Some(last) = self.undo.last() else { return };
+        let at_stake = Self::devices_at_stake(&last.done);
+        self.keep_states_of(at_stake);
+        let Some(Step { done, story, by_hand, .. }) = self.undo.pop() else { return };
+        let (ops, _) = done.back(&self.doc, self.mine());
+        let leaving = self.turn(ops, by_hand && crate::hand::is_by_hand());
         if !self.retract_step(&story, false) {
-            self.record_reversal(Reversal::Undo, &story, &current);
+            self.record_reversal(Reversal::Undo, &story, &leaving);
         }
         self.revision += 1;
     }
@@ -892,10 +1019,21 @@ impl Session {
             resolved.push((key.clone(), state.info.clamp(*value)));
         }
         self.remember_plugin_values(id, &states, &resolved);
-        self.edit_scoped(Scope::ParamsOnly, |project| {
-            project.device_mut(id)?.params.extend(resolved);
-            Ok(())
-        })
+        // An edit whose every change is known: nothing of the song is
+        // compared to find what it did. (Of a parameter named twice the
+        // last value is the one that is set.)
+        let values: std::collections::BTreeMap<String, f64> = resolved.into_iter().collect();
+        let before = self.project.clone();
+        let device = self.project.device_mut(id).map_err(SessionError::from)?;
+        let mut ops = Vec::with_capacity(values.len());
+        for (name, value) in values {
+            if device.params.get(&name) != Some(&value) {
+                device.params.insert(name.clone(), value);
+                ops.push(Op::Param(id, name, Some(value)));
+            }
+        }
+        self.commit_found(before, ops, Scope::ParamsOnly);
+        Ok(())
     }
 
     // ---- transport -----------------------------------------------------
@@ -1047,6 +1185,8 @@ impl Session {
         // A file that is beside the song, where the song says it was when
         // it was saved, is the one it plays: see `session/files.rs`.
         let (project, files) = self.read_project(&json, Some(path))?;
+        // A song others hold too comes with what is held beside it.
+        let kept = trill_core::files::read_shared(&json)?;
         let project = self.with_known_instruments(project);
         log::debug!(
             target: "trill::making",
@@ -1054,7 +1194,7 @@ impl Session {
             began.elapsed().as_secs_f64() * 1e3,
             json.len() as f64 / 1e6
         );
-        self.replace_project(project);
+        self.replace_song(project, kept);
         self.files = files;
         self.path = Some(path.to_path_buf());
         self.take_up_journal(path);
@@ -1091,8 +1231,9 @@ impl Session {
         let json = std::fs::read_to_string(copy).map_err(|e| io_error(copy, e))?;
         // The copy is not where the song lives: its paths stand as they are.
         let (project, files) = self.read_project(&json, None)?;
+        let kept = trill_core::files::read_shared(&json)?;
         let project = self.with_known_instruments(project);
-        self.replace_project(project);
+        self.replace_song(project, kept);
         self.files = files;
         self.path = original.map(Path::to_path_buf);
         self.take_up_recovered_journal(copy, original);
@@ -1140,6 +1281,7 @@ impl Session {
         self.tend_input();
         self.tend_bringing();
         self.tend_take();
+        self.tend_watched();
         self.tend_journal();
         if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
             self.compile_and_swap();
@@ -1166,11 +1308,29 @@ impl Session {
     /// Swaps in a different project wholesale: no undo history carries over
     /// and every device is created fresh.
     fn replace_project(&mut self, project: Project) {
+        self.replace_song(project, None);
+    }
+
+    /// [`Session::replace_project`], for a song that may be one others
+    /// hold too: then with what its file kept beside it.
+    fn replace_song(&mut self, mut project: Project, kept: Option<merge::Kept>) {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Seek(0.0));
         self.abandon_take();
         self.abandon_audio_take();
+        // Every note, point and marker has an id from here on: a file
+        // from before they had is given them as it is opened.
+        project.settle(None);
+        self.doc = match &kept {
+            Some(kept) => Doc::from_kept(&project, kept),
+            None => Doc::from_project(&project),
+        };
         self.project = project;
+        self.begin_sharing_of(kept.as_ref().map(|kept| kept.song));
+        if kept.is_some() {
+            // The song is what its properties come to.
+            let _ = self.rederive();
+        }
         self.undo.clear();
         self.redo.clear();
         // Ids restart in every project; nothing running may be mistaken for
@@ -1267,6 +1427,9 @@ impl Session {
     /// doing: an edit of a thread that is the hand, or the hand's undo or
     /// redo of a step that was the hand's.
     fn sync(&mut self, old: &Project, scope: Scope, by_hand: bool) {
+        if scope == Scope::Nothing {
+            return;
+        }
         // Before the graph is made: what came to want the input by this
         // change is let, held or disarmed by whose hand made it.
         self.hold_to_the_hand(&|track| old.track(track).is_ok(), by_hand);
@@ -1282,10 +1445,16 @@ impl Session {
             let (Some(meta), Ok(previous)) = (self.bank.devices.get(&device.id), old.device(device.id)) else {
                 continue;
             };
+            if previous.state.is_some() && crate::compile::awaits_state(self.factory.as_ref(), device) {
+                // Its values are the preset's, once its state is there.
+                continue;
+            }
             for (index, info) in meta.params.iter().enumerate() {
                 let value = device.params.get(&info.id);
                 if value != previous.params.get(&info.id) {
-                    let value = value.copied().unwrap_or(info.default);
+                    // (Held to its range: a value may have been set by
+                    // another program, which is not trusted with it.)
+                    let value = value.map_or(info.default, |value| info.clamp(*value));
                     self.engine.send(Message::Param { device: device.id, index, value });
                 }
             }
@@ -1344,9 +1513,39 @@ impl Session {
             if device.state.as_ref() == Some(&captured) {
                 continue;
             }
-            let stale = device.state.replace(captured.clone());
-            self.correct_history(id, &stale, &captured);
+            device.state = Some(captured.clone());
+            // The song had the device in that state, whatever comes of
+            // it next: written before what the edit does to it.
+            self.write_quietly(vec![Op::Device(id, DeviceOp::Set(DeviceSet::State(Blob(Some(captured)))))]);
         }
+    }
+
+    /// [`Session::keep_leaving_state`], before a step is taken back or
+    /// brought back: the plugins it takes out of the song or gives
+    /// another state are read first, so that what the step is turned back
+    /// to later is what was running now.
+    fn keep_states_of(&mut self, at_stake: Vec<DeviceId>) {
+        if at_stake.is_empty() {
+            return;
+        }
+        let _held = self.hold_makings();
+        for id in at_stake {
+            self.capture(id, true);
+        }
+    }
+
+    /// The devices a step takes out of the song, brings into it or gives
+    /// another state.
+    fn devices_at_stake(done: &history::Done) -> Vec<DeviceId> {
+        let state = DeviceSet::State(Blob(None)).prop();
+        let mut at_stake: Vec<DeviceId> = (done.records.iter())
+            .filter_map(|record| match &record.key {
+                merge::Key::Device(id, prop) if *prop == merge::ALIVE || *prop == state => Some(*id),
+                _ => None,
+            })
+            .collect();
+        at_stake.dedup();
+        at_stake
     }
 
     /// What the running plugin behind a device says its state is.
@@ -1370,26 +1569,10 @@ impl Session {
         self.live_state(id)
     }
 
-    /// Replaces a device's state in every history entry that holds
-    /// `stale`, the copy the project had until now, by `captured`.
-    ///
-    /// What a plugin changed on its own (in its editor, say) is not part
-    /// of the undo history. Without this, undoing an unrelated edit would
-    /// bring back the old state and reset the plugin.
-    fn correct_history(&mut self, id: DeviceId, stale: &Option<Vec<u8>>, captured: &[u8]) {
-        for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-            if let Ok(device) = step.project.device_mut(id)
-                && device.state == *stale
-            {
-                device.state = Some(captured.to_vec());
-                device.from_preset = None;
-            }
-        }
-    }
-
     /// Copies each plugin's current state into the project model. This is
-    /// bookkeeping, not an edit: it creates no undo step, and the history
-    /// is corrected along with the present ([`Session::correct_history`]).
+    /// bookkeeping, not an edit: it creates no undo step, and the steps
+    /// that had set a state last follow it (`Session::write_quietly`), so
+    /// that taking back something unrelated does not reset the plugin.
     fn capture_device_state(&mut self) {
         // Every plugin is asked, on the thread plugins are made on: that
         // thread begins no making until all have answered, so that this
@@ -1403,19 +1586,33 @@ impl Session {
 
     /// [`Session::capture_device_state`] for one device.
     fn capture_state_of(&mut self, id: DeviceId) {
+        self.capture(id, false);
+    }
+
+    /// Reads a plugin's state into the song if it is news there. With
+    /// `leaving`, whatever: the device is about to go or to be given
+    /// another state, and what it was running as is what is kept.
+    /// Otherwise, in a song others hold too, only where the plugin was
+    /// changed in this program ([`Session::state_is_news`]).
+    fn capture(&mut self, id: DeviceId, leaving: bool) {
         let held = self.project.device(id).ok().and_then(|device| device.state.clone());
         let Some(captured) = self.news_of_state(id, held.as_ref()) else { return };
-        let Ok(device) = self.project.device_mut(id) else { return };
-        if device.state.as_ref() == Some(&captured) {
+        if held.as_ref() == Some(&captured) || !(leaving || self.state_is_news(id)) {
             return;
         }
-        let stale = device.state.replace(captured.clone());
+        let Ok(device) = self.project.device_mut(id) else { return };
+        device.state = Some(captured.clone());
         // With its state in the song, what it was to start from is in it.
-        device.from_preset = None;
+        let started = device.from_preset.take().is_some();
         if let Some(meta) = self.bank.devices.get_mut(&id) {
             meta.applied_state = Some(captured.clone());
         }
-        self.correct_history(id, &stale, &captured);
+        let mut ops = vec![Op::Device(id, DeviceOp::Set(DeviceSet::State(Blob(Some(captured)))))];
+        if started {
+            ops.push(Op::Device(id, DeviceOp::Set(DeviceSet::FromPreset(None))));
+        }
+        self.write_quietly(ops);
+        self.state_was_said(id);
         self.note_device(id, true);
     }
 }

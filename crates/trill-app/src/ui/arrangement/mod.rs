@@ -402,6 +402,10 @@ fn cursors(ui: &Ui, cx: &Cx, geometry: &Geometry) {
         painter.add(Shape::convex_polygon(notch, theme.ink_dim, Stroke::NONE));
     }
 
+    // Where the others' songs stand, each in its person's colour: under
+    // one's own playhead, which is the one that is heard here.
+    crate::ui::together::playheads(&painter, cx, area, |beat| geometry.x(beat));
+
     let x = geometry.x(cx.live.position).round();
     if on_screen(x) {
         paint::vline(&painter, x, area.y_range(), theme.signal);

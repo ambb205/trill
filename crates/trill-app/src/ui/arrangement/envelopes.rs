@@ -280,7 +280,7 @@ pub(in crate::ui) fn drawn(
     if at > 0 && result[at - 1].shape != Segment::Hold {
         written.push(AutomationPoint::new(from, arriving(points, lines, from)));
     }
-    written.push(AutomationPoint { beat: from, value, shape: Segment::Hold });
+    written.push(AutomationPoint { beat: from, value, shape: Segment::Hold, id: 0 });
     let resumes = result.get(at).is_some_and(|next| (next.beat - to).abs() < 1e-9);
     if !resumes && !points.is_empty() {
         written.push(AutomationPoint::new(to, envelope_value(points, lines, to)));
@@ -695,7 +695,7 @@ fn interact(
                     None => map.value(pointer.y),
                 };
                 let shape = if map.scale.stepped() { Segment::Hold } else { Segment::Linear };
-                let point = AutomationPoint { beat, value, shape };
+                let point = AutomationPoint { beat, value, shape, id: 0 };
                 if swap(cx, target, &[], &[point]) {
                     select(cx, target, vec![point]);
                 }
@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     fn held(beat: Beats, value: f64) -> AutomationPoint {
-        AutomationPoint { beat, value, shape: Segment::Hold }
+        AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
     }
 
     #[test]
