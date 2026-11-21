@@ -43,10 +43,17 @@ fn studio() -> (Harness, Stage, TrackId, tempfile::TempDir) {
     (harness, stage, voice.unwrap(), folder)
 }
 
-/// Lets an input that was just opened find its place: the place it is read
-/// at is put for good a quarter of a second after it opens, and a take
-/// that is asked for before then waits for it, and the song with it.
+/// Lets the input of a track that was just armed be opened and find its
+/// place. It is opened by the session's chores, which keep the machine's
+/// time and not the device's; and the place it is read at is put for good
+/// a quarter of a second after it opens, which a take that is asked for
+/// before then waits for, and the song with it.
 fn settle(harness: &mut Harness, stage: &Stage) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while harness.session.lock().input_status().open.is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        harness.idle(1);
+    }
     stage.run(harness, 19_200);
 }
 
