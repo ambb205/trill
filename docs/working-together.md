@@ -205,3 +205,5 @@ Superior Drummer 3, an Ample bass and guitar, an Archetype amplifier, two Serum 
 - Versions of a song that are kept apart and merged back.
 - What is kept of removed things and of when each property was set is never thrown away, so a shared song's
   file only grows.
+- Two computers. Everything here was run with both programs on one, over its loopback. Sharing with *My
+  network* has not been run once: it asks the firewall a question that is yours to answer.

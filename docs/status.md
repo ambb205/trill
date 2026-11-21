@@ -117,7 +117,9 @@ Only Windows has been run so far.
   arriving.
 - A journal that keeps what it keeps by the comparison everything else uses. It still has its own, coarser one;
   a step that arrives from someone else is entered under their name.
-- A second machine. Everything was run with both programs on one computer, over its loopback.
+- A second machine, and *My network*. Everything was run with both programs on one computer, over its
+  loopback; sharing to a network has not been run once, because it asks the firewall a question that is its
+  user's to answer.
 
 ## Sounds of more than one device
 

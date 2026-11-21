@@ -246,6 +246,9 @@ fn a_plugin_added_in_the_window_is_in_the_song_at_once_and_the_window_goes_on_an
     harness.app.state_mut().detail_tab = DetailTab::Devices;
     // (Searched for, which brings its row up from the end of the list.)
     harness.app.state_mut().browser.search = "Scripted Ba".into();
+    // (The list of devices is read on a helper thread: on a machine that
+    // is busy it is not there within three frames.)
+    harness.wait_until("the list of devices", |harness| harness.app.catalog_ready());
     harness.idle(3);
 
     // Double-clicked in the browser: the song has it before the frame is
