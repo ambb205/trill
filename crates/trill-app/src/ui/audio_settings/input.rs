@@ -136,12 +136,29 @@ fn open_line(cx: &Cx) -> Option<String> {
     let open = cx.live.input.open.as_ref()?;
     let sharing = if open.exclusive { "exclusive" } else { "shared" };
     let channels = if open.channels == 1 { "1 channel".to_owned() } else { format!("{} channels", open.channels) };
-    let clock = if open.shares_clock { "on the output\u{2019}s clock" } else { "on a clock of its own" };
+    let clock = match (open.shares_clock, cx.live.input.latency) {
+        (true, _) => "on the output\u{2019}s clock".to_owned(),
+        (false, Some(latency)) => format!("on a clock of its own, {}", drift_words(latency.drift_ppm)),
+        (false, None) => "on a clock of its own".to_owned(),
+    };
     Some(format!(
         "{} \u{00B7} {channels} \u{00B7} {} \u{00B7} {sharing} \u{00B7} {clock}",
         open.device,
         super::format_rate(f64::from(open.sample_rate))
     ))
+}
+
+/// How far an input's clock runs from the output's, as it is read now: a
+/// figure that settles over the first seconds an input is open.
+fn drift_words(parts_in_a_million: f64) -> String {
+    let size = parts_in_a_million.abs();
+    if size < 0.05 {
+        "in step with the output\u{2019}s".to_owned()
+    } else if parts_in_a_million > 0.0 {
+        format!("{size:.1} parts in a million fast")
+    } else {
+        format!("{size:.1} parts in a million slow")
+    }
 }
 
 /// The figures a round trip is made of, on one line.
@@ -471,5 +488,9 @@ mod tests {
         let faint = Measured { more_than_said_ms: -2.0, likeness: 0.2, ..clear };
         let words = found(&faint);
         assert!(words.contains("2.0 ms less than the devices say") && words.contains("faintly"), "{words}");
+        // Two clocks: how far apart they run, as it is read.
+        assert_eq!(drift_words(12.34), "12.3 parts in a million fast");
+        assert_eq!(drift_words(-3.0), "3.0 parts in a million slow");
+        assert_eq!(drift_words(0.01), "in step with the output\u{2019}s");
     }
 }
