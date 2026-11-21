@@ -388,7 +388,14 @@ on the samples.
   cannot be, is not shown to the line (`Said::heard_ns`). A host hands over what its device said with every
   buffer (`Sink::push_said`). That an input shares the output's clock (`InputFormat::shares_clock`) is a belief
   the stamps may overturn (`Reader::parts`), and no evidence at all where the system knows no container for
-  either end; while it holds and the rates are one, a frame of the input is a frame of the engine, handed
+  either end. The stamps may establish it too, of a pair that is taken for two clocks: the audio thread only
+  writes down, stretch by stretch, how far apart the two devices' least late stamps have their counts
+  (`capture::Evidence`, into a ring of atomics); it is judged off the audio thread, by a line that a stretch of
+  late stamps does not turn (`capture::look`, from `Engine::note_clocks` at the session's chores), and the
+  reader takes the verdict only while nothing is kept of the input, so never under a take. The engine keeps a
+  pair's verdict for the run (`one_clock_seen`, `two_clocks_seen`). Its constants are what the cable's stamps
+  were measured to do: change them with the cable test's figures beside you. While the belief holds and the
+  rates are one, a frame of the input is a frame of the engine, handed
   across to the bit (`Reader::whole`: its place is on a whole frame, put again while nothing is kept of the
   input and kept from the moment a take is asked for or a measurement runs, `Reader::keep`; what an exclusive
   output writes to a device is rounded to the

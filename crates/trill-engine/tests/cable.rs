@@ -169,6 +169,47 @@ fn played_and_recorded(session: &mut Session, folder: &tempfile::TempDir, rate: 
     recorded
 }
 
+/// Prints how far apart the two ends' counts of frames lay, stretch by
+/// stretch of two seconds, in millionths of a second from where they lay
+/// in the first: what the stamps' verdict is made of.
+fn say_stretches(session: &Session) {
+    let apart = session.input_clock_apart();
+    let first = apart.first().copied().unwrap_or(0.0);
+    let row: Vec<String> = apart.iter().map(|apart| format!("{:.0}", (apart - first) * 1e6)).collect();
+    println!("  stretch by stretch: {}", row.join(" "));
+}
+
+/// Waits, with nothing kept of the input, until its time stamps have said
+/// that it counts time by the output's clock, or `seconds` have gone by:
+/// what they come to say meanwhile is printed every ten seconds. Returns
+/// how long it took, if they said so.
+fn wait_for_one_clock(session: &mut Session, seconds: u64) -> Option<f64> {
+    use trill_engine::InputClock;
+    let began = Instant::now();
+    for second in 0..seconds {
+        match session.input_status().clock {
+            Some(InputClock::FoundShared) => {
+                let took = began.elapsed().as_secs_f64();
+                println!(
+                    "the stamps said the two ends are one clock {took:.0} s after the wait began: {:?}",
+                    session.input_clock_seen()
+                );
+                say_stretches(session);
+                return Some(took);
+            }
+            Some(InputClock::Shared) => return Some(0.0),
+            _ => {}
+        }
+        if second % 10 == 9 {
+            println!("  after {} s the stamps say {:?}", second + 1, session.input_clock_seen());
+        }
+        pass(session, 1.0);
+    }
+    println!("the stamps did not say one clock in {seconds} s: {:?}", session.input_clock_seen());
+    say_stretches(session);
+    None
+}
+
 /// Bumps a tenth of full scale high at `frames`, in `length` frames.
 fn bumps(frames: &[f64], length: usize) -> Vec<f32> {
     let mut samples = vec![0.0f32; length];
@@ -253,6 +294,15 @@ fn through_the_cable(exclusive: bool, one_clock: bool) {
     let (path, first) = take(&mut session, recorded, 5.0, rate);
     let before: Vec<f64> = song_frames.iter().map(|frame| off(&path, first, *frame, rate)).collect();
     println!("placed by what the devices say: {before:.2?} frames late");
+
+    // The system says nothing of a cable's two ends, and they are read by
+    // their time stamps: until the stamps have said, for a minute, that
+    // the two are one clock. With `TRILL_CABLE_BY_STAMPS` set that is not
+    // waited for, and the rest is read as two clocks are.
+    let one_clock = match one_clock || std::env::var_os("TRILL_CABLE_BY_STAMPS").is_some() {
+        true => one_clock,
+        false => wait_for_one_clock(&mut session, 240).is_some(),
+    };
 
     // Measured, three times: it should say the same each time.
     let mut found = Vec::new();
@@ -567,6 +617,11 @@ fn the_first_click_of_a_ten_minute_take_and_the_last_are_both_in_their_place() {
     // A click every ten seconds for ten minutes.
     let song_frames: Vec<f64> = (0..60).map(|click| (0.5 + click as f64 * 10.0) * rate).collect();
     let recorded = played_and_recorded(&mut session, &folder, rate, &bumps(&song_frames, (rate * 600.0) as usize));
+    // The stamps are given their minute to say whether the two ends are
+    // one clock, unless `TRILL_CABLE_BY_STAMPS` says to read on by them.
+    if !one_clock && std::env::var_os("TRILL_CABLE_BY_STAMPS").is_none() {
+        wait_for_one_clock(&mut session, 240);
+    }
     // What the cable leaves unsaid, first.
     session.measure_latency(1).unwrap();
     while session.measurement() == Measurement::Running {
@@ -580,8 +635,9 @@ fn the_first_click_of_a_ten_minute_take_and_the_last_are_both_in_their_place() {
     let worst = offs.iter().fold(0.0f64, |worst, off| worst.max(off.abs()));
     println!(
         "ten minutes through the cable: the first click {start:.2} frames from its place, the last {end:.2}, the worst of sixty {worst:.2}; \
-         the two ends read {:.1} ppm apart",
-        session.recording_latency().unwrap().drift_ppm
+         the two ends read {:.1} ppm apart; the input is read on {}",
+        session.recording_latency().unwrap().drift_ppm,
+        session.input_status().clock.map_or("nothing", |clock| clock.said())
     );
     assert!(worst < rate * 0.002, "{offs:.1?}");
 }

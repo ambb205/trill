@@ -158,6 +158,9 @@ fn clock_words(clock: Option<InputClock>, drift_ppm: Option<f64>) -> String {
         Some(InputClock::FoundOwn) => {
             format!("on a clock of its own{apart} (the system has it as part of the output\u{2019}s device)")
         }
+        // The system says nothing of the two, and the input's own time
+        // stamps say they are one clock.
+        Some(InputClock::FoundShared) => "on the output\u{2019}s clock (by what its time stamps say)".to_owned(),
         Some(InputClock::Own) | None => format!("on a clock of its own{apart}"),
     }
 }
@@ -510,6 +513,10 @@ mod tests {
         assert_eq!(
             clock_words(Some(InputClock::Own), Some(-3.0)),
             "on a clock of its own, 3.0 parts in a million slow"
+        );
+        assert_eq!(
+            clock_words(Some(InputClock::FoundShared), Some(0.2)),
+            "on the output\u{2019}s clock (by what its time stamps say)"
         );
         let found = clock_words(Some(InputClock::FoundOwn), Some(20.0));
         assert!(found.starts_with("on a clock of its own, 20.0 parts in a million fast (the system has it"), "{found}");

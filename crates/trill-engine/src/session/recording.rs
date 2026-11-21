@@ -98,6 +98,11 @@ pub enum InputClock {
     /// stamps said otherwise: it is read as one with a clock of its own
     /// from then on, for as long as it is open.
     FoundOwn,
+    /// The system says nothing of the two (a built-in device, a virtual
+    /// cable), and their time stamps said for a minute that they count
+    /// time by one clock: it is read as an input of the output's device
+    /// from then on, and when it is opened again in this run.
+    FoundShared,
 }
 
 impl InputClock {
@@ -109,6 +114,7 @@ impl InputClock {
             InputClock::FoundOwn => {
                 "its own: the system has it as part of the output's device, and its time stamps say otherwise"
             }
+            InputClock::FoundShared => "the output's own: its time stamps say so, where the system says nothing",
         }
     }
 }
@@ -387,10 +393,14 @@ impl Session {
     pub fn input_status(&self) -> InputStatus {
         let open = self.engine.input().cloned();
         let problem = self.recording.problem.clone().or_else(|| open.as_ref().and_then(|input| input.warning.clone()));
-        let clock = open.as_ref().map(|input| match (input.shares_clock, self.engine.input_parted()) {
-            (true, false) => InputClock::Shared,
-            (true, true) => InputClock::FoundOwn,
-            (false, _) => InputClock::Own,
+        let (parted, established) = (self.engine.input_parted(), self.engine.input_established());
+        let clock = open.as_ref().map(|input| match (input.shares_clock, input.by_stamps, parted) {
+            (true, false, false) => InputClock::Shared,
+            (true, false, true) => InputClock::FoundOwn,
+            // Opened as one clock on the word its stamps gave before.
+            (true, true, false) => InputClock::FoundShared,
+            (false, _, false) if established => InputClock::FoundShared,
+            _ => InputClock::Own,
         });
         let problem = problem.or_else(|| self.unreachable_input());
         InputStatus { open, needed: self.input_needed(), problem, clock }
@@ -402,6 +412,21 @@ impl Session {
     /// while it is closed.
     pub fn input_health(&self) -> Option<Health> {
         self.engine.input_health()
+    }
+
+    /// What the open input's time stamps have said so far of whether it
+    /// counts time by the output's clock, while it is taken to have one
+    /// of its own: for whoever measures. `None` while it is closed.
+    #[doc(hidden)]
+    pub fn input_clock_seen(&self) -> Option<crate::capture::ClockSeen> {
+        self.engine.input_clock_seen()
+    }
+
+    /// What that is judged from: how far apart the two devices' counts of
+    /// frames lay in each stretch of two seconds, in seconds.
+    #[doc(hidden)]
+    pub fn input_clock_apart(&self) -> Vec<f64> {
+        self.engine.input_clock_apart()
     }
 
     /// Says that somebody is looking at the input's level, or has stopped:
@@ -704,6 +729,9 @@ impl Session {
             self.end_take_early(&format!("{sentence}: the take ends there, whole up to that moment"));
             self.playing_audio_changed();
         }
+        // What its time stamps have said of its clock is kept for when it
+        // is opened again.
+        self.engine.note_clocks();
         match (self.input_needed(), self.engine.input().is_some()) {
             (true, false) if self.recording.tried.is_none_or(|at| at.elapsed() >= TRY_AGAIN) => {
                 match self.engine.open_input() {

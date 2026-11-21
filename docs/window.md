@@ -181,7 +181,11 @@ allows), and the page says whether it runs on the output's clock or on one of it
 case of a microphone on one device and headphones on another. That an input shares the output's clock is what
 the system says of the two, and Trill holds it against the input's own time stamps: where they say otherwise
 for a few seconds, the input is read as having a clock of its own from then on, without a step, and the page
-says that the system has it as part of the output's device and that its time stamps say otherwise.
+says that the system has it as part of the output's device and that its time stamps say otherwise. It goes the
+other way too, and nobody has to know what a clock is: of a laptop's own sound card, or a virtual cable, the
+system says nothing, so the input is read as a second clock at first; once its time stamps have said for a
+minute that it runs on the output's clock it is read so, frame for frame, between takes and never under one,
+and the page says that the stamps say so.
 
 *The round trip* is how long sound takes from the microphone back to the speaker: what the input says of
 itself, what handing the sound across to the engine's clock takes, and what the output says. A take is put where

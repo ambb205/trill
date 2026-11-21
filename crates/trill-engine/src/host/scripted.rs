@@ -287,6 +287,22 @@ impl ScriptedHost {
         self.state.lock().input_stalled = stalled;
     }
 
+    /// Has the clock of the input that is open run `ppm` parts a million
+    /// from the host's from here on: a clock that was steady and is no
+    /// longer. What it has handed over is as it was.
+    pub fn drift_input(&self, ppm: f64) {
+        let mut state = self.state.lock();
+        let Some(capturing) = &mut state.capturing else { return };
+        let nominal = capturing.device.sample_rate as f64;
+        let (was, is) = (nominal * (1.0 + capturing.device.ppm / 1e6), nominal * (1.0 + ppm / 1e6));
+        // Where its count stands is where it stood: the moment it is
+        // taken to have been opened at is moved so that it is.
+        let counted = capturing.handed as f64 * capturing.format.buffer_frames as f64;
+        let stood = capturing.opened + counted / was * 1e9;
+        capturing.opened = stood - counted / is * 1e9;
+        capturing.device.ppm = ppm;
+    }
+
     /// Has the buffers an input hands over next stamped as `stamps` say,
     /// one after the other: the input that is open, or the one opened
     /// next. Its frames are what they would have been.
