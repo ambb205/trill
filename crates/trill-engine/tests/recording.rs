@@ -177,7 +177,11 @@ fn run_taking(rig: &mut Rig, frame: f64) {
         // Within a second of what has been handed over since: well inside
         // what there is room for on the way to disk, on a machine that
         // gives the thread that writes its turn late.
-        wait_until(|| written(rig).is_none_or(|frames| frames as f64 - before + 48_000.0 >= rig.now() - began));
+        // (A file that takes no more is not waited for: that is its test.)
+        let failed = |rig: &Rig| rig.session.growing_takes().iter().any(|take| take.file.failed().is_some());
+        wait_until(|| {
+            failed(rig) || written(rig).is_none_or(|frames| frames as f64 - before + 48_000.0 >= rig.now() - began)
+        });
     }
 }
 
