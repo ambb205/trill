@@ -806,6 +806,8 @@ impl TrillApp {
     /// reaches the song.
     fn frame_of_making(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // The song's own input, if it is open: said here too.
+        let input_live = self.live.input.open.as_ref().map(|open| open.device.clone());
         let Self {
             making_of: held,
             theme,
@@ -849,7 +851,7 @@ impl TrillApp {
             .exact_size(status)
             .show_separator_line(false)
             .frame(bare)
-            .show(ui, |ui| making_of::status(ui, theme, making_of));
+            .show(ui, |ui| making_of::status(ui, theme, making_of, input_live.as_deref()));
         let Some(watching) = making_of.watching_mut() else {
             egui::CentralPanel::no_frame().show(ui, |ui| making_of::waiting(ui, theme, making_of));
             if leave {

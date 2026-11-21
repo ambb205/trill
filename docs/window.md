@@ -95,11 +95,13 @@ selected, and one undo takes the whole take back. Asked to record with nothing a
 if it has an instrument or records an input, and otherwise says why it cannot.
 
 **Record an input.** A track records what a keyboard plays unless it is told to record an input of the audio
-device: right-click its header (or click the first row of its mixer strip) and choose a channel, or a pair as
-left and right, under *Records*. The track then shows which input it is (`IN 1`, `IN 1+2`: a click changes it),
+device: right-click its header and choose a channel, or a pair as left and right, under *Records*. (Once a track
+of the song records an input, every mixer strip has a row that says what its track records, and a click there
+chooses too.) The track then shows which input it is (`IN 1`, `IN 1+2`: a click changes it),
 a monitor switch, and an arm button like any other. **Arming it opens the input**, and for as long as an input is
 open the status bar says `INPUT LIVE` and the device's name, in the signal color: a microphone that is open
-hears the room, whatever is done with what it hears. It is open only while something needs it (a track that
+hears the room, whatever is done with what it hears (the stage and the making-of, which hide the status bar, say
+it too). It is open only while something needs it (a track that
 records it is armed or heard, a measurement runs, the settings show its level) and closes when nothing does. What
 arrives is drawn beside the track's own level, a thin bar under its name and a meter beside its fader in the
 mixer, with a lamp that stays lit once the input was at full scale until it is clicked: turn the input down at
