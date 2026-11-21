@@ -521,7 +521,8 @@ impl Driver {
                         // before the other had said who it is: the join
                         // came to nothing, and a failure is a sentence.
                         None if peer.joined => self.say(format!(
-                            "Not joined: the connection ended before the other program had said who it is ({why}).                              It may not be a Trill, or it stopped sharing its song; ask for the invitation again."
+                            "Not joined: the connection ended before the other program had said who it is ({why}). \
+                             It may not be a Trill, or it stopped sharing its song; ask for the invitation again."
                         )),
                         None => {}
                     }

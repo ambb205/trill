@@ -122,7 +122,8 @@ Only Windows has been run so far.
 
 ## Working in one song together
 
-- Audio files that travel between machines. Each person needs the files where the song names them.
+- Audio files that travel between machines. Each person needs the files where the song names them; a take one
+  of them records is a file only they have, and a missing file for the others until it is there.
 - Hearing a plugin one has not got (a stem from whoever has it). Its place is kept and its settings are carried.
 - A meeting point for two home networks. A program joins wherever it can open a connection: the same machine, a
   local network, a VPN, a forwarded port.

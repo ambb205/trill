@@ -75,7 +75,8 @@ fn main() {
         .collect();
     let found = recordings.iter().filter(|path| std::path::Path::new(path).is_file()).count();
     println!(
-        "{song}: {} tracks, {clips} clips, {notes} notes, {} devices, {} bytes as a file; opened in {:.2} s, with {found} of          its {} recordings found from this folder",
+        "{song}: {} tracks, {clips} clips, {notes} notes, {} devices, {} bytes as a file; opened in {:.2} s, with {found} of \
+         its {} recordings found from this folder",
         project.tracks.len(),
         project.devices().count(),
         project.to_json().len(),

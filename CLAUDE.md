@@ -174,8 +174,11 @@ on the samples.
   parameter's, a send's two tracks). If two edits of it that are each
   allowed can together say what no song may be, `derive.rs` decides what the song is then, the same everywhere,
   and the session says a sentence (`session/together.rs`). What is one person's listening and not the song
-  (the loop, solo, which reference is listened to) is marked so in `Key::is_personal`, and never leaves the
-  program. `TRILL_CHECK_MERGE=1` has every edit of every test held against the song worked out from its
+  (the loop, solo, which reference is listened to) or one machine's (which input a track records, and how it
+  is heard meanwhile) is marked so in `Key::is_personal`, and never leaves the program: not in a change, not in
+  a track that is made (`Change::impersonal`), not in the song that is handed to whoever joins. The order a
+  song's envelopes are held in is a property of its own (`Op::Envelopes`): the order they were made in, as a
+  file has them, so that nobody's list of them is shuffled by being shared. `TRILL_CHECK_MERGE=1` has every edit of every test held against the song worked out from its
   properties: run the engine's tests with it after touching any of this.
 - **Something another program says:** a `Message` in `trill-together/src/wire.rs`, handled in the one place
   that connects wire and session (`trill-runtime/src/together.rs`). Whatever arrives is untrusted: bounded
@@ -426,6 +429,16 @@ on the samples.
   device's steps, so that the way out is as exact as the way in). The place an input is read at is put again a
   quarter of a second after it opens: a take that is not counted in waits for that (`Processor::record`,
   `Reader::settled`), so that no take has the step in it.
+  **In a song that others hold too** a take is a clip that is kept beside its track, in a lane
+  (`ClipOp::Lane`, `Key::Clip(_, LANE)`): made, changed and removed as a clip is, and two that were put in one
+  lane over one stretch at once lie in two (`Doc::derive`, `Derived::displaced`). What a take writes while it is
+  recorded is said when it has landed and not before (`Session::hold_what_is_said`, around the take's group in
+  `session/playing.rs`). Which input a track records is its person's (above), so nothing that arrives gives a
+  track an input, and what arrives is not the hand: a change from another program opens no microphone. Of two
+  recordings put over one stretch of a track that keeps takes at the same moment, the later has it: the program
+  whose work was the earlier makes room under the other's (`Session::give_way`, by `Project::cover`), says so
+  once and can put its own back over it. A recording's file does not travel: the others have the take with a
+  file that is missing there.
   A take is written in the engine's clock and rate by a thread of its own (`recorder.rs`), and is put where it
   was heard: the hand-over's delay and the output's latency, or what was measured in its place, come off
   (`shift_of` in `session/recording.rs`). Where the song went during a take is what the audio thread says
@@ -433,15 +446,19 @@ on the samples.
   from a switch: each stretch lands where it was sung as a take of its own (`passes`), and nothing that was
   sung while the song rolled lands nowhere. Nobody waits for a take's last sound with the session held
   (`Session::stop`; `stop_and_wait` is for a test, and the `transport` tool waits off the lock). What a track
-  records is the song's (`Track::input`, absent in a file saved before and then not written); what is armed, what
-  is open and the round trip are the session's. A take's audio goes into the take's undo group
+  records is in the song's file (`Track::input`, absent in a file saved before and then not written) and is one
+  person's where the song is shared; what is armed, what is open and the round trip are the session's. A take's audio goes into the take's undo group
   (`land_audio_take`), takes are kept beside a track's clips and nothing that reads `clips` sees them, and what a
   recording or a comp covers is kept as a take first (`Project::cover`): nothing recorded is ever lost by an
   edit. No recording is ever deleted: one that is removed goes to the system's Recycle Bin, or a `removed`
   folder beside the takes (`session/bin.rs`), and only by `Runtime::delete_unused_recordings`, which a front
   end asks about first and the assistant's door refuses. What is unused is the runtime's to say, because it is
   a question about every song Trill knows of (`Runtime::unused_recordings`: the open song and what undo can
-  reach, asked of what names a file, `beside::named_by`; the songs the settings remember; the safety copies),
+  reach, asked of what names a file, `beside::named_by`; the songs the settings remember; the safety copies).
+  An undo step keeps what it set and not a song, so what undo can reach is asked of the properties
+  (`Session::each_state`: the song, the song with whatever a step can bring back, and what steps set a name
+  from; in a song others hold, everything that was removed, which anyone can bring back), and a recording that
+  comes beside the song is named there by a quiet write of everything that is held (`rename_everywhere`),
   and paths are held against one another as the file system has them (`spelled_path`). A song's recordings come
   beside it at its first save by a second name where the disk allows and by a copy made on a thread of its own
   where it does not (`session/beside.rs`); saving under another name leaves them where they are. Frames that did

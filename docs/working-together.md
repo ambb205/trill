@@ -62,9 +62,11 @@ None of this is part of the song or of its journal, and it is gone when they are
 
 ## What is the song's, and what is yours
 
-Everything is the song's, and travels, except what is plainly one person's listening: the transport, the loop,
-which tracks are soloed, which reference is listened to, what is selected, zoom and scroll, and what is armed.
-Mute is the song's.
+Everything is the song's, and travels, except what is plainly one person's listening or one machine's: the
+transport, the loop, which tracks are soloed, which reference is listened to, what is selected, zoom and scroll,
+what is armed, and of a track that records, which input of your audio device it records and whether you hear it
+meanwhile. Your input 3 is not anyone else's: it is never said, and nobody's is ever taken from them. Mute is
+the song's. So are takes, the lanes they lie in, what is put on a track of them and the fades across its seams.
 
 ## When two of you change the same thing
 
@@ -78,6 +80,8 @@ Both intentions hold wherever they can:
 | Turns a knob | Turns the same knob | The later value |
 | Adds a device to a chain | Reorders that chain | Both |
 | Deletes a track | Writes notes in it | The track gone, said to the other, brought back whole on request |
+| Records a take on a track | Records one on the same track over the same bars | Both takes, each in a lane of its own; the track plays the one that landed later, and the other is told and can put theirs back |
+| Puts a stretch of a take on a track | Puts another over the same stretch | The later, as if it had been put there after the other; the other is told and can put theirs back |
 | Makes A listen to B | Makes B listen to A | The one made first; the other waits, and its maker is told |
 | Changes a plugin in its window | Changes the same plugin | One whole state: a plugin's settings are not merged |
 
@@ -94,6 +98,25 @@ Where two edits are each allowed and cannot both hold (two tracks listening to e
 reference at the moment it is given a send), the one made first stands, as it would have had they been made one
 after the other, and the later one waits: it is in the song as soon as what stands in its way is gone, or at
 once if you choose *Have mine instead*.
+
+## Recording
+
+A take that is being recorded is nobody else's yet: nothing of it is said while it is played or sung. When it
+has landed, the others have it as the one step it is, in its lane beside the track with what the track plays of
+it, and its maker's `Ctrl+Z` takes it back for everyone, as with any step. Arming a track, hearing an input
+and choosing one stay in your own program, and nothing that arrives from anyone opens a microphone.
+
+**A recording is a file, and files do not travel yet.** The others have the take and the clip that plays it,
+naming the file where your computer has it. On their computer that file is missing, which is said once, as any
+missing file is, and it plays as soon as the file is there. (Two windows on one computer both find it.)
+
+**Two recordings over one stretch.** A track that keeps takes plays one recording at a time. Where two of you
+put one over the same stretch at the same moment, each not knowing of the other (two takes that land there, or
+two stretches of takes put there), the one that was made later is what the track plays, as if it had been made
+after the other and had covered it. The program of whoever was earlier makes that so and tells them once, with
+*Put mine back*, which covers the other's in turn. Nothing that was recorded is lost by any of it: every take
+stays in its lane, and whatever a recording covers is kept as a take first. Two takes that were put in the same
+lane over the same bars lie in two lanes.
 
 ## Undo is your own
 
@@ -149,21 +172,33 @@ before notes had ids), with both programs on one machine that was building other
 print these: `cargo run -p trill-engine --example edit_cost -- SONG.trill` and
 `cargo run -p trill-runtime --example together -- SONG.trill`.
 
-**Working alone costs what it did**, with two exceptions that are said here. The fastest of three hundred, and the
-middle one, in milliseconds, against the build before:
+**Working alone costs what it did**, with the exceptions that are said under the table. Opening in seconds; for
+the rest the fastest of three hundred and the middle one, in milliseconds, against the build before:
 
 | | Before | Now |
 |---|---|---|
-| A note written into a clip | 1.7, 2.7 to 3.1 | 1.8 to 2.0, 2.6 to 3.1 |
-| A clip moved | 1.8, 2.4 to 3.0 | 1.7 to 1.8, 2.2 to 2.7 |
-| A fader set | 1.7 to 1.9, 2.2 to 3.3 | 1.8, 2.3 to 2.8 |
-| A device's parameter set | 0.4, 0.6 to 0.9 | 0.3 to 0.4, 0.6 |
-| A step taken back | 1.4 to 1.6, 1.7 to 2.6 | 2.0, 2.8 to 3.0 |
-| A step brought back | 1.4 to 1.5, 1.9 to 2.4 | 2.0, 2.6 to 3.0 |
+| The song opened, its eight recordings (340 MB) read | 1.5 to 1.8 s | 1.4 to 1.5 s |
+| The song opened where its recordings are not found | 0.31 to 0.32 s | 0.31 to 0.34 s |
+| A note written into a clip | 1.6 to 1.7, 3.0 to 3.3 | 1.9 to 2.2, 3.5 to 3.9 |
+| A clip moved | 1.8 to 1.9, 2.6 to 3.2 | 1.8 to 1.9, 3.1 to 3.2 |
+| A fader set | 1.8 to 1.9, 3.0 to 3.3 | 1.8, 3.2 |
+| A device's parameter set | 0.4, 0.9 | 0.3, 0.6 to 0.7 |
+| A step taken back | 1.5 to 1.7, 2.5 to 2.7 | 2.1, 3.6 to 3.8 |
+| A step brought back | 1.5 to 1.6, 2.5 to 2.6 | 2.1, 3.6 to 4.0 |
 
-Undo and redo cost half a millisecond more on this song: a step is no longer a whole song kept to be swapped in,
-and the song is worked out again from its properties. And the file of a song with many notes is larger, here by a
-sixth (7.3 MB): every note carries its id.
+(The build before is the one with recording in it and without sharing; three turns each, the two builds in turn,
+started from the same folder.)
+
+- *Opening a song costs what it did*: about 15 ms more on this one, of which 8 ms read what a shared song keeps
+  beside it, 2 ms give every note its id and 5 ms make the properties. What takes the time is reading the
+  recordings a song plays, and that is as it was. The long song names its recordings by a path from the folder it
+  was made in, so a program that is started anywhere else finds none of them and opens it five times as fast:
+  the two builds are held beside one another from the same folder, and `edit_cost` says how many it found.
+- *Undo and redo take about half as long again* (1.3 to 1.5 times; 0.5 to 1.3 ms more on this song): a step is
+  no longer a whole song kept to be swapped in, and the song is worked out again from its properties.
+- *A note written takes a fifth longer* (0.3 to 0.5 ms): the song is settled and compared with the song before
+  on every edit, which is 0.2 and 0.26 ms of it here, against 2 to 5 ms for the compile.
+- The file of a song with many notes is larger, here by a sixth (7.3 MB): every note carries its id.
 
 **Together:**
 
@@ -197,7 +232,10 @@ Superior Drummer 3, an Ample bass and guitar, an Archetype amplifier, two Serum 
 
 ## What is not built
 
-- Audio files travelling between machines. Each of you needs the files where the song names them.
+- Audio files travelling between machines. Each of you needs the files where the song names them, and a take
+  someone records is a file only they have.
+- Giving way when its maker is not there: of two recordings put over one stretch at once, it is the program of
+  whoever was earlier that makes room, so until that program is in the song again both play.
 - A plugin one of you has not got heard by them (a stem from whoever has it).
 - A meeting point for two home networks.
 - A view of what happened while you were apart.

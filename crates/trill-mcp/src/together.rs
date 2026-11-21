@@ -42,6 +42,9 @@ since: its reply says how many things stayed theirs.
 work done through this program and someone else's could not both hold (two moves of one clip, a track removed while \
 it was being written in). Each notice is a sentence, and where it names an `action`, `put_back` with its id does \
 that as one undoable edit. Tell the user about a notice; put theirs back when they ask.
+- A take someone else recorded is in the song with its lane and what the track plays of it, and names a file on \
+their computer: here it is a missing file (missing_files) until the file is here too. Which input of the audio \
+device a track records (track_input) is each person's own and is not shared: set it for this program only.
 - Share and join when the user asks to, never on your own: both let someone else read and change the song. An \
 invitation (`trill:HOST:PORT:SECRET`) is whoever holds it's key to the song while it is shared.";
 
