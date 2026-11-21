@@ -177,17 +177,18 @@ the rest the fastest of three hundred and the middle one, in milliseconds, again
 
 | | Before | Now |
 |---|---|---|
-| The song opened, its eight recordings (340 MB) read | 1.5 to 1.8 s | 1.4 to 1.5 s |
-| The song opened where its recordings are not found | 0.31 to 0.32 s | 0.31 to 0.34 s |
-| A note written into a clip | 1.6 to 1.7, 3.0 to 3.3 | 1.9 to 2.2, 3.5 to 3.9 |
-| A clip moved | 1.8 to 1.9, 2.6 to 3.2 | 1.8 to 1.9, 3.1 to 3.2 |
-| A fader set | 1.8 to 1.9, 3.0 to 3.3 | 1.8, 3.2 |
-| A device's parameter set | 0.4, 0.9 | 0.3, 0.6 to 0.7 |
-| A step taken back | 1.5 to 1.7, 2.5 to 2.7 | 2.1, 3.6 to 3.8 |
-| A step brought back | 1.5 to 1.6, 2.5 to 2.6 | 2.1, 3.6 to 4.0 |
+| The song opened, its eight recordings (340 MB) read | 1.1 to 1.8 s | 1.2 to 1.5 s |
+| The song opened where its recordings are not found | 0.30 to 0.32 s | 0.25 to 0.34 s |
+| A note written into a clip | 1.6 to 2.2, 3.0 to 3.8 | 1.9 to 3.0, 3.3 to 4.7 |
+| A clip moved | 1.8 to 2.0, 2.6 to 3.5 | 1.8 to 2.0, 3.0 to 3.9 |
+| A fader set | 1.8 to 2.9, 3.0 to 4.0 | 1.8, 3.0 to 4.1 |
+| A device's parameter set | 0.4 to 0.6, 0.9 to 1.2 | 0.3 to 0.5, 0.6 to 0.7 |
+| A step taken back | 1.5 to 2.3, 2.5 to 3.0 | 2.0 to 2.4, 3.3 to 4.1 |
+| A step brought back | 1.4 to 2.2, 2.3 to 2.9 | 2.0 to 2.1, 3.3 to 4.0 |
 
-(The build before is the one with recording in it and without sharing; three turns each, the two builds in turn,
-started from the same folder.)
+(The build before is the one with recording in it and without sharing. Six turns each, the two builds in turn,
+started from the same folder; the song was opened twelve times more in turn. In one further turn the machine was
+busy with something else and the song took 2.4 s to open on the one and 6.2 s on the other.)
 
 - *Opening a song costs what it did*: about 15 ms more on this one, of which 8 ms read what a shared song keeps
   beside it, 2 ms give every note its id and 5 ms make the properties. What takes the time is reading the
