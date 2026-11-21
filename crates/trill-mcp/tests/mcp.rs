@@ -2610,6 +2610,7 @@ async fn two_doors(folder: tempfile::TempDir) -> (Fixture, Client, ScriptedHost,
     use trill_engine::host::scripted::{Hears, ScriptedInput};
     let host = ScriptedHost::with_speakers();
     host.add_input(ScriptedInput::new("Microphone"));
+    host.add_input(ScriptedInput::new("Other"));
     host.hear(Hears::Sound(Arc::new(|_, seconds| (0.25 * (seconds * std::f64::consts::TAU * 440.0).sin()) as f32)));
     let work = folder.path().join("work");
     let parts = Parts { audio: Some(Arc::new(host.clone())), ..Parts::default() };
@@ -2712,6 +2713,13 @@ async fn nothing_at_the_assistants_door_opens_the_microphone_by_any_route() {
     ok(&door, "add_device", json!({ "track": voice, "uri": "builtin:polysynth", "preset": "warm_pad" })).await;
     chores(&fixture, &host);
 
+    // The device that is recorded from: with nothing live the assistant
+    // may choose it, and choosing opens nothing.
+    let chosen = ok(&door, "audio", json!({ "action": "set", "input": "Other" })).await;
+    assert_eq!(fixture.session.lock().audio_config().input.as_deref(), Some("Other"), "{chosen}");
+    ok(&door, "audio", json!({ "action": "set", "input": "default" })).await;
+    chores(&fixture, &host);
+
     // Another song. The user saves this one, begins another, and arms a
     // track of it that records a keyboard; its tracks have the numbers
     // the first song's have. The assistant opens the first song again:
@@ -2752,6 +2760,11 @@ async fn nothing_at_the_assistants_door_opens_the_microphone_by_any_route() {
     host.advance(96_000);
     let stopped = ok(hand, "transport", json!({ "action": "stop" })).await;
     let take = stopped["recorded"]["takes"][0]["take_id"].as_u64().expect("a take was recorded");
+    // While the user's track keeps the input live, the assistant cannot
+    // put another microphone in its place.
+    let error = call(&door, "audio", json!({ "action": "set", "input": "Other" })).await.unwrap_err();
+    assert!(error.contains("is the user's to change"), "{error}");
+    assert_eq!(host.capturing().map(|format| format.device), Some("Microphone".to_string()));
     ok(hand, "update_track", json!({ "track": take_track, "armed": false })).await;
     chores(&fixture, &host);
     assert!(host.capturing().is_none());
@@ -2803,13 +2816,23 @@ async fn the_users_own_client_opens_the_microphone_and_what_no_hand_asked_for_is
     assert_eq!(opens(), 2);
     assert!(host.capturing().is_some());
 
+    // The user's own client changes the device that is recorded from
+    // while it is live, and what was live stays live on the device chosen.
+    ok(hand, "audio", json!({ "action": "set", "input": "Other" })).await;
+    chores(&fixture, &host);
+    assert_eq!(host.capturing().map(|format| format.device), Some("Other".to_string()));
+    ok(hand, "audio", json!({ "action": "set", "input": "default" })).await;
+    chores(&fixture, &host);
+    assert_eq!(host.capturing().map(|format| format.device), Some("Microphone".to_string()));
+    let opened = opens();
+
     // Looking at the level opens it too, for as long as the look takes.
     ok(hand, "update_track", json!({ "track": keys, "armed": false })).await;
     chores(&fixture, &host);
     assert!(host.capturing().is_none());
     let looked = ok(hand, "audio_inputs", json!({ "listen": true })).await;
     assert_eq!(looked["open"], true);
-    assert_eq!(opens(), 3);
+    assert_eq!(opens(), opened + 1);
     chores(&fixture, &host);
     assert!(host.capturing().is_none(), "and it is closed when the look is over");
 
@@ -2818,11 +2841,11 @@ async fn the_users_own_client_opens_the_microphone_and_what_no_hand_asked_for_is
     let held = ok(&door, "track_input", json!({ "track": voice, "monitor": "always" })).await;
     assert!(held.get("input_held").is_some(), "{held}");
     chores(&fixture, &host);
-    assert_eq!(opens(), 3);
+    assert_eq!(opens(), opened + 1);
     let let_go = ok(hand, "track_input", json!({ "track": voice, "monitor": "always" })).await;
     assert!(let_go.get("input_held").is_none(), "{let_go}");
     chores(&fixture, &host);
-    assert_eq!(opens(), 4);
+    assert_eq!(opens(), opened + 2);
 
     // Another song, opened by the user: arming does not carry into it,
     // and what it says of always is held for the user too, until asked.

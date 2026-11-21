@@ -247,6 +247,10 @@ fn apply(cx: &mut Cx) {
     cx.settings.save_problem = None;
     let (sender, config) = (cx.settings.sender.clone(), cx.settings.draft.clone());
     cx.sounds.quietly(move |runtime| {
+        // Apply was pressed: the worker that opens the devices does it
+        // for the user's hand, which may change the device that is
+        // recorded from while it is live.
+        let _hand = trill_engine::hand::by_hand();
         let (_, saved) = runtime.set_audio(config);
         let _ = sender.send(Done::Applied(saved.map_err(|error| error.to_string())));
         // What can be chosen may have changed with it.

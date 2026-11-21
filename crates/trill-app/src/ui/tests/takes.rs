@@ -504,3 +504,47 @@ fn a_made_up_session_shows_its_takes_and_a_level_that_is_the_same_on_every_frame
     let late = harness.app.live().input.latency.unwrap().round_trip_ms;
     assert!((late - 49.5).abs() < 0.6, "{late}");
 }
+
+#[test]
+fn an_input_the_song_says_is_always_heard_is_held_until_its_switch_is_clicked() {
+    let (mut harness, stage, voice, _folder) = studio();
+    // As a song that was just opened has it, or one the assistant wrote
+    // to: nobody at this window switched it on. (What the test asks of
+    // the session itself is asked by nobody's hand.)
+    let always = TrackInput { channel: 1, stereo: false, monitor: Monitoring::Always };
+    harness.session.lock().edit(|project| project.set_track_input(voice, Some(always))).unwrap();
+    stage.run(&mut harness, 4_800);
+    harness.idle(2);
+    assert!(harness.session.lock().input_held(voice));
+    assert!(harness.is_on_screen("Monitor Voice, held"), "{:?}", harness.labels);
+    assert!(!harness.is_on_screen("Input live") && stage.host.capturing().is_none());
+    assert!(stage.host.input_requests().is_empty(), "the device was never asked for its input");
+    let said: Vec<String> = harness.app.state().toasts.texts().iter().map(|text| text.to_string()).collect();
+    assert!(said.iter().any(|text| text.contains("is held, not heard")), "{said:?}");
+    harness.move_to(harness.labeled("Monitor Voice, held"));
+    harness.idle(2);
+    assert!(
+        harness.hint().starts_with("Held: the song says input 1 is heard through this track always"),
+        "{}",
+        harness.hint()
+    );
+
+    // One click lets it go: that is the user's hand.
+    harness.click_label("Monitor Voice, held");
+    stage.run(&mut harness, 4_800);
+    harness.idle(2);
+    assert!(!harness.session.lock().input_held(voice));
+    assert!(harness.is_on("Monitor Voice"));
+    assert!(harness.is_on_screen("Input live \u{00B7} Microphone") && stage.host.capturing().is_some());
+    assert_eq!(harness.project().track(voice).unwrap().input, Some(always), "the song was not changed by it");
+
+    // Arming is not asked of the session by anybody but the window's own
+    // hand: asked otherwise, it is refused and nothing is armed.
+    let other = harness.session.lock().edit(|project| Ok(project.add_track("Other"))).unwrap();
+    harness.session.lock().edit(|project| project.set_track_input(other, Some(TrackInput::mono(2)))).unwrap();
+    let refused = harness.session.lock().set_armed(other, true).unwrap_err().to_string();
+    assert!(refused.contains("arming it opens the microphone"), "{refused}");
+    harness.idle(2);
+    harness.click_label("Arm Other");
+    assert!(harness.session.lock().is_armed(other), "the arm button is the user's hand");
+}

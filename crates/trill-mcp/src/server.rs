@@ -2715,9 +2715,11 @@ impl TrillServer {
     /// stops playback). What cannot be had is replaced by the nearest thing, and `warning` then says why.
     #[tool(annotations(title = "Audio device"))]
     async fn audio(&self, Parameters(request): Parameters<AudioRequest>) -> CallToolResult {
-        let runtime = self.runtime.clone();
+        let (runtime, guarded) = (self.runtime.clone(), self.is_guarded());
         // Listing devices and opening one both wait on the system.
         let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            // A client the user set up is the user's hand, on this thread too.
+            let _hand = (!guarded).then(trill_engine::hand::by_hand);
             match request.action {
                 AudioAction::Status => Ok(audio_json(&runtime.audio_status())),
                 AudioAction::Devices => {
@@ -2749,7 +2751,20 @@ impl TrillServer {
                     if let Some(input) = &request.input {
                         let named = input.trim();
                         let follow_system = named.is_empty() || named.eq_ignore_ascii_case("default");
-                        config.input = (!follow_system).then(|| named.to_string());
+                        let wanted = (!follow_system).then(|| named.to_string());
+                        // What the user let live is the device that was
+                        // the input then: the assistant does not put
+                        // another microphone in its place.
+                        let live = runtime.session.lock().input_status();
+                        if guarded && wanted != config.input && (live.needed || live.open.is_some()) {
+                            return Err(
+                                "The input is live, and which device is recorded from is the user's to change \
+                                        while it is: in the audio settings. With nothing armed or heard it can be \
+                                        changed here."
+                                    .into(),
+                            );
+                        }
+                        config.input = wanted;
                     }
                     let (status, saved) = runtime.set_audio(config);
                     let mut out = audio_json(&status);

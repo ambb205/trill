@@ -635,6 +635,22 @@ impl Session {
         }
     }
 
+    /// `config` as it may be applied by whoever asks: with the device
+    /// that is recorded from left as it is where something keeps the
+    /// input live and it is not the user's hand that asks.
+    pub(super) fn hold_the_input_device(&mut self, mut config: crate::AudioConfig) -> crate::AudioConfig {
+        let now = self.engine.config().input.clone();
+        if config.input != now && self.input_needed() && !crate::hand::is_by_hand() {
+            config.input = now;
+            self.recording.hand.said = Some(
+                "the device that is recorded from was left as it is: the input is live, and which microphone that \
+                 is is the user's to change, in the audio settings"
+                    .to_string(),
+            );
+        }
+        config
+    }
+
     /// Another song: nothing a hand let in the song before is this one's,
     /// and nothing that was armed there is armed here. Track ids begin
     /// again in every song.

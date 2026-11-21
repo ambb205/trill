@@ -128,6 +128,16 @@ fn nothing_asked_at_the_door_opens_the_input_by_any_route() {
     assert!(refused.contains("opens the microphone") && refused.contains("the user runs it"), "{refused}");
     settle(&mut rig);
 
+    // The device that is recorded from, with nothing live: the door may
+    // change it, and nothing is opened by that.
+    rig.host.add_input(ScriptedInput::new("Other"));
+    at_the_door(&mut rig.session, |session| {
+        session.set_audio_config(AudioConfig { input: Some("Other".into()), ..AudioConfig::default() });
+        assert_eq!(session.audio_config().input.as_deref(), Some("Other"));
+        session.set_audio_config(AudioConfig::default());
+    });
+    settle(&mut rig);
+
     // Record, with nothing armed: nothing is armed for it.
     let refused = at_the_door(&mut rig.session, |session| session.record()).unwrap_err().to_string();
     assert!(refused.contains("no track is armed"), "{refused}");
@@ -230,6 +240,27 @@ fn the_users_hand_opens_the_input_and_what_no_hand_asked_for_is_held() {
     rig.session.set_armed(voice, false).unwrap();
     settle(&mut rig);
     assert!(rig.session.input_held(voice) && rig.host.capturing().is_none());
+
+    // The device that is recorded from, while the input is live: the door
+    // cannot put another microphone in its place; the hand can, and what
+    // was live stays live on the device it chose.
+    rig.host.add_input(ScriptedInput::new("Other"));
+    rig.session.let_input_be_heard(voice).unwrap();
+    settle(&mut rig);
+    assert_eq!(rig.host.capturing().map(|format| format.device), Some("Microphone".to_string()));
+    at_the_door(&mut rig.session, |session| {
+        session.set_audio_config(AudioConfig { input: Some("Other".into()), ..AudioConfig::default() });
+    });
+    settle(&mut rig);
+    assert_eq!(rig.session.audio_config().input, None, "the device is left as it was");
+    assert_eq!(rig.host.capturing().map(|format| format.device), Some("Microphone".to_string()));
+    assert!(rig.session.take_input_note().unwrap().contains("the device that is recorded from was left as it is"));
+    rig.session.set_audio_config(AudioConfig { input: Some("Other".into()), ..AudioConfig::default() });
+    settle(&mut rig);
+    assert_eq!(rig.host.capturing().map(|format| format.device), Some("Other".to_string()), "what is live stays live");
+    assert!(!rig.session.input_held(voice));
+    rig.session.set_audio_config(AudioConfig::default());
+    settle(&mut rig);
 
     // Another song: arming does not carry into it, whatever numbers its
     // tracks have, and what it says of always is held for the user too.

@@ -135,7 +135,14 @@ impl Session {
     /// after, as when the song was opened ([`Session::arriving`]): the
     /// song stands with what is made in no time until they are there, and
     /// play is there to be pressed meanwhile.
+    ///
+    /// Which device is recorded from is changed only by the user's own
+    /// hand while anything keeps the input live: what a hand let live is
+    /// the device that was the input then. Asked by anybody else, the
+    /// rest of `config` is taken and the input is left as it is, with a
+    /// sentence ([`Session::take_input_note`]).
     pub fn set_audio_config(&mut self, config: AudioConfig) {
+        let config = self.hold_the_input_device(config);
         self.before_audio_change();
         let position = self.engine.position();
         // What the stream that goes leaves behind is taken down after the
