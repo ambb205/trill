@@ -357,6 +357,13 @@ pub fn track_json(track: &Track, bars: &MeterMap, include_notes: bool) -> Value 
     if !track.sends.is_empty() {
         out["sends"] = track.sends.iter().map(|send| json!({ "to": send.to, "level_db": send.level_db })).collect();
     }
+    if let Some(input) = track.input {
+        out["input"] = crate::recording::input_json(input);
+    }
+    if !track.takes.is_empty() {
+        // Kept beside the track and not played: `takes` lists them.
+        out["takes"] = json!(track.takes.len());
+    }
     if let Some(reference) = &track.reference {
         // Beside the song: said so that its clips are not taken for a part of it.
         let mut said = json!({ "listening": reference.listening, "rendered": false });

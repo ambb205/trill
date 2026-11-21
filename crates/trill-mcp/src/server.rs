@@ -485,6 +485,7 @@ impl TrillServer {
             + Self::wavetable_router()
             + Self::catalogue_router()
             + Self::playing_router()
+            + Self::recording_router()
     }
 
     /// The names of the tools the server offers.
@@ -1148,11 +1149,27 @@ impl TrillServer {
         });
         // Arming is the session's, not the project's: no undo step.
         let reply = reply.and_then(|mut out| {
+            let input = session.project().track(id).ok().and_then(|track| track.input);
             if let Some(armed) = request.armed {
+                // A track that records an input opens the microphone when
+                // it is armed: at the assistant's door that is the user's
+                // own hand on the arm button, or nothing.
+                if armed && self.is_guarded() && input.is_some() && !session.is_armed(id) {
+                    return Err("This track records an input of the audio device, and arming it opens the microphone:                                 the user arms it themselves, with the track's arm button. Once it is armed, transport                                 records it."
+                        .into());
+                }
                 session.set_armed(id, armed).map_err(|error| explain(session.project(), error))?;
             }
             if session.is_armed(id) {
                 out["armed"] = json!(true);
+                if let Some(input) = input {
+                    out["records"] = json!(input.said());
+                    // What is wrong with the input, if anything is, before a take is asked for.
+                    let _ = session.ready_input();
+                    if let Some(problem) = session.input_status().problem {
+                        out["input_problem"] = json!(problem);
+                    }
+                }
             }
             Ok(out)
         });
@@ -2603,6 +2620,9 @@ impl TrillServer {
             if let Some(on) = request.metronome {
                 session.set_metronome(on);
             }
+            if let Some(on) = request.punch {
+                session.set_punch(on);
+            }
             // The audio thread applies commands at its next callback, so the
             // reply states what was asked for rather than a stale reading.
             let current = session.transport();
@@ -2629,7 +2649,15 @@ impl TrillServer {
                     if recording {
                         // The take is in the project by now.
                         out["take"] = take_json(session.last_take());
-                        if session.last_take().is_empty() {
+                        // And what was recorded of the inputs: where its
+                        // files are, how loud they were, what was missing.
+                        let rate = session.audio_info().sample_rate;
+                        let audio =
+                            session.last_recording().map(|recorded| crate::recording::recorded_json(recorded, rate));
+                        if let Some(audio) = &audio {
+                            out["recorded"] = audio.clone();
+                        }
+                        if session.last_take().is_empty() && audio.is_none() {
                             out["note"] = json!("Nothing was played during the recording, so no clip was made.");
                         }
                     }
@@ -2659,6 +2687,21 @@ impl TrillServer {
                         "tracks": session.armed(),
                         "count_in_bars": count_in,
                     });
+                    // Which of them record an input of the audio device.
+                    let inputs: Vec<Value> = session
+                        .armed()
+                        .iter()
+                        .filter_map(|track| session.project().track(*track).ok())
+                        .filter_map(|track| Some(json!({ "track_id": track.id, "records": track.input?.said() })))
+                        .collect();
+                    if !inputs.is_empty() {
+                        out["recording"]["inputs"] = json!(inputs);
+                    }
+                    if session.punch() {
+                        let region = session.project().loop_region;
+                        out["recording"]["punched_in"] =
+                            json!({ "from_beat": round(region.start), "to_beat": round(region.end) });
+                    }
                     out
                 }
                 TransportAction::Status => transport_json(&session),
@@ -2702,6 +2745,11 @@ impl TrillServer {
                     }
                     if let Some(exclusive) = request.exclusive {
                         config.exclusive = exclusive;
+                    }
+                    if let Some(input) = &request.input {
+                        let named = input.trim();
+                        let follow_system = named.is_empty() || named.eq_ignore_ascii_case("default");
+                        config.input = (!follow_system).then(|| named.to_string());
                     }
                     let (status, saved) = runtime.set_audio(config);
                     let mut out = audio_json(&status);
@@ -3556,7 +3604,7 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::catalogue::INSTRUCTIONS,
                 crate::listening::INSTRUCTIONS,
@@ -3567,6 +3615,7 @@ impl ServerHandler for TrillServer {
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,
                 crate::playing::INSTRUCTIONS,
+                crate::recording::INSTRUCTIONS,
                 crate::story::INSTRUCTIONS,
                 crate::film::INSTRUCTIONS
             ))

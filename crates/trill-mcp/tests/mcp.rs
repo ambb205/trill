@@ -201,6 +201,11 @@ async fn tools_are_listed_with_schemas() {
         "instrument_catalogue",
         "song_credits",
         "playback_load",
+        "track_input",
+        "audio_inputs",
+        "takes",
+        "recording_latency",
+        "unused_recordings",
         "listen",
         "transcribe",
         "study",
@@ -2443,4 +2448,152 @@ async fn an_agent_asked_for_a_tape_stop_finds_the_device_and_draws_its_speed() {
     // as loud as it was.
     assert!(level("stopped") <= -119.0, "{heard}");
     assert!(level("before") > -40.0 && (level("back") - level("before")).abs() < 1.0, "{heard}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_records_an_input_and_makes_a_comp_of_its_takes() {
+    use trill_engine::host::scripted::{Hears, ScriptedInput};
+    // A device with an input that hears a tone: a quarter of full scale on
+    // its first channel, half on its second.
+    let host = ScriptedHost::with_speakers();
+    host.add_input(ScriptedInput::new("Microphone"));
+    host.hear(Hears::Sound(Arc::new(|channel, seconds| {
+        let level = if channel == 0 { 0.25 } else { 0.5 };
+        (level * (seconds * std::f64::consts::TAU * 440.0).sin()) as f32
+    })));
+    let parts = Parts { audio: Some(Arc::new(host.clone())), ..Parts::default() };
+    let fixture = connect_with(tempfile::tempdir().unwrap(), parts).await;
+    let client = &fixture.client;
+    let voice = ok(client, "create_track", json!({ "name": "Voice" })).await["track_id"].as_u64().unwrap();
+
+    // What the track records is the song's, and the input is closed until
+    // something needs it.
+    let read = ok(client, "track_input", json!({ "track": voice })).await;
+    assert_eq!(read["records"], "what a keyboard plays");
+    let error = call(client, "track_input", json!({ "track": voice, "input": "1+3" })).await.unwrap_err();
+    assert!(error.contains("side by side"), "{error}");
+    let set = ok(client, "track_input", json!({ "track": voice, "input": "2" })).await;
+    assert_eq!((set["input"]["records"].as_str(), set["input"]["monitor"].as_str()), (Some("input 2"), Some("off")));
+    assert_eq!(set["device_input"]["open"], false);
+    let armed = ok(client, "update_track", json!({ "track": voice, "armed": true })).await;
+    assert_eq!((armed["armed"].as_bool(), armed["records"].as_str()), (Some(true), Some("input 2")));
+    assert!(armed.get("input_problem").is_none(), "{armed}");
+    host.advance(48_000);
+    // What is arriving, before a take: a model cannot hear the room.
+    let inputs = ok(client, "audio_inputs", json!({})).await;
+    assert_eq!((inputs["open"].as_bool(), inputs["device"].as_str()), (Some(true), Some("Microphone")));
+    let arriving = inputs["arriving"].as_array().unwrap();
+    assert!((arriving[0]["peak_db"].as_f64().unwrap() - -12.04).abs() < 0.1, "{inputs}");
+    assert!((arriving[1]["peak_db"].as_f64().unwrap() - -6.02).abs() < 0.1 && arriving[1]["clipped"] == false);
+
+    // Two takes over the same four beats.
+    let mut takes = Vec::new();
+    for _ in 0..2 {
+        let started = ok(client, "transport", json!({ "action": "record", "count_in_bars": 0, "position": 0 })).await;
+        assert_eq!(started["recording"]["inputs"], json!([{ "track_id": voice, "records": "input 2" }]));
+        host.advance(96_000);
+        let stopped = ok(client, "transport", json!({ "action": "stop" })).await;
+        let recorded = &stopped["recorded"];
+        let take = &recorded["takes"][0];
+        assert_eq!(
+            (take["track_id"].as_u64(), take["from_beat"].as_f64(), take["on_the_track"].as_bool()),
+            (Some(voice), Some(0.0), Some(true))
+        );
+        assert!((take["beats"].as_f64().unwrap() - 4.0).abs() < 0.1, "{stopped}");
+        assert!(take["file"].as_str().unwrap().contains("Voice"), "{stopped}");
+        assert!((recorded["files"][0]["peak_db"].as_f64().unwrap() - -6.02).abs() < 0.1, "{stopped}");
+        assert!(recorded["placed_by"].as_str().unwrap().contains("not measured") && recorded.get("silent").is_none());
+        takes.push(take["take_id"].as_u64().unwrap());
+    }
+
+    // Both are kept, in lanes; the track plays the second. A beat of the
+    // first in its middle is three clips, and nothing was lost.
+    let listed = ok(client, "takes", json!({ "track": voice })).await;
+    let kept = listed["tracks"][0]["takes"].as_array().unwrap();
+    assert_eq!(kept.iter().map(|take| take["lane"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!((kept[0]["on_the_track"].as_bool(), kept[1]["on_the_track"].as_bool()), (Some(false), Some(true)));
+    assert!(
+        kept[0]["begins_in_file_s"].as_f64().unwrap() > 0.03,
+        "what was sung to the first beat lies a round trip in"
+    );
+    let used = ok(client, "takes", json!({ "action": "use", "take": takes[0], "from_beat": 1, "to_beat": 2 })).await;
+    let plays = used["the_track_plays"].as_array().unwrap();
+    assert_eq!(plays.iter().map(|clip| clip["from_beat"].as_f64().unwrap()).collect::<Vec<_>>(), [0.0, 1.0, 2.0]);
+    let project = ok(client, "get_project", json!({})).await;
+    let track = &project["tracks"][0];
+    assert_eq!((track["takes"].as_u64(), track["input"]["records"].as_str()), (Some(2), Some("input 2")));
+    let measured = ok(client, "takes", json!({ "action": "measure", "take": takes[0] })).await;
+    assert!((measured["peak_db"].as_f64().unwrap() - -6.02).abs() < 0.1, "{measured}");
+    assert!((measured["level_db"].as_f64().unwrap() - -9.03).abs() < 0.2 && measured["clipped"] == false, "{measured}");
+    // Heard in place without the song changing; named; let go of, with its
+    // file kept.
+    let heard = ok(client, "takes", json!({ "action": "hear", "take": takes[0] })).await;
+    assert_eq!(heard["heard_in_place"].as_u64(), Some(takes[0]));
+    assert_eq!(ok(client, "takes", json!({ "track": voice })).await["tracks"][0]["takes"][0]["heard_in_place"], true);
+    ok(client, "takes", json!({ "action": "hear" })).await;
+    ok(client, "takes", json!({ "action": "rename", "take": takes[1], "name": "The keeper" })).await;
+    let removed = ok(client, "takes", json!({ "action": "remove", "take": takes[1] })).await;
+    assert_eq!(removed["name"], "The keeper");
+    assert!(std::path::Path::new(removed["file_kept"].as_str().unwrap()).is_file());
+    let error = call(client, "takes", json!({ "action": "use", "take": takes[1] })).await.unwrap_err();
+    assert!(error.contains("there is no take") && error.contains("Take 1"), "{error}");
+
+    // How long sound takes to go round, as the devices have it, and a
+    // correction by hand that the settings remember for these devices.
+    let latency = ok(client, "recording_latency", json!({})).await;
+    assert_eq!((latency["output_says_ms"].as_f64(), latency["input_says_ms"].as_f64()), (Some(30.0), Some(5.0)));
+    assert!(latency["from"].as_str().unwrap().contains("what the devices say"), "{latency}");
+    let adjusted = ok(client, "recording_latency", json!({ "action": "adjust", "adjust_ms": 2.5 })).await;
+    assert_eq!(adjusted["adjusted_by_hand_ms"], 2.5);
+    let longer = adjusted["round_trip_ms"].as_f64().unwrap() - latency["round_trip_ms"].as_f64().unwrap();
+    assert!((longer - 2.5).abs() < 0.01, "{adjusted}");
+    let settings = std::fs::read_to_string(fixture.settings_file()).unwrap();
+    assert!(settings.contains("round_trips") && settings.contains("Microphone"), "{settings}");
+    let error = call(client, "recording_latency", json!({ "action": "use" })).await.unwrap_err();
+    assert!(error.contains("`measure` first"), "{error}");
+
+    // The recordings the song no longer uses: none while undo can reach
+    // the takes.
+    let unused = ok(client, "unused_recordings", json!({})).await;
+    assert_eq!(unused["unused"], json!([]));
+    assert!(unused["folder"].as_str().unwrap().contains("recordings"));
+    // Disarmed, the input is closed again within a round of chores.
+    ok(client, "update_track", json!({ "track": voice, "armed": false })).await;
+    fixture.session.lock().housekeeping();
+    assert_eq!(ok(client, "audio_inputs", json!({})).await["open"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_opens_no_microphone_and_deletes_no_recording() {
+    let (fixture, _work) = connect_guarded().await;
+    let client = &fixture.client;
+    let voice = ok(client, "create_track", json!({ "name": "Voice" })).await["track_id"].as_u64().unwrap();
+    let other = ok(client, "create_track", json!({ "name": "Other" })).await["track_id"].as_u64().unwrap();
+    // It may say what a track records; arming such a track is the user's.
+    ok(client, "track_input", json!({ "track": voice, "input": "1" })).await;
+    let error = call(client, "update_track", json!({ "track": voice, "armed": true })).await.unwrap_err();
+    assert!(error.contains("opens the microphone") && error.contains("arm button"), "{error}");
+    assert!(fixture.session.lock().armed().is_empty());
+    // Nor may it give a track that is armed an input.
+    ok(client, "update_track", json!({ "track": other, "armed": true })).await;
+    let error = call(client, "track_input", json!({ "track": other, "input": "1" })).await.unwrap_err();
+    assert!(error.contains("armed") && error.contains("themselves"), "{error}");
+    assert!(fixture.session.lock().project().tracks[1].input.is_none());
+    // Looking at the level, and the measurement, open it too.
+    let error = call(client, "audio_inputs", json!({ "listen": true })).await.unwrap_err();
+    assert!(error.contains("opens the microphone"), "{error}");
+    let error = call(client, "recording_latency", json!({ "action": "measure" })).await.unwrap_err();
+    assert!(error.contains("the user runs it"), "{error}");
+    let error = call(client, "unused_recordings", json!({ "delete": ["x.wav"] })).await.unwrap_err();
+    assert!(error.contains("cannot be undone"), "{error}");
+    // Once the user has armed the track it may record: here there is no
+    // input to open, which it is told.
+    fixture.session.lock().set_armed(trill_core::TrackId(voice), true).unwrap();
+    let error = call(client, "transport", json!({ "action": "record", "count_in_bars": 0 })).await.unwrap_err();
+    assert!(error.contains("the input cannot be opened"), "{error}");
+    // What it may always do: read.
+    assert_eq!(ok(client, "audio_inputs", json!({})).await["open"], false);
+    ok(client, "takes", json!({})).await;
+    ok(client, "recording_latency", json!({})).await;
+    ok(client, "unused_recordings", json!({})).await;
 }
