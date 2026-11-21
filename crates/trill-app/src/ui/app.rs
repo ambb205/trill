@@ -354,6 +354,11 @@ impl TrillApp {
                 }
                 self.live.audio_faults = session.audio_faults();
                 self.live.preparing = session.preparing();
+                self.live.coming_beside = session.recordings_coming();
+                if self.live.coming_beside.is_some() {
+                    // Looked at again soon: it says how far it is.
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
                 self.live.update_editors(&self.snapshot, &session);
                 self.live.update_silent(&self.snapshot, &session);
                 // Which plugins are still reading their samples. (Not in a

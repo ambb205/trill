@@ -21,6 +21,7 @@ use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
 use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
+mod beside;
 mod bin;
 mod controllers;
 mod cores;
@@ -41,6 +42,7 @@ mod wavetable;
 pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_after};
 pub use wavetable::{TableReport, factory_tables};
 
+pub use beside::{ComingBeside, spelled as spelled_path};
 pub use bin::{Bin, REMOVED_FOLDER, Removed};
 pub use controllers::SilentInstrument;
 pub use cores::{Costs, KeepingUp, Shortfall, TrackCost};
@@ -988,9 +990,10 @@ impl Session {
             std::fs::create_dir_all(parent).map_err(|e| io_error(path, e))?;
         }
         // What was recorded before the song had a place comes beside it:
-        // copied there first, so that the file about to be written names
-        // recordings that are there.
-        let brought = if self.path.is_none() { self.bring_recordings_beside(path)? } else { Vec::new() };
+        // given a second name there where the volume allows, so that the
+        // file about to be written names recordings that are there, and
+        // copied afterwards, away from here, where it does not.
+        let brought = self.bring_recordings_beside(path)?;
         // Write beside the target and rename, so a crash mid-save cannot
         // leave a truncated project file.
         // The song goes into the file with what is known of its files,
@@ -1000,14 +1003,13 @@ impl Session {
         std::fs::rename(&temporary, path).map_err(|e| io_error(path, e))?;
         self.path = Some(path.to_path_buf());
         self.saved_revision = self.revision;
-        // The song's file names the copies now: nothing is left where the
-        // recordings were. (One that cannot be taken away stays, and costs
-        // its room and nothing else.)
-        for old in brought {
-            if let Err(error) = std::fs::remove_file(&old) {
-                log::warn!("'{}' was copied beside the song and could not be taken away: {error}", old.display());
-            }
+        // The song's file names its recordings beside it now: the names
+        // they had before are taken away, and what could be given no
+        // second name begins to be copied.
+        for old in self.take_first_names() {
+            let _ = std::fs::remove_file(old);
         }
+        self.after_song_was_written(path, brought);
         // The journal is written with the song, in the program's own
         // folder: the file just written holds none of it.
         self.write_journal(path);
@@ -1111,6 +1113,7 @@ impl Session {
         self.tend_audio();
         self.recover_lost_messages();
         self.tend_input();
+        self.tend_bringing();
         self.tend_take();
         self.tend_journal();
         if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
@@ -1201,7 +1204,7 @@ impl Session {
         // take that is heard in place of what its track plays. A take
         // that is punched in plays through its loop.
         let live = self.live_now();
-        let looping = !self.recording.punching();
+        let looping = !self.punching();
         let heard = self.recording.heard_take().and_then(|take| {
             let mut with_take = self.project.clone();
             with_take.choose_take(take).ok().map(|_| with_take)

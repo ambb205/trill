@@ -377,9 +377,16 @@ fn the_panel_shows_the_inputs_level_only_when_asked_and_measures_the_round_trip(
     assert!(found.contains("5.0 ms more than the devices say") && found.contains("clearly"), "{found}");
     // Nothing changes until it is taken.
     assert_eq!(harness.app.live().input.latency.unwrap().correction, Correction::None);
+    // What a worker does to the session is in the window when a frame has
+    // found the session free to be read, which is not counted in frames.
+    let latency_is = |harness: &Harness, is: &dyn Fn(&trill_engine::RecordingLatency) -> bool| {
+        harness.app.live().input.latency.as_ref().is_some_and(is)
+    };
     harness.click_label("Use what was measured");
     harness.settle_work();
-    harness.idle(3);
+    harness.wait_until("what was measured is in use", |harness| {
+        latency_is(harness, &|latency| latency.correction == Correction::Measured)
+    });
     let latency = harness.app.live().input.latency.unwrap();
     assert_eq!(latency.correction, Correction::Measured);
     assert!((latency.round_trip_ms - said_ms - 5.0).abs() < 0.1, "{latency:?}");
@@ -391,15 +398,17 @@ fn the_panel_shows_the_inputs_level_only_when_asked_and_measures_the_round_trip(
     // By hand, half a millisecond at a time; and back to what they say.
     harness.click_label("Put takes earlier");
     harness.settle_work();
-    harness.idle(3);
+    harness.wait_until("the nudge is shown", |harness| latency_is(harness, &|latency| latency.adjust_ms != 0.0));
     let nudged = harness.app.live().input.latency.unwrap();
     assert!((nudged.adjust_ms - 0.5).abs() < 1e-9 && (nudged.round_trip_ms - latency.round_trip_ms - 0.5).abs() < 0.01);
     harness.click_label("Take off the nudge");
     harness.settle_work();
-    harness.idle(3);
+    harness.wait_until("the nudge is off", |harness| latency_is(harness, &|latency| latency.adjust_ms == 0.0));
     harness.click_label("Forget the measurement");
     harness.settle_work();
-    harness.idle(3);
+    harness.wait_until("the measurement is forgotten", |harness| {
+        latency_is(harness, &|latency| latency.correction == Correction::None)
+    });
     let back = harness.app.live().input.latency.unwrap();
     assert_eq!((back.correction, back.adjust_ms), (Correction::None, 0.0));
 

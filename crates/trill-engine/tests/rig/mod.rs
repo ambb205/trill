@@ -17,7 +17,6 @@ use trill_core::device::{
 };
 use trill_core::project::Device;
 use trill_core::{ChainRef, DeviceId, TrackId};
-use trill_dsp::BuiltinFactory;
 use trill_engine::host::scripted::{ScriptedDevice, ScriptedHost};
 use trill_engine::{AudioConfig, AudioSetup, Patience, Session};
 use trill_media::MediaCache;
@@ -169,10 +168,15 @@ impl Rig {
         // lives. (What stands for the assistant's door asks on another.)
         std::mem::forget(trill_engine::hand::by_hand());
         let probes = Arc::new(ProbeLog::default());
-        let factory =
-            CompositeFactory::new(vec![Box::new(BuiltinFactory), Box::new(ProbeFactory { log: probes.clone() })]);
+        // One cache, shared by the engine and the devices that play
+        // samples, as the application wires a session.
+        let media = Arc::new(MediaCache::default());
+        let factory = CompositeFactory::new(vec![
+            Box::new(trill_dsp::Builtins::with_loader(media.clone())),
+            Box::new(ProbeFactory { log: probes.clone() }),
+        ]);
         let setup = AudioSetup { patience, ..AudioSetup::on(Arc::new(host.clone()), config) };
-        let session = Session::with_audio(Arc::new(factory), Arc::new(MediaCache::default()), setup).unwrap();
+        let session = Session::with_audio(Arc::new(factory), media, setup).unwrap();
         Self { host, session, probes }
     }
 

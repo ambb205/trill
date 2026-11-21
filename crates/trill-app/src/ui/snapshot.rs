@@ -442,6 +442,9 @@ pub struct Live {
     /// How many warped clips play a stand-in while their stretched audio
     /// is being made.
     pub preparing: usize,
+    /// How far the song's recordings are with coming beside it, while a
+    /// save has left any to be copied.
+    pub coming_beside: Option<trill_engine::ComingBeside>,
     /// The devices whose own windows are open right now. Asked of the
     /// session every time: the user closes them without telling anyone.
     pub open_editors: Vec<DeviceId>,

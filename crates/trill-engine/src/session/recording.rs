@@ -39,6 +39,7 @@
 //! ones no state of the song names any more
 //! ([`Session::unused_recordings`]) and deletes those it is asked to.
 
+use super::beside::{Bringing, named_by, spelled};
 use super::bin::{Bin, Removed};
 use super::{Session, SessionError};
 use crate::capture::Health;
@@ -328,6 +329,13 @@ pub(super) struct Audio {
     songs: u32,
     /// Whose hand opened what: see [`Session::hold_to_the_hand`].
     hand: Let,
+    /// Recordings on their way beside the song, copied by a thread of
+    /// their own; the first names of ones that have a second name there,
+    /// until the song's file says so; and whether a second name is never
+    /// given (a test's).
+    bringing: Option<Bringing>,
+    first_names: Vec<PathBuf>,
+    copies: bool,
     /// Where a recording that is removed goes.
     bin: Bin,
     /// What a take's files are held to: a WAV file's own length and the
@@ -361,12 +369,6 @@ impl Let {
 }
 
 impl Audio {
-    /// Whether a take that is punched in is being recorded: the song then
-    /// plays through and does not go round.
-    pub(super) fn punching(&self) -> bool {
-        self.take.as_ref().is_some_and(|take| take.punch.is_some())
-    }
-
     pub(super) fn heard_take(&self) -> Option<ClipId> {
         self.heard
     }
@@ -986,6 +988,9 @@ impl Session {
             self.audio.media().forget(file.path());
         }
         self.recording.last = Some(recorded);
+        // A take that was begun before the song had a place, in a song
+        // that has one by now: its recording comes beside the song.
+        self.bring_what_landed();
     }
 
     /// The song with the take that is being recorded in it as far as it
@@ -1231,98 +1236,77 @@ impl Session {
         }
     }
 
-    fn unsaved_folder(&self) -> PathBuf {
+    /// The folder this run of the program keeps the takes of its unsaved
+    /// songs in, a folder a song. Other runs have theirs beside it.
+    pub(super) fn unsaved_base(&self) -> PathBuf {
         let unsaved = self.recording.unsaved.clone();
-        let base = unsaved
-            .unwrap_or_else(|| std::env::temp_dir().join("trill recordings").join(std::process::id().to_string()));
-        // Every song that has had no place yet has a folder of its own:
-        // what another left there is not this one's to list or delete.
-        base.join(format!("song {}", self.recording.songs + 1))
+        unsaved.unwrap_or_else(|| std::env::temp_dir().join("trill recordings").join(std::process::id().to_string()))
     }
 
-    /// The recordings of an unsaved song that `project` or a state undo
-    /// can reach names: what comes beside the song when it is saved.
-    fn unsaved_recordings(&self) -> BTreeSet<String> {
-        let folder = self.unsaved_folder();
-        let mut found = BTreeSet::new();
-        self.each_state(|project| {
-            for path in recordings_of(project) {
-                if Path::new(&path).starts_with(&folder) {
-                    found.insert(path);
-                }
-            }
-        });
-        found
+    fn unsaved_folder(&self) -> PathBuf {
+        // Every song that has had no place yet has a folder of its own:
+        // what another left there is not this one's to list or delete.
+        self.unsaved_base().join(format!("song {}", self.recording.songs + 1))
+    }
+
+    /// The folder beside `song` that holds what was recorded for it.
+    pub(super) fn beside_song(song: &Path) -> PathBuf {
+        beside(song)
+    }
+
+    /// A name in `folder` for a recording of `what` that no file has and
+    /// that is not in `taken`, which it then is.
+    pub(super) fn free_recording_name(folder: &Path, what: &str, taken: &mut BTreeSet<PathBuf>) -> PathBuf {
+        free_name(folder, what, taken)
+    }
+
+    /// Has recordings copied beside a song where they would be given a
+    /// second name: for a test of what is done across two volumes, which
+    /// a test has not got.
+    #[doc(hidden)]
+    pub fn copy_recordings_beside(&mut self, copies: bool) {
+        self.recording.copies = copies;
+    }
+
+    pub(super) fn copies_recordings(&self) -> bool {
+        self.recording.copies
+    }
+
+    pub(super) fn bringing(&self) -> Option<&Bringing> {
+        self.recording.bringing.as_ref()
+    }
+
+    pub(super) fn take_bringing(&mut self) -> Option<Bringing> {
+        self.recording.bringing.take()
+    }
+
+    pub(super) fn set_bringing(&mut self, bringing: Option<Bringing>) {
+        self.recording.bringing = bringing;
+    }
+
+    /// First names of recordings that have a second one beside the song:
+    /// kept until the song's file says where they are.
+    pub(super) fn keep_first_names(&mut self, names: Vec<PathBuf>) {
+        self.recording.first_names.extend(names);
+    }
+
+    pub(super) fn take_first_names(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.recording.first_names)
+    }
+
+    /// Says something of the song's recordings once: a front end shows it.
+    pub(super) fn say_of_recordings(&mut self, sentence: String) {
+        log::warn!("{sentence}");
+        self.recording.notice = Some(sentence);
     }
 
     /// Calls `look` with the song as it is and as every state undo and
     /// redo can reach has it.
-    fn each_state(&self, mut look: impl FnMut(&Project)) {
+    pub(super) fn each_state(&self, mut look: impl FnMut(&Project)) {
         look(&self.project);
         for step in self.undo.iter().chain(&self.redo) {
             look(&step.project);
         }
-    }
-
-    /// Brings the recordings of a song that had no place beside the place
-    /// it is about to be saved at, `song`: each is copied there, and the
-    /// song and every state undo can reach name the copy from here on.
-    /// Returns where they were, to be taken away once the song's file is
-    /// written: until then both are there, and whichever file of the song
-    /// is read finds its recordings.
-    pub(super) fn bring_recordings_beside(&mut self, song: &Path) -> Result<Vec<PathBuf>, SessionError> {
-        let unsaved = self.unsaved_recordings();
-        if unsaved.is_empty() {
-            return Ok(Vec::new());
-        }
-        let folder = beside(song);
-        std::fs::create_dir_all(&folder).map_err(|error| super::io_error(&folder, error))?;
-        let mut moved: Vec<(String, String)> = Vec::new();
-        let mut names = BTreeSet::new();
-        for old in &unsaved {
-            let from = Path::new(old);
-            if !from.is_file() {
-                // Gone already: the song goes on naming where it was.
-                continue;
-            }
-            let stem = from.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-            let to = free_name(&folder, &stem, &mut names);
-            let copied = std::fs::copy(from, &to).map_err(|error| super::io_error(&to, error))?;
-            let whole = std::fs::metadata(from).map(|file| file.len()).unwrap_or(0);
-            if copied != whole {
-                return Err(SessionError::Io(format!(
-                    "'{}' was not copied whole to '{}': the song is not saved, and its recordings are where they were",
-                    from.display(),
-                    to.display()
-                )));
-            }
-            moved.push((old.clone(), to.to_string_lossy().into_owned()));
-        }
-        let rename = |project: &mut Project| {
-            for track in &mut project.tracks {
-                let clips = track.clips.iter_mut().chain(track.takes.iter_mut().map(|take| &mut take.clip));
-                for clip in clips {
-                    if let trill_core::project::ClipContent::Audio(audio) = &mut clip.content
-                        && let Some((_, new)) = moved.iter().find(|(old, _)| *old == audio.path)
-                    {
-                        audio.path.clone_from(new);
-                    }
-                }
-            }
-        };
-        rename(&mut self.project);
-        for step in self.undo.iter_mut().chain(&mut self.redo) {
-            rename(&mut step.project);
-        }
-        for (old, new) in &moved {
-            self.audio.media().forget(Path::new(old));
-            self.audio.media().forget(Path::new(new));
-        }
-        if !moved.is_empty() {
-            self.compile_and_swap();
-            self.revision += 1;
-        }
-        Ok(moved.into_iter().map(|(old, _)| PathBuf::from(old)).collect())
     }
 
     /// The recordings in the song's own folder that neither the song nor
@@ -1331,17 +1315,21 @@ impl Session {
     /// leaves its file here.
     pub fn unused_recordings(&self) -> Vec<(PathBuf, u64)> {
         let folder = self.recordings_folder();
+        // Whatever names a file: clips, takes, and what the sampler and
+        // the drum rack play, in the song and in every state undo can
+        // reach. By the path as the file system has it: a song opened by
+        // a path that is spelled otherwise names the same files.
         let mut named = HashSet::new();
-        self.each_state(|project| named.extend(recordings_of(project).into_iter().map(PathBuf::from)));
+        self.each_state(|project| named.extend(named_by(project).iter().map(|path| spelled(Path::new(path)))));
         // What is being written is nobody's to delete either.
         if let Some(writer) = self.recording.take.as_ref().and_then(|take| take.writer.as_ref()) {
-            named.extend(writer.files().iter().map(|file| file.path().to_path_buf()));
+            named.extend(writer.files().iter().map(|file| spelled(file.path())));
         }
         let Ok(entries) = std::fs::read_dir(&folder) else { return Vec::new() };
         let mut unused: Vec<(PathBuf, u64)> = entries
             .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|extension| extension.eq_ignore_ascii_case("wav")))
-            .filter(|entry| !named.contains(&entry.path()))
+            .filter(|entry| !named.contains(&spelled(&entry.path())))
             .filter_map(|entry| Some((entry.path(), entry.metadata().ok()?.len())))
             .collect();
         unused.sort();
@@ -1502,14 +1490,6 @@ fn shift_of(audio: &AudioTake, rolled: Rolled) -> u64 {
 fn beside(song: &Path) -> PathBuf {
     let stem = song.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "song".into());
     song.with_file_name(format!("{stem} files")).join(TAKES_FOLDER)
-}
-
-/// The paths of every recording `project` names: its audio clips and its
-/// takes.
-fn recordings_of(project: &Project) -> Vec<String> {
-    let clips =
-        project.tracks.iter().flat_map(|track| track.clips.iter().chain(track.takes.iter().map(|take| &take.clip)));
-    clips.filter_map(|clip| Some(clip.audio()?.path.clone())).collect()
 }
 
 /// A name in `folder` for a recording of `what` that no file has and that

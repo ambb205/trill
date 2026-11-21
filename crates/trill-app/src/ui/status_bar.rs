@@ -58,6 +58,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     if let Some(words) = super::opening::status_words(row.cx) {
         row.status(theme.info, &words);
     }
+    // Recordings on their way beside a song that was just saved, where
+    // they have to be copied: how far that is.
+    if let Some(coming) = row.cx.live.coming_beside {
+        row.status(theme.info, &coming.said());
+    }
     match row.cx.live.preparing {
         0 => {}
         1 => row.status(theme.info, "Preparing 1 warped clip\u{2026}"),

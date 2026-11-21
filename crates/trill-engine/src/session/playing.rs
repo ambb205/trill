@@ -85,6 +85,10 @@ pub(super) struct Playing {
     sent: Option<TrackSet>,
     count_in_bars: u32,
     take: Option<ActiveTake>,
+    /// Whether the take that is going on is punched in. Said here and
+    /// not asked of the take, which is out of its place while what it
+    /// has is written into the song, and the song is compiled then.
+    punched: bool,
     /// The number of the last take started.
     takes: u32,
     last_take: Vec<TakeClip>,
@@ -507,10 +511,6 @@ impl Session {
         // The tracks that record an input: their files are begun, and the
         // input is opened, before anything else is. What cannot be says so.
         self.begin_audio_take(id, &tracks, punch)?;
-        if punch.is_some() && region.enabled {
-            // The graph that plays does not go round from here on.
-            self.compile_and_swap();
-        }
         let group = self.begin_group();
         // In the journal, what is played is one step however often it is
         // written down while it is played.
@@ -523,7 +523,13 @@ impl Session {
             .collect();
         let take = Take::new(id, &keyed, loop_region, bar, tempo).in_bars(meter).punched(punch);
         self.playing.take = Some(ActiveTake { take, group });
+        self.playing.punched = punch.is_some();
         self.playing.last_take.clear();
+        if punch.is_some() && region.enabled {
+            // The graph that plays does not go round from here on: for a
+            // take of notes as for one of an input.
+            self.compile_and_swap();
+        }
         self.engine.send(Message::Record {
             take: id,
             tracks: TrackSet::of(&tracks),
@@ -562,6 +568,12 @@ impl Session {
     /// Whether a take is being recorded or counted in.
     pub fn is_recording(&self) -> bool {
         self.playing.take.is_some()
+    }
+
+    /// Whether a take that is punched in is being recorded, of notes or of
+    /// an input: the song then plays through and does not go round.
+    pub(super) fn punching(&self) -> bool {
+        self.playing.punched
     }
 
     /// The clips the last take wrote into: empty until a take has ended,
@@ -666,22 +678,23 @@ impl Session {
         self.playing.take = Some(active);
         self.write_take();
         // The take's audio is put beside its tracks, in the same step.
-        let punched = self.recording.punching();
+        let punched = std::mem::take(&mut self.playing.punched);
         self.land_audio_take();
-        if punched {
-            // The song goes round its loop again.
-            self.compile_and_swap();
-        }
         if let Some(active) = self.playing.take.take() {
             self.playing.last_take = active.take.clips();
             self.end_run();
             self.end_group(active.group);
+        }
+        if punched {
+            // The song goes round its loop again.
+            self.compile_and_swap();
         }
     }
 
     /// Drops a take without writing it: the project it belonged to is
     /// being replaced.
     pub(super) fn abandon_take(&mut self) {
+        self.playing.punched = false;
         if let Some(active) = self.playing.take.take() {
             self.end_run();
             self.end_group(active.group);

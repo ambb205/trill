@@ -50,10 +50,10 @@ pub use recorder::{COLUMN_FRAMES, Growing};
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered, Watch};
 pub use saved::{Change as PresetChange, Saved, SavedPresets, SavedSound};
 pub use session::{
-    Added, Arriving, Bin, Correction, Costs, Given, GrowingTake, InputClock, InputStatus, KeepingUp, ListedSound,
-    MAX_COUNT_IN_BARS, Made, Measured, Measurement, ParamState, ProbeTarget, RecordState, RecordStatus, Recorded,
-    RecordedTake, RecordingLatency, Removed, SampleFile, SavedAsSound, Session, SessionError, Shortfall,
-    SilentInstrument, TakeClip, TrackCost, TransportStatus, file_facts, listed_sounds, sound_after,
+    Added, Arriving, Bin, ComingBeside, Correction, Costs, Given, GrowingTake, InputClock, InputStatus, KeepingUp,
+    ListedSound, MAX_COUNT_IN_BARS, Made, Measured, Measurement, ParamState, ProbeTarget, RecordState, RecordStatus,
+    Recorded, RecordedTake, RecordingLatency, Removed, SampleFile, SavedAsSound, Session, SessionError, Shortfall,
+    SilentInstrument, TakeClip, TrackCost, TransportStatus, file_facts, listed_sounds, sound_after, spelled_path,
 };
 pub use sources::AudioSources;
 

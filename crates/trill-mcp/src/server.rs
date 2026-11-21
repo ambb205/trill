@@ -3026,7 +3026,17 @@ impl TrillServer {
             };
             session.save(&path).map_err(|error| error.to_string())?;
             self.runtime.song_is_at(&path);
-            Ok(json!({ "saved": path.display().to_string() }))
+            let mut out = json!({ "saved": path.display().to_string() });
+            if let Some(coming) = session.recordings_coming() {
+                // Recordings that could be given no second name beside
+                // the song (another volume) are copied after the save.
+                out["recordings"] = json!(format!(
+                    "{} recording(s), {} bytes, are being copied beside the song. The song is saved and plays them \
+                     from where they are; when each copy is whole the song and its file name it there.",
+                    coming.files, coming.total
+                ));
+            }
+            Ok(out)
         })();
         finish(reply)
     }

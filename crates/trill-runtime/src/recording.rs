@@ -16,7 +16,7 @@
 use crate::Runtime;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use trill_engine::{Removed, Session};
+use trill_engine::{Removed, Session, spelled_path as spelled};
 use trill_library::{RoundTrip, SaveError, Settings};
 
 /// The folder beside the settings that holds the takes of songs that have
@@ -133,13 +133,6 @@ pub struct PlayedElsewhere {
     /// Who plays it, each as a sentence can name it: a song by its name
     /// and its file, unsaved work by its name.
     pub by: Vec<String>,
-}
-
-/// A path as two spellings of it are told to be one: Windows minds neither
-/// the case of a name nor which way its strokes lean.
-fn spelled(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if cfg!(windows) { text.replace('/', "\\").to_lowercase() } else { text.into_owned() }
 }
 
 /// Every file the song in `text`, a project file at `file`, names: as it

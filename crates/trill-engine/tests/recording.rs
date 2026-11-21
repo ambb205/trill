@@ -1550,3 +1550,232 @@ fn an_input_that_is_said_to_share_the_outputs_clock_and_does_not_is_found_out() 
     assert_eq!(found, None, "a pair that is one clock is read as one");
     assert!(before < 0.03, "{before} ms");
 }
+
+// ---- a song's recordings come beside it ---------------------------------------
+
+/// A rig whose input hears a tone, with a track that records it, armed.
+fn toned_rig() -> (Rig, TrackId, tempfile::TempDir) {
+    let (mut rig, folder) = rig_on(studio(microphone()), AudioConfig::default());
+    rig.host.hear(tone());
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    rig.run(40);
+    (rig, voice, folder)
+}
+
+/// Records a take of `frames` frames from the start of the song, and
+/// returns its file.
+fn a_take(rig: &mut Rig, frames: f64) -> std::path::PathBuf {
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    rig.run_until(rig.now() + frames);
+    rig.session.stop();
+    rig.session.last_recording().unwrap().takes[0].file.clone()
+}
+
+/// The path of every recording the song's takes name.
+fn take_paths(session: &Session, track: TrackId) -> Vec<std::path::PathBuf> {
+    let track = session.project().track(track).unwrap();
+    track.takes.iter().map(|take| take.clip.audio().unwrap().path.clone().into()).collect()
+}
+
+#[test]
+fn a_recording_that_a_sampler_plays_is_in_use_and_comes_beside_the_song_with_the_rest() {
+    let (mut rig, voice, folder) = toned_rig();
+    let first = a_take(&mut rig, 48_000.0);
+    // The take's recording is given to a sampler, and then the take and
+    // what the track plays of it are let go of: the sampler still plays it.
+    let keys = rig.session.edit(|project| Ok(project.add_track("Keys"))).unwrap();
+    let sampler = rig.session.add_device(ChainRef::Track(keys), "builtin:sampler", None, None).unwrap();
+    rig.session.set_sampler_file(sampler, Some(&first.to_string_lossy())).unwrap();
+    let take = rig.session.project().track(voice).unwrap().takes[0].clip.id;
+    rig.session
+        .edit(|project| {
+            project.remove_take(take)?;
+            let clip = project.track(voice)?.clips[0].id;
+            project.remove_clip(clip).map(|_| ())
+        })
+        .unwrap();
+    // Nothing undo can reach is in the way of the question.
+    let song = folder.path().join("songs").join("Sampled.trill");
+    rig.session.save(&song).unwrap();
+    rig.session.load(&song).unwrap();
+    assert!(rig.session.project().track(voice).unwrap().takes.is_empty());
+    assert!(rig.session.unused_recordings().is_empty(), "a sampler plays it: {:?}", rig.session.unused_recordings());
+    // And the first save brought it beside the song, where the sampler
+    // names it: by the means a relink renames a file.
+    let beside = folder.path().join("songs").join("Sampled files").join("takes").join("Voice.wav");
+    assert!(beside.is_file() && !first.exists(), "nothing is left where it was");
+    let names: Vec<String> = rig.session.files().iter().map(|used| used.path.clone()).collect();
+    assert_eq!(names, [beside.to_string_lossy()], "{names:?}");
+    assert!(rig.session.problems().is_empty(), "{:?}", rig.session.problems());
+
+    // A song opened by a path that is spelled in another case names the
+    // same files, where the file system has it so.
+    if cfg!(windows) {
+        let shouted = folder.path().join("SONGS").join("SAMPLED.TRILL");
+        rig.session.load(&shouted).unwrap();
+        let again = a_take_on_a_new_track(&mut rig);
+        assert!(again.is_file());
+        let unused = rig.session.unused_recordings();
+        assert!(unused.is_empty(), "spelled otherwise, and the same files: {unused:?}");
+    }
+}
+
+/// A track that records, armed, in the song that is open, and a take on it.
+fn a_take_on_a_new_track(rig: &mut Rig) -> std::path::PathBuf {
+    armed_track(rig, "More", TrackInput::mono(1));
+    rig.run(40);
+    a_take(rig, 24_000.0)
+}
+
+#[test]
+fn recordings_that_cannot_be_given_a_second_name_are_copied_away_from_the_session_and_named_when_whole() {
+    let (mut rig, voice, folder) = toned_rig();
+    // As across two volumes, where no file has two names.
+    rig.session.copy_recordings_beside(true);
+    let first = a_take(&mut rig, 96_000.0);
+    let second = a_take(&mut rig, 48_000.0);
+    let held = std::fs::read(&first).unwrap();
+    let song = folder.path().join("songs").join("Far.trill");
+    rig.session.save(&song).unwrap();
+
+    // Saved at once: the song names each recording where it is, and says
+    // that they are on their way.
+    assert!(!rig.session.is_modified());
+    assert_eq!(take_paths(&rig.session, voice), [first.clone(), second.clone()]);
+    assert!(std::fs::read_to_string(&song).unwrap().contains(&first.to_string_lossy().replace('\\', "\\\\")));
+    assert!(first.is_file() && second.is_file());
+    let coming = rig.session.recordings_coming().expect("they are being copied");
+    assert_eq!(coming.files, 2);
+    assert!(coming.said().starts_with("Bringing 2 recordings beside the song"), "{}", coming.said());
+
+    // Whole: the song, what undo can reach and the file that was saved
+    // name them beside it, and the first copies are gone.
+    wait_until(|| {
+        rig.session.housekeeping();
+        rig.session.recordings_coming().is_none()
+    });
+    let beside = folder.path().join("songs").join("Far files").join("takes");
+    let (new_first, new_second) = (beside.join("Voice.wav"), beside.join("Voice 2.wav"));
+    assert_eq!(take_paths(&rig.session, voice), [new_first.clone(), new_second.clone()]);
+    assert_eq!(std::fs::read(&new_first).unwrap(), held, "not a byte of it is other than it was");
+    assert!(!first.exists() && !second.exists(), "nothing is left where they were");
+    assert!(!rig.session.is_modified(), "naming a file where it now is is no change to the song");
+    let saved = trill_core::Project::from_json(&std::fs::read_to_string(&song).unwrap()).unwrap();
+    let in_file: Vec<String> =
+        saved.track(voice).unwrap().takes.iter().map(|take| take.clip.audio().unwrap().path.clone()).collect();
+    assert_eq!(in_file, [new_first.to_string_lossy(), new_second.to_string_lossy()], "the song's file says so too");
+    assert!(rig.session.undo(), "the second take is undone");
+    assert_eq!(take_paths(&rig.session, voice), [new_first.clone()], "the state before names it where it is now");
+    assert!(rig.session.problems().is_empty(), "{:?}", rig.session.problems());
+    assert!(!beside.join("Voice.coming").exists());
+}
+
+#[test]
+fn a_take_that_is_still_being_recorded_when_the_song_is_first_saved_comes_beside_it_when_it_ends() {
+    let (mut rig, voice, folder) = toned_rig();
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    rig.run_until(rig.now() + 48_000.0);
+    // Saved in the middle of the take.
+    let song = folder.path().join("songs").join("Early.trill");
+    rig.session.save(&song).unwrap();
+    let writing = rig.session.growing_takes()[0].file.path().to_path_buf();
+    assert!(writing.starts_with(folder.path().join("unsaved")), "it is being written where it was begun");
+    rig.run_until(rig.now() + 48_000.0);
+    rig.session.stop();
+
+    // Ended: it is beside the song, and the song names it there.
+    let beside = folder.path().join("songs").join("Early files").join("takes").join("Voice.wav");
+    assert_eq!(take_paths(&rig.session, voice), [beside.clone()]);
+    assert!(beside.is_file());
+    let audio = trill_media::MediaCache::default().audio(&beside).unwrap();
+    assert!(audio.frames() >= 96_000, "all of it: {} frames", audio.frames());
+    assert!(rig.session.problems().is_empty(), "{:?}", rig.session.problems());
+    // The name it was written under goes when the song's file says where
+    // it is: until then a copy kept for safety may still name it.
+    assert!(writing.is_file());
+    rig.session.save(&song).unwrap();
+    assert!(!writing.exists() && beside.is_file());
+}
+
+#[test]
+fn the_recordings_of_an_unsaved_song_that_was_recovered_come_beside_it_at_its_first_save() {
+    // A program records a take for a song that has no place, keeps a copy
+    // for safety, and is gone.
+    let folder = tempfile::tempdir().unwrap();
+    let runs = folder.path().join("recordings");
+    let (copy, first) = {
+        let mut lost = Rig::with(studio(microphone()), AudioConfig::default(), trill_engine::Patience::default());
+        lost.session.keep_unsaved_recordings_in(runs.join("an earlier run"));
+        lost.session.set_count_in(0);
+        lost.host.hear(tone());
+        armed_track(&mut lost, "Voice", TrackInput::mono(1));
+        lost.run(40);
+        let first = a_take(&mut lost, 48_000.0);
+        let copy = folder.path().join("copy.trill");
+        std::fs::write(&copy, lost.session.snapshot_json()).unwrap();
+        (copy, first)
+    };
+    assert!(first.starts_with(runs.join("an earlier run")));
+
+    // Another run of the program recovers it, and saves it for the first time.
+    let mut rig = Rig::with(studio(microphone()), AudioConfig::default(), trill_engine::Patience::default());
+    rig.session.keep_unsaved_recordings_in(runs.join("this run"));
+    rig.session.load_recovered(&copy, None).unwrap();
+    let voice = rig.session.project().tracks[0].id;
+    assert_eq!(take_paths(&rig.session, voice), [first.clone()]);
+    let song = folder.path().join("songs").join("Back.trill");
+    rig.session.save(&song).unwrap();
+    let beside = folder.path().join("songs").join("Back files").join("takes").join("Voice.wav");
+    assert_eq!(take_paths(&rig.session, voice), [beside.clone()], "it came beside the song");
+    assert!(beside.is_file() && !first.exists(), "and nothing is left in the folder of the run that is gone");
+    assert!(std::fs::read_to_string(&song).unwrap().contains("Back files"));
+}
+
+#[test]
+fn a_punched_take_of_notes_alone_plays_through_the_loop_and_holds_what_was_played_inside_it() {
+    // No track records an input: there is no audio of the take at all, and
+    // the song must play through its loop all the same.
+    let (mut rig, _folder) = rig_on(studio(microphone()), AudioConfig::default());
+    let keys = rig.probe_track("Keys");
+    rig.session.set_armed(keys, true).unwrap();
+    rig.session.edit(|project| project.set_loop(true, 4.0, 8.0)).unwrap();
+    rig.session.set_punch(true);
+    rig.session.seek(2.0);
+    rig.run(40);
+    assert!(rig.host.capturing().is_none(), "nothing here records an input");
+
+    let began = rig.now() + LATENCY;
+    let at = |beat: f64| began + (beat - 2.0) * FRAMES_PER_BEAT;
+    rig.session.record().unwrap();
+    for (beat, pitch) in [(3.0, 60), (5.0, 62), (7.5, 64), (9.0, 65)] {
+        rig.key(at(beat), on(pitch));
+        rig.key(at(beat) + 6000.0, off(pitch));
+    }
+    rig.run_until(at(10.0));
+    let reached = rig.session.transport().position_beats;
+    assert!(reached > 9.5, "the song played through its loop, and is at beat {reached:.2}");
+    rig.session.stop();
+
+    // One clip, the punch's stretch, with the keys that were played inside
+    // it where they were played: not a second pass laid over the first.
+    let clips = rig.session.project().track(keys).unwrap().clips.clone();
+    assert_eq!(clips.len(), 1);
+    assert_eq!((clips[0].start, clips[0].length), (4.0, 4.0));
+    let played: Vec<(u8, f64)> =
+        clips[0].notes().iter().map(|note| (note.pitch, (note.start * 100.0).round() / 100.0)).collect();
+    assert_eq!(played, [(62, 1.0), (64, 3.5)]);
+    assert!(rig.session.project().track(keys).unwrap().takes.is_empty(), "one pass, and nothing to choose from");
+
+    // The take is over: the song goes round its loop again.
+    rig.session.seek(6.0);
+    rig.run(4);
+    rig.session.play();
+    rig.run_until(rig.now() + 3.0 * FRAMES_PER_BEAT);
+    let position = rig.session.transport().position_beats;
+    assert!((4.0..8.0).contains(&position), "it came round: beat {position:.2}");
+    rig.session.stop();
+}
