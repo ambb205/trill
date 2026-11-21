@@ -1323,6 +1323,13 @@ impl Engine {
         self.input.as_ref().map(|input| capture::health(&input.link, &input.counts))
     }
 
+    /// Whether the open input was opened as one that counts time by the
+    /// output's clock and was found, by its time stamps, to have a clock
+    /// of its own: it is read as any two devices are from then on.
+    pub fn input_parted(&self) -> bool {
+        self.input.as_ref().is_some_and(|input| capture::parted(&input.counts))
+    }
+
     /// How far the input's clock is from the output's as the engine reads
     /// it now, in parts a million.
     pub fn input_drift_ppm(&self) -> Option<f64> {

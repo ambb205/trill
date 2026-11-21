@@ -502,7 +502,18 @@ pub(super) fn same_hardware(one: &str, other: &str) -> bool {
             found
         }
     };
-    matches!((container(one), container(other)), (Some(one), Some(other)) if one == other)
+    // The system gives every device that is built in, or that it knows
+    // no container for, one and the same id: two endpoints that both have
+    // it are any two devices, and that is no evidence of one clock.
+    let says_something = |container: &u128| !is_no_container(*container);
+    let (one, other) = (container(one).filter(says_something), container(other).filter(says_something));
+    matches!((one, other), (Some(one), Some(other)) if one == other)
+}
+
+/// Whether a container id is the one that stands for "no container":
+/// `{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`, or nothing at all.
+fn is_no_container(container: u128) -> bool {
+    container == 0 || container == 0x0000_0000_0000_0000_ffff_ffff_ffff_ffff
 }
 
 /// An open input device, ready to start.
@@ -755,6 +766,16 @@ pub(super) fn open_exclusive_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_id_every_built_in_device_has_says_nothing_of_two_endpoints_being_one_device() {
+        // `{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`: what the system gives
+        // a device it knows no container for.
+        let none = windows::core::GUID::from_values(0, 0, 0, [0xff; 8]).to_u128();
+        assert!(is_no_container(none) && is_no_container(0));
+        let some = windows::core::GUID::from_u128(0x8c7ed206_3f8a_4827_b3ab_ae9e1faefc6c).to_u128();
+        assert!(!is_no_container(some));
+    }
 
     fn read_back(layout: Layout, sample: f32) -> f32 {
         let mut bytes = [0u8; 4];

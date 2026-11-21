@@ -221,7 +221,7 @@ fn status_json(session: &Session) -> Value {
             "sample_rate": open.sample_rate,
             "channels": open.channels,
             "exclusive": open.exclusive,
-            "clock": if open.shares_clock { "the output's own" } else { "its own: read by its time stamps" },
+            "clock": status.clock.map(trill_engine::InputClock::said),
         }),
         None => json!({ "open": false, "needed": status.needed }),
     };
@@ -308,7 +308,12 @@ pub(crate) fn recorded_json(recorded: &Recorded, rate: f64) -> Value {
         out["ended_early"] = json!(why);
     }
     if recorded.takes.is_empty() {
-        out["note"] = json!("The song never rolled, so there is nothing of the recording on any track.");
+        out["note"] = json!(match recorded.rolled {
+            false => "The song never rolled, so there is nothing of the recording on any track.",
+            // Punched in over a stretch the song never came into.
+            true =>
+                "The song never came into the stretch the take was punched in over, so there is nothing of                      the recording on any track. Its file holds what was heard meanwhile.",
+        });
     }
     out
 }

@@ -78,6 +78,38 @@ pub struct InputStatus {
     /// Why it is not open although something needs it, or what is wrong
     /// with it as it is open, in words fit to show the user.
     pub problem: Option<String>,
+    /// By which clock the open input counts time; `None` while it is
+    /// closed.
+    pub clock: Option<InputClock>,
+}
+
+/// By which clock an open input counts time: what decides how it is
+/// brought into the engine's.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InputClock {
+    /// The output's own: an input of the device that is played through.
+    /// A frame of the one is a frame of the other.
+    Shared,
+    /// A clock of its own: the two are told apart by their time stamps,
+    /// and the input is read at the ratio they have.
+    Own,
+    /// It was taken for an input of the output's device, and its time
+    /// stamps said otherwise: it is read as one with a clock of its own
+    /// from then on, for as long as it is open.
+    FoundOwn,
+}
+
+impl InputClock {
+    /// In words: "the output's own", "its own".
+    pub fn said(self) -> &'static str {
+        match self {
+            InputClock::Shared => "the output's own",
+            InputClock::Own => "its own: read by its time stamps",
+            InputClock::FoundOwn => {
+                "its own: the system has it as part of the output's device, and its time stamps say otherwise"
+            }
+        }
+    }
 }
 
 /// Where the correction that is added to what the devices say comes from.
@@ -172,6 +204,9 @@ pub struct RecordedTake {
 /// What the last recording came to; see [`Session::last_recording`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Recorded {
+    /// Whether the song rolled at all: a take that was called off while
+    /// it was counted in has a file and nothing to put on a track.
+    pub rolled: bool,
     pub takes: Vec<RecordedTake>,
     /// The highest level of each file, in decibels of full scale.
     pub peaks_db: Vec<(PathBuf, f64)>,
@@ -350,7 +385,21 @@ impl Session {
     pub fn input_status(&self) -> InputStatus {
         let open = self.engine.input().cloned();
         let problem = self.recording.problem.clone().or_else(|| open.as_ref().and_then(|input| input.warning.clone()));
-        InputStatus { open, needed: self.input_needed(), problem: problem.or_else(|| self.unreachable_input()) }
+        let clock = open.as_ref().map(|input| match (input.shares_clock, self.engine.input_parted()) {
+            (true, false) => InputClock::Shared,
+            (true, true) => InputClock::FoundOwn,
+            (false, _) => InputClock::Own,
+        });
+        let problem = problem.or_else(|| self.unreachable_input());
+        InputStatus { open, needed: self.input_needed(), problem, clock }
+    }
+
+    /// How the open input has done since it was opened: the frames its
+    /// device never handed over, the ones that came too late to be read,
+    /// and how often the reading was put somewhere else at once. `None`
+    /// while it is closed.
+    pub fn input_health(&self) -> Option<Health> {
+        self.engine.input_health()
     }
 
     /// Says that somebody is looking at the input's level, or has stopped:
@@ -873,6 +922,7 @@ impl Session {
         let ended_early = audio.ended_early.take().or_else(|| files.iter().find_map(|file| file.failed()));
         let db = |level: f32| if level > 0.0 { 20.0 * f64::from(level).log10() } else { -120.0 };
         let mut recorded = Recorded {
+            rolled: audio.rolled.is_some(),
             takes: Vec::new(),
             peaks_db: files.iter().map(|file| (file.path().to_path_buf(), db(file.peak()))).collect(),
             silent_frames: silent,

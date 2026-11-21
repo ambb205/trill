@@ -17,7 +17,9 @@ use super::{GAP, ROW, WIDTH, choice, heading, list_devices, paragraph};
 use crate::ui::state::Cx;
 use crate::ui::{inputs, units, widgets};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
-use trill_engine::{AudioConfig, AudioDevice, AudioDevices, Correction, Measured, Measurement, RecordingLatency};
+use trill_engine::{
+    AudioConfig, AudioDevice, AudioDevices, Correction, InputClock, Measured, Measurement, RecordingLatency,
+};
 use trill_noir::{Chip, MenuItem, TextStyle, paint, text};
 
 /// How far one press of a nudge moves the correction by hand, in
@@ -137,16 +139,27 @@ fn open_line(cx: &Cx) -> Option<String> {
     let open = cx.live.input.open.as_ref()?;
     let sharing = if open.exclusive { "exclusive" } else { "shared" };
     let channels = if open.channels == 1 { "1 channel".to_owned() } else { format!("{} channels", open.channels) };
-    let clock = match (open.shares_clock, cx.live.input.latency) {
-        (true, _) => "on the output\u{2019}s clock".to_owned(),
-        (false, Some(latency)) => format!("on a clock of its own, {}", drift_words(latency.drift_ppm)),
-        (false, None) => "on a clock of its own".to_owned(),
-    };
+    let clock = clock_words(cx.live.input.clock, cx.live.input.latency.map(|latency| latency.drift_ppm));
     Some(format!(
         "{} \u{00B7} {channels} \u{00B7} {} \u{00B7} {sharing} \u{00B7} {clock}",
         open.device,
         super::format_rate(f64::from(open.sample_rate))
     ))
+}
+
+/// By which clock the input counts time, and how far it runs from the
+/// output's where it has one of its own.
+fn clock_words(clock: Option<InputClock>, drift_ppm: Option<f64>) -> String {
+    let apart = drift_ppm.map(|ppm| format!(", {}", drift_words(ppm))).unwrap_or_default();
+    match clock {
+        Some(InputClock::Shared) => "on the output\u{2019}s clock".to_owned(),
+        // The system has the two as one device, and what the input's
+        // time stamps say is otherwise: it is read as what it is.
+        Some(InputClock::FoundOwn) => {
+            format!("on a clock of its own{apart} (the system has it as part of the output\u{2019}s device)")
+        }
+        Some(InputClock::Own) | None => format!("on a clock of its own{apart}"),
+    }
 }
 
 /// How far an input's clock runs from the output's, as it is read now: a
@@ -493,5 +506,12 @@ mod tests {
         assert_eq!(drift_words(12.34), "12.3 parts in a million fast");
         assert_eq!(drift_words(-3.0), "3.0 parts in a million slow");
         assert_eq!(drift_words(0.01), "in step with the output\u{2019}s");
+        assert_eq!(clock_words(Some(InputClock::Shared), Some(0.3)), "on the output\u{2019}s clock");
+        assert_eq!(
+            clock_words(Some(InputClock::Own), Some(-3.0)),
+            "on a clock of its own, 3.0 parts in a million slow"
+        );
+        let found = clock_words(Some(InputClock::FoundOwn), Some(20.0));
+        assert!(found.starts_with("on a clock of its own, 20.0 parts in a million fast (the system has it"), "{found}");
     }
 }

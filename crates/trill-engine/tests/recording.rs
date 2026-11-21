@@ -155,15 +155,29 @@ fn wait_until(mut done: impl FnMut() -> bool) {
 /// machine's, and frames that find no room on their way to disk are,
 /// rightly, silence.
 fn run_taking(rig: &mut Rig, frame: f64) {
-    let began = rig.now();
     let written = |rig: &Rig| rig.session.growing_takes().iter().map(|take| take.file.frames()).min();
+    // What was handed over before this is written first, however far
+    // behind the thread that writes had come: it has caught up when it
+    // has nothing more to write. (Or what it was behind by adds up from
+    // one call to the next, until there is no room on the way to disk.)
+    let mut seen = written(rig);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let now = written(rig);
+        if std::mem::replace(&mut seen, now) == now {
+            break;
+        }
+    }
+    let began = rig.now();
     let before = written(rig).unwrap_or(0) as f64;
     while rig.now() < frame {
-        let until = (rig.now() + 96_000.0).min(frame);
+        let until = (rig.now() + 48_000.0).min(frame);
         rig.run_until(until);
         rig.session.housekeeping();
-        // Within four seconds of what has been handed over since.
-        wait_until(|| written(rig).is_none_or(|frames| frames as f64 - before + 192_000.0 >= rig.now() - began));
+        // Within a second of what has been handed over since: well inside
+        // what there is room for on the way to disk, on a machine that
+        // gives the thread that writes its turn late.
+        wait_until(|| written(rig).is_none_or(|frames| frames as f64 - before + 48_000.0 >= rig.now() - began));
     }
 }
 
@@ -1448,4 +1462,87 @@ fn all_that_was_sung_is_in_a_take_round_a_loop_punched_in_and_after_a_count_in()
     assert_eq!(takes[0].0, 8.0);
     assert!((sum - 3.0 * SR).abs() <= 2.0, "three seconds were sung to the song: {sum}");
     in_use(&rig);
+}
+
+// ---- one clock is a belief ---------------------------------------------------
+
+/// Records ninety seconds from an input that is said to count time by the
+/// output's clock and runs `ppm` parts a million apart from it, with a
+/// bump every second. Returns how many seconds into the take the session
+/// came to say that the input has a clock of its own (`None` if it never
+/// did), and how far the worst bump was from its place before that and
+/// after it, in milliseconds.
+fn believed_to_share_a_clock(ppm: f64) -> (Option<f64>, f64, f64) {
+    use trill_engine::InputClock;
+    const SECONDS: usize = 90;
+    let host = studio(ScriptedInput { ppm, shares_clock: true, ..microphone() });
+    let (mut rig, _folder) = rig_on(host, AudioConfig::default());
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    assert_eq!(rig.session.input_status().clock, Some(InputClock::Shared), "as it was opened");
+    rig.run(40);
+    // The song's frame 24,000 is heard at this moment of the host's
+    // clock, and every second after it another.
+    let first = (rig.now() + LATENCY + 24_000.0) / SR;
+    rig.host.hear(Hears::Sound(Arc::new(move |_, seconds| {
+        let since = seconds - first;
+        let nearest = since.round().max(0.0);
+        let away = (since - nearest) * SR / 3.0;
+        if away.abs() < 20.0 { (0.8 * (-away * away).exp()) as f32 } else { 0.0 }
+    })));
+    rig.session.record().unwrap();
+    let began = rig.now();
+    let jumps = rig.session.input_health().unwrap().jumps;
+    let mut found = None;
+    for second in 1..=SECONDS {
+        run_taking(&mut rig, began + second as f64 * SR);
+        if found.is_none() && rig.session.input_status().clock == Some(InputClock::FoundOwn) {
+            found = Some(second as f64);
+        }
+    }
+    // Found out or not, the reading was never put somewhere else at once.
+    let health = rig.session.input_health().unwrap();
+    assert_eq!((health.jumps, health.lost, health.late), (jumps, 0, 0), "{ppm} ppm: {health:?}");
+    rig.session.stop();
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!(recorded.silent_frames, 0, "nothing was late or lost");
+    let (_, start, _, audio) = clip_at(&rig.session, voice, 1.0);
+    assert_eq!(start, 0.0);
+    let path = Path::new(&audio.path);
+    let (mut before, mut after, mut last) = (0.0f64, 0.0f64, None::<f64>);
+    for bump in 0..SECONDS - 1 {
+        let song_frame = 24_000.0 + bump as f64 * SR;
+        let in_file = audio.offset_seconds * SR + song_frame;
+        let near = frames_of(path, 1, in_file.round() as u64 - 256, 512);
+        let off_ms = (in_file.round() - 256.0 + top_of(&near) - in_file) / SR * 1000.0;
+        // From one second to the next a bump moves by a little: the
+        // place is steered to where it belongs, and never put there.
+        if let Some(last) = last {
+            assert!((off_ms - last).abs() < 0.25, "{ppm} ppm: {:.3} ms in a second, at {bump} s", off_ms - last);
+        }
+        last = Some(off_ms);
+        match found {
+            Some(found) if song_frame / SR >= found => after = after.max(off_ms.abs()),
+            _ => before = before.max(off_ms.abs()),
+        }
+    }
+    (found, before, after)
+}
+
+#[test]
+fn an_input_that_is_said_to_share_the_outputs_clock_and_does_not_is_found_out() {
+    for ppm in [20.0, 100.0, -100.0] {
+        let (found, before, after) = believed_to_share_a_clock(ppm);
+        let found = found.unwrap_or_else(|| panic!("{ppm} ppm apart, and it was never found out"));
+        println!(
+            "said to share the output's clock, {ppm} ppm apart: found out {found:.0} s into the take; a click was \
+             {before:.3} ms from its place at the worst before that, and {after:.3} ms after"
+        );
+        assert!(found <= 40.0, "{ppm} ppm: found out after {found} s");
+        assert!(before < 2.0, "{ppm} ppm: {before} ms before it was found out");
+        assert!(after < 0.5, "{ppm} ppm: {after} ms once it was found out");
+    }
+    // And one that does share it goes on being believed.
+    let (found, before, _) = believed_to_share_a_clock(0.0);
+    assert_eq!(found, None, "a pair that is one clock is read as one");
+    assert!(before < 0.03, "{before} ms");
 }

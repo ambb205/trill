@@ -47,7 +47,9 @@ pub struct ScriptedInput {
     pub ppm: f64,
     pub exclusive: bool,
     /// Whether it says it counts time by the output's clock: the input of
-    /// the device that is played through. (Its `ppm` is then nothing.)
+    /// the device that is played through. (Its `ppm` should then be
+    /// nothing: one that says so and runs apart all the same is how a
+    /// test has the session find out.)
     pub shares_clock: bool,
 }
 

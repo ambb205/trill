@@ -36,7 +36,7 @@
 
 use crate::graph::MAX_BLOCK;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// The most channels of an input device that are taken.
 pub const MAX_INPUT_CHANNELS: usize = 32;
@@ -542,11 +542,22 @@ pub struct Health {
     pub jumps: u32,
 }
 
+/// How far out, in seconds, the place of an input that is taken to share
+/// the engine's clock has to be before that is doubted; for how long it
+/// has to have been going further out without a break; and over how long
+/// "further out than it was" looks back. See [`Reader::parts`].
+const PARTED_BY: f64 = 0.00015;
+const PARTED_FOR: f64 = 3.0;
+const PARTED_LOOKS_BACK: f64 = 1.0;
+
 /// What a [`Reader`] counts, for whoever asks from another thread.
 #[derive(Default)]
 pub(crate) struct Counts {
     late: AtomicU64,
     jumps: AtomicU32,
+    /// Set when an input that was taken to count time by the output's
+    /// clock was found, by its time stamps, to have one of its own.
+    parted: AtomicBool,
     /// The ratio the input is read at against what the two rates say, in
     /// parts a million, as the bits of an `f64`.
     off_ppm: AtomicU64,
@@ -584,6 +595,10 @@ pub(crate) struct Reader {
     /// Whether the input and the engine count time by one clock, and for
     /// how many seconds the place has been where it was last put.
     one_clock: bool,
+    /// What the place was off by a moment ago, and for how long it has
+    /// been leaving where the time stamps have it: see [`Reader::parts`].
+    off_before: f64,
+    leaving_for: f64,
     placed_for: f64,
     /// Which channels are read: a bit each.
     wanted: u32,
@@ -622,6 +637,8 @@ impl Reader {
             line_number: 0,
             least_late: LeastLate::default(),
             one_clock,
+            off_before: 0.0,
+            leaving_for: 0.0,
             placed_for: 0.0,
             wanted: 0,
             span: vec![0.0; span_frames * channels],
@@ -684,11 +701,12 @@ impl Reader {
                 self.counts.jumps.fetch_add(1, Ordering::Relaxed);
             }
             (self.place, self.trim, self.placed, self.placed_for) = (meant, 0.0, true, 0.0);
+            (self.off_before, self.leaving_for) = (0.0, 0.0);
             self.ratio = match self.one_clock {
                 true => self.link.rate / self.engine_rate,
                 false => input.rate / engine.rate,
             };
-        } else if self.one_clock {
+        } else if self.one_clock && !self.parts(off, frames) {
             // One clock: a frame of the one is a frame of the other, and
             // the place never drifts. Where the time stamps have it is
             // right on the whole and a little out each time, so the place
@@ -715,6 +733,38 @@ impl Reader {
         let nominal = self.link.rate / self.engine_rate;
         let apart = (input.rate / engine.rate / nominal - 1.0) * 1e6;
         self.counts.off_ppm.store(apart.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Whether an input that is taken to count time by the engine's clock
+    /// has just been found not to: asked with every block while that is
+    /// believed, with what the place is `off` by. From then on the ratio
+    /// is followed, as for any two devices, from where the place is: no
+    /// jump.
+    ///
+    /// One clock is a belief. Whoever said so (the system, by saying two
+    /// endpoints are one piece of hardware) can be wrong, and then the
+    /// place is drawn the same way again and again, and further each
+    /// time. A place that is merely a little out is drawn back and comes
+    /// nearer; one whose clock runs apart goes on leaving. So the belief
+    /// is dropped when the place has been more than [`PARTED_BY`] out and
+    /// further out than it was a moment before, for [`PARTED_FOR`]
+    /// without a break.
+    fn parts(&mut self, off: f64, frames: usize) -> bool {
+        let seconds = frames as f64 / self.engine_rate;
+        // What it was off by a moment ago, smoothed over a second: what
+        // it is off by now is held against that.
+        let before = self.off_before;
+        self.off_before += (off - self.off_before) * (seconds / PARTED_LOOKS_BACK).min(1.0);
+        let leaving =
+            off.abs() > PARTED_BY * self.link.rate && off.signum() == before.signum() && off.abs() > before.abs();
+        self.leaving_for = if leaving { self.leaving_for + seconds } else { 0.0 };
+        if self.leaving_for < PARTED_FOR {
+            return false;
+        }
+        self.one_clock = false;
+        self.trim = 0.0;
+        self.counts.parted.store(true, Ordering::Relaxed);
+        true
     }
 
     /// Reads the next `frames` frames (a block's worth at the most) of
@@ -819,6 +869,12 @@ pub(crate) fn health(link: &Link, counts: &Counts) -> Health {
         late: counts.late.load(Ordering::Relaxed),
         jumps: counts.jumps.load(Ordering::Relaxed),
     }
+}
+
+/// Whether an input that was taken to share the engine's clock was found
+/// to have one of its own: see [`Reader::parts`].
+pub(crate) fn parted(counts: &Counts) -> bool {
+    counts.parted.load(Ordering::Relaxed)
 }
 
 /// How far the ratio an input is read at is from what the two rates say,

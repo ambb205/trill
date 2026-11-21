@@ -49,7 +49,7 @@ pub use opening::{Arriving, Made};
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
 pub use recording::{
-    Correction, GrowingTake, InputStatus, Measured, Measurement, Recorded, RecordedTake, RecordingLatency,
+    Correction, GrowingTake, InputClock, InputStatus, Measured, Measurement, Recorded, RecordedTake, RecordingLatency,
 };
 pub use take::TakeClip;
 

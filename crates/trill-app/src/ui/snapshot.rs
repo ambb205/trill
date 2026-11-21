@@ -519,6 +519,8 @@ pub struct InputLive {
     /// Why it is not open although something needs it, or what is wrong
     /// with it as it is.
     pub problem: Option<String>,
+    /// By which clock the open input counts time.
+    pub clock: Option<trill_engine::InputClock>,
     /// The level of each channel, and whether it reached full scale.
     channels: Vec<MeterState>,
     /// How long sound takes to go round, while the input is open.
@@ -570,6 +572,7 @@ impl InputLive {
     pub fn update(&mut self, session: &mut Session, dt: f32) {
         let status = session.input_status();
         (self.open, self.needed, self.problem) = (status.open, status.needed, status.problem);
+        self.clock = status.clock;
         self.latency = session.recording_latency();
         self.measurement = Some(session.measurement());
         self.punch = session.punch();
