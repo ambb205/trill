@@ -254,6 +254,7 @@ fn parse_track(
             length,
             velocity: started.velocity,
             channel: Channel::FIRST,
+            id: 0,
         });
     };
 
@@ -815,7 +816,7 @@ mod tests {
     }
 
     fn step(beat: f64, value: f64) -> AutomationPoint {
-        AutomationPoint { beat, value, shape: Segment::Hold }
+        AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
     }
 
     fn curve(controller: ControllerKind, points: &[AutomationPoint]) -> ControllerCurve {

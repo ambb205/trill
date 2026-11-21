@@ -360,7 +360,7 @@ fn course(points: &[AutomationPoint], travel: Travel, start: Beats, end: Beats) 
         next if next == points.len() => Segment::Hold,
         next => points[next - 1].shape,
     };
-    let mut course = vec![AutomationPoint { beat: 0.0, value: envelope_value(points, travel, start), shape }];
+    let mut course = vec![AutomationPoint { beat: 0.0, value: envelope_value(points, travel, start), shape, id: 0 }];
     course.extend(
         points
             .iter()
@@ -368,7 +368,7 @@ fn course(points: &[AutomationPoint], travel: Travel, start: Beats, end: Beats) 
             .map(|point| AutomationPoint { beat: point.beat - start, ..*point }),
     );
     let arrives = value_before_along(points, travel, end);
-    course.push(AutomationPoint { beat: end - start, value: arrives, shape: Segment::Hold });
+    course.push(AutomationPoint { beat: end - start, value: arrives, shape: Segment::Hold, id: 0 });
     course
 }
 
@@ -876,8 +876,8 @@ mod tests {
         // A step keeps stepping: held, then the jump, then held to the end.
         let hold = Segment::Hold;
         let steps = vec![
-            AutomationPoint { beat: 0.0, value: 1.0, shape: hold },
-            AutomationPoint { beat: 6.0, value: 5.0, shape: hold },
+            AutomationPoint { beat: 0.0, value: 1.0, shape: hold, id: 0 },
+            AutomationPoint { beat: 6.0, value: 5.0, shape: hold, id: 0 },
         ];
         let piece = course(&steps, STRAIGHT, 4.0, 8.0);
         assert_eq!(values(&piece, &[0.0, 1.9, 2.0, 3.9]), [1.0, 1.0, 5.0, 5.0]);
@@ -893,8 +893,8 @@ mod tests {
         clip.set_controller(crate::ControllerKind::EXPRESSION, envelope(&[(0.0, 0.0), (8.0, 1.0)])).unwrap();
         let hold = crate::Segment::Hold;
         let pedal = vec![
-            AutomationPoint { beat: 2.0, value: 1.0, shape: hold },
-            AutomationPoint { beat: 6.0, value: 0.0, shape: hold },
+            AutomationPoint { beat: 2.0, value: 1.0, shape: hold, id: 0 },
+            AutomationPoint { beat: 6.0, value: 0.0, shape: hold, id: 0 },
         ];
         clip.set_controller(crate::ControllerKind::SUSTAIN, pedal).unwrap();
         (project, track)

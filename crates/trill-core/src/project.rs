@@ -15,7 +15,7 @@ use crate::tempo::{MeterChange, MeterMap, SAME_BEAT, TempoChange, TempoMap};
 use crate::time::{Beats, TimeSignature};
 use crate::travel::Travel;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const MIN_TEMPO: f64 = 20.0;
 pub const MAX_TEMPO: f64 = 999.0;
@@ -79,7 +79,7 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, EditError> {
     Err(EditError::Invalid(message.into()))
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     /// MIDI note number, 60 = C4 (middle C).
     pub pitch: u8,
@@ -95,13 +95,37 @@ pub struct Note {
     /// none, and neither does a note on the first.
     #[serde(default, skip_serializing_if = "Channel::is_first")]
     pub channel: Channel,
+    /// What the note is known by among the notes of its clip, so that two
+    /// people who change it at once change the same note. Nobody who writes
+    /// a note says it: a note without one (0) is given one when the edit
+    /// that made it is done ([`Project::settle`]), and a copy of a note in
+    /// the same clip is given another. It is no part of what a note is:
+    /// two notes that sound the same are equal.
+    #[serde(default, skip_serializing_if = "no_id")]
+    pub id: u64,
+}
+
+fn no_id(id: &u64) -> bool {
+    *id == 0
+}
+
+impl PartialEq for Note {
+    /// The same pitch, time, velocity and channel: not which note it is.
+    fn eq(&self, other: &Self) -> bool {
+        let Note { pitch, start, length, velocity, channel, id: _ } = *self;
+        pitch == other.pitch
+            && start == other.start
+            && length == other.length
+            && velocity == other.velocity
+            && channel == other.channel
+    }
 }
 
 impl Default for Note {
     /// Middle C for a beat, at the start, on the first channel: something
     /// to say the rest of a note over (`Note { pitch: 64, ..Default::default() }`).
     fn default() -> Self {
-        Self { pitch: 60, start: 0.0, length: 1.0, velocity: 100, channel: Channel::FIRST }
+        Self { pitch: 60, start: 0.0, length: 1.0, velocity: 100, channel: Channel::FIRST, id: 0 }
     }
 }
 
@@ -115,7 +139,7 @@ impl Note {
         Self { channel, ..self }
     }
 
-    fn validate(&self) -> Result<(), EditError> {
+    pub(crate) fn validate(&self) -> Result<(), EditError> {
         if self.pitch > 127 {
             return invalid(format!("note pitch {} is outside 0..=127", self.pitch));
         }
@@ -435,7 +459,7 @@ impl AudioContent {
         if self.warp.keeps_pitch() { self.transpose } else { 0.0 }
     }
 
-    fn validate(&self) -> Result<(), EditError> {
+    pub(crate) fn validate(&self) -> Result<(), EditError> {
         if !self.offset_seconds.is_finite() || self.offset_seconds < 0.0 {
             return invalid("audio offset must be >= 0 seconds");
         }
@@ -709,8 +733,92 @@ impl Clip {
     }
 }
 
-fn sort_notes(notes: &mut [Note]) {
-    notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)).then(a.channel.cmp(&b.channel)));
+/// By start, then pitch, then channel; and two notes that are the same in
+/// all of these by which is which, so that the order is one order wherever
+/// the same notes are held.
+pub(crate) fn sort_notes(notes: &mut [Note]) {
+    notes.sort_by(|a, b| {
+        (a.start.total_cmp(&b.start))
+            .then(a.pitch.cmp(&b.pitch))
+            .then(a.channel.cmp(&b.channel))
+            .then(a.id.cmp(&b.id))
+    });
+}
+
+/// Gives each note of `notes` that has no id one, and one of two that
+/// have the same another: the one that is not as the note of that id was
+/// (`was`), or else the later. Then puts them in order.
+fn settle_notes(notes: &mut [Note], was: Option<&[Note]>, next: &mut u64) {
+    let mut seen = std::collections::HashSet::with_capacity(notes.len());
+    if notes.iter().any(|note| note.id == 0 || !seen.insert(note.id)) {
+        let was: HashMap<u64, &Note> = was.unwrap_or_default().iter().map(|note| (note.id, note)).collect();
+        let as_was = |note: &Note| was.get(&note.id).is_some_and(|was| **was == *note);
+        let mut keeps: HashMap<u64, usize> = HashMap::new();
+        for (index, note) in notes.iter().enumerate().filter(|(_, note)| note.id != 0) {
+            match keeps.get(&note.id) {
+                Some(first) if as_was(&notes[*first]) || !as_was(note) => {}
+                _ => {
+                    keeps.insert(note.id, index);
+                }
+            }
+        }
+        for (index, note) in notes.iter_mut().enumerate() {
+            if keeps.get(&note.id) != Some(&index) {
+                note.id = *next;
+                *next += 1;
+            }
+        }
+    }
+    sort_notes(notes);
+}
+
+/// Gives each point of an envelope or a curve that has no id one, and the
+/// later of two that have the same another. The points stay in the order
+/// they are in, which for two at one beat says which is arrived at and
+/// which is left from: where the ids of such points do not rise in that
+/// order they are given new ones that do, so that the order is one order
+/// wherever the same points are held ([`sort_points`]).
+fn settle_points(points: &mut [AutomationPoint], next: &mut u64) {
+    let mut seen = std::collections::HashSet::with_capacity(points.len());
+    for point in points.iter_mut() {
+        if point.id == 0 || !seen.insert(point.id) {
+            point.id = *next;
+            *next += 1;
+        }
+    }
+    points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+    let mut from = 0;
+    while from < points.len() {
+        let to = from + points[from..].iter().take_while(|point| point.beat == points[from].beat).count();
+        if points[from..to].windows(2).any(|pair| pair[0].id >= pair[1].id) {
+            for point in &mut points[from..to] {
+                point.id = *next;
+                *next += 1;
+            }
+        }
+        from = to;
+    }
+}
+
+/// By beat, and two points at one beat by which is which: the order
+/// [`settle_points`] leaves them in.
+pub(crate) fn sort_points(points: &mut [AutomationPoint]) {
+    points.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(a.id.cmp(&b.id)));
+}
+
+/// Whether two versions of a clip are the same to the last id: equal, and
+/// each note and point the one it was.
+pub(crate) fn same_clip(a: &Clip, b: &Clip) -> bool {
+    let ids = |clip: &Clip| {
+        let points = clip.controllers().iter().flat_map(|curve| curve.points.iter().map(|point| point.id));
+        clip.notes().iter().map(|note| note.id).chain(points).collect::<Vec<u64>>()
+    };
+    a == b && (a.midi().is_none() || ids(a) == ids(b))
+}
+
+/// Whether two versions of an envelope are the same to the last id.
+pub(crate) fn same_lane(a: &AutomationLane, b: &AutomationLane) -> bool {
+    a == b && a.points.iter().map(|point| point.id).eq(b.points.iter().map(|point| point.id))
 }
 
 /// An instrument or effect in a device chain.
@@ -906,14 +1014,14 @@ pub struct LoopRegion {
 }
 
 /// Which device chain an operation targets.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChainRef {
     Track(TrackId),
     Master,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationTarget {
     /// In dB.
@@ -977,19 +1085,38 @@ impl Segment {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct AutomationPoint {
     pub beat: Beats,
     pub value: f64,
     /// The shape of the segment from this point to the next.
     #[serde(default, skip_serializing_if = "Segment::is_linear")]
     pub shape: Segment,
+    /// What the point is known by among the points of its envelope or
+    /// curve, as a note is among the notes of its clip ([`Note::id`]):
+    /// given when the edit that made the point is done, and no part of
+    /// what the point is.
+    #[serde(default, skip_serializing_if = "no_id")]
+    pub id: u64,
+}
+
+impl PartialEq for AutomationPoint {
+    /// The same place, value and shape: not which point it is.
+    fn eq(&self, other: &Self) -> bool {
+        let AutomationPoint { beat, value, shape, id: _ } = *self;
+        beat == other.beat && value == other.value && shape == other.shape
+    }
 }
 
 impl AutomationPoint {
     /// A point joined to the next by a straight line.
     pub fn new(beat: Beats, value: f64) -> Self {
-        Self { beat, value, shape: Segment::Linear }
+        Self { beat, value, shape: Segment::Linear, id: 0 }
+    }
+
+    /// A point joined to the next as `shape` says.
+    pub fn shaped(beat: Beats, value: f64, shape: Segment) -> Self {
+        Self { beat, value, shape, id: 0 }
     }
 }
 
@@ -1067,10 +1194,22 @@ pub struct ImportedPart {
 }
 
 /// A named position on the timeline.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Marker {
     pub beat: Beats,
     pub name: String,
+    /// What the marker is known by, as a note is ([`Note::id`]): given
+    /// when the edit that made it is done, and no part of what it is.
+    #[serde(default, skip_serializing_if = "no_id")]
+    pub id: u64,
+}
+
+impl PartialEq for Marker {
+    /// The same place and name: not which marker it is.
+    fn eq(&self, other: &Self) -> bool {
+        let Marker { beat, name, id: _ } = self;
+        *beat == other.beat && *name == other.name
+    }
 }
 
 /// The key a song says it is in. Nothing in the song follows it: it is
@@ -1179,14 +1318,14 @@ fn format_version_default() -> u32 {
     FORMAT_VERSION
 }
 
-fn valid_tempo(tempo: f64) -> Result<f64, EditError> {
+pub(crate) fn valid_tempo(tempo: f64) -> Result<f64, EditError> {
     if !tempo.is_finite() || !(MIN_TEMPO..=MAX_TEMPO).contains(&tempo) {
         return invalid(format!("tempo {tempo} is outside {MIN_TEMPO}..={MAX_TEMPO} BPM"));
     }
     Ok(tempo)
 }
 
-fn valid_signature(numerator: u8, denominator: u8) -> Result<TimeSignature, EditError> {
+pub(crate) fn valid_signature(numerator: u8, denominator: u8) -> Result<TimeSignature, EditError> {
     match TimeSignature::new(numerator, denominator) {
         Some(signature) => Ok(signature),
         None => invalid(format!("unsupported time signature {numerator}/{denominator}: 1 to 32 over 1, 2, 4, 8 or 16")),
@@ -1194,7 +1333,7 @@ fn valid_signature(numerator: u8, denominator: u8) -> Result<TimeSignature, Edit
 }
 
 /// Where in the song `what` is set, or why that is nowhere.
-fn valid_position(beat: Beats, what: &str) -> Result<Beats, EditError> {
+pub(crate) fn valid_position(beat: Beats, what: &str) -> Result<Beats, EditError> {
     if !beat.is_finite() || beat < 0.0 {
         return invalid(format!("{what} is set at a position of the song, 0 beats or later, not at {beat}"));
     }
@@ -1203,7 +1342,7 @@ fn valid_position(beat: Beats, what: &str) -> Result<Beats, EditError> {
 
 /// In order of their beats, and at one beat the glide that arrives before
 /// the tempo that takes over.
-fn sort_tempo_changes(changes: &mut [TempoChange]) {
+pub(crate) fn sort_tempo_changes(changes: &mut [TempoChange]) {
     changes.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(b.ramp.cmp(&a.ramp)));
 }
 
@@ -1236,6 +1375,73 @@ impl Project {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// The number the next thing the song comes to hold is given.
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Has the next thing the song comes to hold given `next`, and what
+    /// comes after it the numbers that follow: for a song that several
+    /// programs hold, each of which counts from a number of its own so
+    /// that no two of them give the same.
+    pub fn count_ids_from(&mut self, next: u64) {
+        self.next_id = next;
+    }
+
+    /// Finishes an edit: gives every note, point and marker that has no
+    /// id one, and puts what the song holds in the one order it is held
+    /// in wherever the same song is held (clips by where they start, a
+    /// track's sends by their returns, envelopes by what they move,
+    /// markers by where they are). Nothing that is heard changes.
+    ///
+    /// `before` is the song as it was before the edit, where there was
+    /// one: what is as it was is not looked at again, and of two notes
+    /// that came to have one id, the one that is as it was keeps it. A
+    /// session does this after every edit, and to a song it opens: a file
+    /// from before there were ids opens, and has them from then on.
+    pub fn settle(&mut self, before: Option<&Project>) {
+        let mut next = self.next_id;
+        for (index, track) in self.tracks.iter_mut().enumerate() {
+            let was = before.and_then(|before| {
+                let there = before.tracks.get(index).filter(|was| was.id == track.id);
+                there.or_else(|| before.tracks.iter().find(|was| was.id == track.id))
+            });
+            let was_clips: &[Clip] = was.map_or(&[], |was| &was.clips);
+            for (place, clip) in track.clips.iter_mut().enumerate() {
+                let there = was_clips.get(place).filter(|was| was.id == clip.id);
+                let was = there.or_else(|| was_clips.iter().find(|was| was.id == clip.id));
+                if was.is_some_and(|was| same_clip(was, clip)) {
+                    continue;
+                }
+                if let ClipContent::Midi(midi) = &mut clip.content {
+                    settle_notes(&mut midi.notes, was.map(Clip::notes), &mut next);
+                    for curve in &mut midi.controllers {
+                        settle_points(&mut curve.points, &mut next);
+                    }
+                    midi.controllers.sort_by_key(|curve| (curve.controller, curve.channel));
+                }
+            }
+            sort_clips(&mut track.clips);
+            track.sends.sort_by_key(|send| send.to);
+        }
+        for lane in &mut self.automation {
+            let was = before.and_then(|before| before.automation.iter().find(|was| was.target == lane.target));
+            if !was.is_some_and(|was| same_lane(was, lane)) {
+                settle_points(&mut lane.points, &mut next);
+            }
+        }
+        self.automation.sort_by(|a, b| a.target.cmp(&b.target));
+        let mut seen = std::collections::HashSet::new();
+        for marker in &mut self.markers {
+            if marker.id == 0 || !seen.insert(marker.id) {
+                marker.id = next;
+                next += 1;
+            }
+        }
+        self.markers.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(a.id.cmp(&b.id)));
+        self.next_id = next;
     }
 
     // ---- song settings -------------------------------------------------
@@ -2135,7 +2341,7 @@ impl Project {
             return invalid(format!("marker position {beat} must be >= 0 beats"));
         }
         let index = self.markers.partition_point(|marker| marker.beat <= beat);
-        self.markers.insert(index, Marker { beat, name: name.into() });
+        self.markers.insert(index, Marker { beat, name: name.into(), id: 0 });
         Ok(index)
     }
 
@@ -2151,8 +2357,11 @@ impl Project {
         if !beat.is_finite() || beat < 0.0 {
             return invalid(format!("marker position {beat} must be >= 0 beats"));
         }
+        // It is the marker it was, at another place.
         let marker = self.remove_marker(index)?;
-        self.add_marker(beat, marker.name)
+        let index = self.add_marker(beat, marker.name)?;
+        self.markers[index].id = marker.id;
+        Ok(index)
     }
 
     pub fn rename_marker(&mut self, index: usize, name: impl Into<String>) -> Result<(), EditError> {
@@ -2484,6 +2693,9 @@ impl Project {
         sort_tempo_changes(&mut project.tempo_changes);
         project.meter_changes.retain(|change| change.beat.is_finite() && change.beat > SAME_BEAT);
         project.meter_changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        // (A file from before notes, points and markers had ids gives them
+        // none. Whoever opens the song to change it gives each one:
+        // `Project::settle`, which a session does as it takes a song up.)
         Ok(project)
     }
 }
@@ -2510,11 +2722,12 @@ fn lane_curve(lane: &ControllerLane, length: Beats) -> Option<ControllerCurve> {
     Some(ControllerCurve { controller: lane.kind, channel: lane.channel, points })
 }
 
-fn sort_clips(clips: &mut [Clip]) {
-    clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+/// By start, and two clips that start together by which is which.
+pub(crate) fn sort_clips(clips: &mut [Clip]) {
+    clips.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.id.cmp(&b.id)));
 }
 
-fn validate_span(start: Beats, length: Beats) -> Result<(), EditError> {
+pub(crate) fn validate_span(start: Beats, length: Beats) -> Result<(), EditError> {
     if !start.is_finite() || start < 0.0 {
         return invalid(format!("start {start} must be >= 0 beats"));
     }
@@ -2524,7 +2737,7 @@ fn validate_span(start: Beats, length: Beats) -> Result<(), EditError> {
     Ok(())
 }
 
-fn validate_travel(travel: Travel) -> Result<(), EditError> {
+pub(crate) fn validate_travel(travel: Travel) -> Result<(), EditError> {
     match travel {
         Travel::Fader { knee } | Travel::Gain { knee } if !knee.is_finite() => {
             invalid("the knee of a fader or of a gain must be a number of dB")
@@ -2534,7 +2747,7 @@ fn validate_travel(travel: Travel) -> Result<(), EditError> {
     }
 }
 
-fn validate_volume(volume_db: f32) -> Result<f32, EditError> {
+pub(crate) fn validate_volume(volume_db: f32) -> Result<f32, EditError> {
     if !volume_db.is_finite() || volume_db > MAX_VOLUME_DB {
         return invalid(format!("volume {volume_db} dB is above the {MAX_VOLUME_DB} dB maximum"));
     }
@@ -3315,9 +3528,9 @@ mod tests {
     #[test]
     fn automation_segments_bend_and_hold() {
         let points = [
-            AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Hold },
-            AutomationPoint { beat: 4.0, value: 10.0, shape: Segment::Curve(1.0) },
-            AutomationPoint { beat: 8.0, value: 20.0, shape: Segment::Curve(-1.0) },
+            AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Hold, id: 0 },
+            AutomationPoint { beat: 4.0, value: 10.0, shape: Segment::Curve(1.0), id: 0 },
+            AutomationPoint { beat: 8.0, value: 20.0, shape: Segment::Curve(-1.0), id: 0 },
             AutomationPoint::new(12.0, 30.0),
         ];
         assert_eq!(automation_value(&points, 3.99), 0.0, "hold stays put until the next point");
@@ -3753,7 +3966,7 @@ mod tests {
     }
 
     fn step(beat: Beats, value: f64) -> AutomationPoint {
-        AutomationPoint { beat, value, shape: Segment::Hold }
+        AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
     }
 
     /// What `kind` is worth on `track` at `beat`, as the engine plays it.
@@ -3833,7 +4046,7 @@ mod tests {
         c.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.25), step(2.0, 0.5), point(4.0, 1.0)]).unwrap();
         c.set_controller(
             ControllerKind::PitchBend,
-            vec![AutomationPoint { beat: 1.0, value: -0.5, shape: Segment::Curve(0.5) }],
+            vec![AutomationPoint { beat: 1.0, value: -0.5, shape: Segment::Curve(0.5), id: 0 }],
         )
         .unwrap();
         let saved = project.to_json();

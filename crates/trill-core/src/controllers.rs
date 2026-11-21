@@ -237,7 +237,7 @@ impl ControllerKind {
         }
     }
 
-    fn validate(self) -> Result<(), EditError> {
+    pub(crate) fn validate(self) -> Result<(), EditError> {
         match self {
             Self::Controller(number) if number > MAX_CONTROLLER => Err(EditError::Invalid(format!(
                 "controller {number} is outside 0..={MAX_CONTROLLER} (the numbers above are MIDI's channel messages, \
@@ -554,7 +554,7 @@ pub fn thin(events: &[(Beats, f64)], switch: bool, tolerance: f64, gap: Beats) -
         let mut points: Vec<AutomationPoint> = Vec::new();
         for (beat, value) in samples {
             if points.last().is_none_or(|last| last.value != value) {
-                points.push(AutomationPoint { beat, value, shape: Segment::Hold });
+                points.push(AutomationPoint { beat, value, shape: Segment::Hold, id: 0 });
             }
         }
         return points;
@@ -592,7 +592,7 @@ fn starting_from_rest(kind: ControllerKind, mut points: Vec<AutomationPoint>) ->
         && first.beat > 0.0
         && first.value != rest
     {
-        points.insert(0, AutomationPoint { beat: 0.0, value: rest, shape: Segment::Hold });
+        points.insert(0, AutomationPoint { beat: 0.0, value: rest, shape: Segment::Hold, id: 0 });
     }
     points
 }
@@ -673,7 +673,7 @@ pub fn splice_along(
         result.push(AutomationPoint::new(from, before));
     }
     if piece[0].beat > from {
-        result.push(AutomationPoint { beat: from, value: piece[0].value, shape: Segment::Hold });
+        result.push(AutomationPoint { beat: from, value: piece[0].value, shape: Segment::Hold, id: 0 });
     }
     result.extend_from_slice(piece);
     let Some(to) = to else { return tidied(result) };
@@ -688,7 +688,7 @@ pub fn splice_along(
         }
         _ => Segment::Linear,
     };
-    result.push(AutomationPoint { beat: to, value: envelope_value(base, travel, to), shape });
+    result.push(AutomationPoint { beat: to, value: envelope_value(base, travel, to), shape, id: 0 });
     result.extend(base[next..].iter().copied());
     tidied(result)
 }
@@ -740,7 +740,7 @@ mod tests {
     }
 
     fn held(beat: Beats, value: f64) -> AutomationPoint {
-        AutomationPoint { beat, value, shape: Segment::Hold }
+        AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
     }
 
     #[test]
@@ -1055,7 +1055,7 @@ mod tests {
         assert_eq!((at(1.5), at(2.0), at(3.5), at(4.0), at(9.0)), (0.6, 1.0, 0.5, 0.6, 0.6));
         // A bent segment that the stretch cuts through keeps its course
         // on both sides of it, to the last digit a float can tell.
-        let bent = [AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Curve(0.8) }, point(8.0, 1.0)];
+        let bent = [AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Curve(0.8), id: 0 }, point(8.0, 1.0)];
         let spliced = splice(&bent, 3.0, Some(5.0), &[point(3.0, 0.5), point(4.0, 0.25)]);
         for beat in [0.5, 1.0, 2.0, 2.99, 5.0, 5.5, 6.0, 7.0, 7.99] {
             let (was, is) = (automation_value(&bent, beat), automation_value(&spliced, beat));
