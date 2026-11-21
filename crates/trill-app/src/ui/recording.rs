@@ -7,9 +7,10 @@
 //! and what a take is doing, and adds the manners producers expect:
 //!
 //! * arming a track disarms the others, unless Ctrl is held;
-//! * a track gets an arm control when it has an instrument to play;
+//! * a track gets an arm control when it has an instrument to play or
+//!   records an input of the audio device;
 //! * asked to record with nothing armed, the window arms the selected
-//!   track if that can be played, and says why not if it cannot;
+//!   track if that can be recorded, and says why not if it cannot;
 //! * while a take is written, the Clip tab shows its clip, so the notes
 //!   and the wheels and pedals moved are seen going down as they are
 //!   played;
@@ -50,10 +51,17 @@ pub fn has_instrument(cx: &Cx, track: &Track) -> bool {
     })
 }
 
-/// Whether `track` gets an arm control: it holds clips and has an
-/// instrument, or it is armed already and must be able to be disarmed.
+/// Whether there is something to record on `track`: it holds clips, and
+/// has an instrument for a keyboard to play or an input to record.
+pub fn records(cx: &Cx, track: &Track) -> bool {
+    let input = track.input.is_some() && super::inputs::can_record(track);
+    track.kind == TrackKind::Normal && (input || has_instrument(cx, track))
+}
+
+/// Whether `track` gets an arm control: there is something to record on
+/// it, or it is armed already and must be able to be disarmed.
 pub fn armable(cx: &Cx, track: &Track) -> bool {
-    cx.live.armed.contains(&track.id) || (track.kind == TrackKind::Normal && has_instrument(cx, track))
+    cx.live.armed.contains(&track.id) || records(cx, track)
 }
 
 /// The arm control of `track` was clicked. Arming it disarms the others,
@@ -81,12 +89,23 @@ pub fn arm_chip(ui: &Ui, cx: &mut Cx, track: &Track, rect: Rect, id: Id, quiet: 
     let recording = cx.live.take.as_ref().is_some_and(|take| take.tracks.contains(&track.id));
     let chip = Chip::new("", armed).glyph(Icon::Record).accent(theme.signal).quiet(quiet).named(name);
     let response = trill_noir::chip(ui, theme, rect, id, &chip);
-    let about = match (armed, recording) {
-        (_, true) => "This track is being recorded",
-        (true, false) => "Armed: keyboards play this track and Record records it \u{00B7} click to disarm",
-        (false, false) => {
-            "Arm: keyboards play this track and Record records it \u{00B7} Ctrl-click keeps the others armed"
+    let about = match (armed, recording, track.input) {
+        (_, true, _) => "This track is being recorded".to_owned(),
+        (true, false, None) => {
+            "Armed: keyboards play this track and Record records it \u{00B7} click to disarm".to_owned()
         }
+        (false, false, None) => {
+            "Arm: keyboards play this track and Record records it \u{00B7} Ctrl-click keeps the others armed".to_owned()
+        }
+        // A track that records an input opens it when armed: that is said
+        // before the click, and the status bar says so for as long as it is.
+        (true, false, Some(input)) => {
+            format!("Armed: Record records {} here \u{00B7} click to disarm, which closes the input", input.said())
+        }
+        (false, false, Some(input)) => format!(
+            "Arm: opens the audio input, and Record records {} here \u{00B7} Ctrl-click keeps the others armed",
+            input.said()
+        ),
     };
     cx.hint(&response, about);
     if response.clicked() {
@@ -111,9 +130,13 @@ fn why_not(cx: &Cx) -> String {
                 track.name
             )
         }
+        Some(track) if track.reference.is_some() => {
+            format!("{} is a reference, beside the song. Select or arm a track of the song to record.", track.name)
+        }
         Some(track) => {
             format!(
-                "{} has no instrument, so there is nothing to record. Select or arm a track that has one.",
+                "{} has no instrument and records no input, so there is nothing to record. Right-click it and choose \
+                 an input under Records, or select a track that has an instrument.",
                 track.name
             )
         }
@@ -128,7 +151,7 @@ pub fn toggle(cx: &mut Cx) {
         return stop(cx);
     }
     let selected = cx.state.selected_track.and_then(|id| cx.snap.track(id));
-    let stand_in = selected.filter(|track| track.kind == TrackKind::Normal && has_instrument(cx, track)).map(|t| t.id);
+    let stand_in = selected.filter(|track| records(cx, track)).map(|track| track.id);
     let mut refused = false;
     let started = cx.try_session(|session| {
         if session.is_recording() {
@@ -162,6 +185,58 @@ pub fn set_count_in(cx: &mut Cx, bars: u32) {
     cx.with_session(|session| session.set_count_in(bars));
 }
 
+/// Switches punching in on or off: with it on, a take records only while
+/// the song is inside the loop's stretch, and the song plays through. It
+/// belongs to the session, not the song.
+pub fn toggle_punch(cx: &mut Cx) {
+    let on = !cx.live.input.punch;
+    cx.with_session(|session| session.set_punch(on));
+}
+
+/// What the punch switch does, as the pointer is told over it.
+pub fn punch_words(on: bool, project: &trill_core::Project) -> String {
+    let region = project.loop_region;
+    let meter = project.meter_map();
+    match on {
+        true => format!(
+            "Punched in: a take records only from {} to {}, the stretch the loop marks, and the song plays through",
+            meter.said(region.start),
+            meter.said(region.end)
+        ),
+        false => "Punch in: record only inside the stretch the loop marks on the ruler, while the song plays through"
+            .to_owned(),
+    }
+}
+
+/// Arms the selected track, or disarms it, as a click on its arm control
+/// does; says why not where there is nothing to record on it.
+pub fn arm_selected(cx: &mut Cx) {
+    let selected = cx.state.selected_track.and_then(|id| cx.snap.track(id));
+    match selected.filter(|track| armable(cx, track)).map(|track| track.id) {
+        Some(track) => arm_clicked(cx, track, false),
+        None => {
+            let reason = why_not(cx);
+            cx.state.toasts.info(reason);
+        }
+    }
+}
+
+/// How long the take's audio is so far, in words; empty for a take that
+/// records no input.
+fn audio_so_far(cx: &Cx) -> String {
+    let longest = cx.live.input.growing.iter().filter(|grown| grown.start_beat.is_some()).map(|grown| {
+        let frames = (grown.columns.len() * trill_engine::COLUMN_FRAMES) as f64 - grown.first_frame as f64;
+        (frames / grown.sample_rate.max(1.0)).max(0.0)
+    });
+    match longest.reduce(f64::max) {
+        Some(seconds) if seconds >= 60.0 => {
+            format!("{}:{:02} recorded", (seconds / 60.0) as u32, (seconds % 60.0) as u32)
+        }
+        Some(seconds) => format!("{seconds:.0} s recorded"),
+        None => String::new(),
+    }
+}
+
 /// What a take is doing, in the two words the transport has room for.
 pub fn state_label(take: &RecordStatus, looping: bool) -> String {
     match take.state {
@@ -190,12 +265,21 @@ pub fn describe(cx: &Cx, take: &RecordStatus) -> String {
                 1 => "1 note".to_owned(),
                 notes => format!("{notes} notes"),
             };
-            let pass = if cx.snap.project.loop_region.enabled {
+            // What a take of an input has is time, not notes.
+            let audio = audio_so_far(cx);
+            let so_far = match (audio.is_empty(), take.notes) {
+                (true, _) => format!("{notes} so far"),
+                (false, 0) => audio,
+                (false, _) => format!("{audio}, {notes}"),
+            };
+            let pass = if cx.live.input.punch {
+                " \u{00B7} punched in over the loop\u{2019}s stretch".to_owned()
+            } else if cx.snap.project.loop_region.enabled {
                 format!(" \u{00B7} pass {} of the loop", take.pass + 1)
             } else {
                 String::new()
             };
-            format!("Recording{on}{pass} \u{00B7} {notes} so far \u{00B7} {stop} or Stop ends the take")
+            format!("Recording{on}{pass} \u{00B7} {so_far} \u{00B7} {stop} or Stop ends the take")
         }
     }
 }
@@ -217,11 +301,14 @@ pub fn take_writes(state: &mut UiState, snapshot: &Snapshot, clips: &[TakeClip])
 
 /// A take has ended: what it wrote is selected, so that the Clip tab shows
 /// it and the next key press acts on it. A take in which nothing was
-/// played wrote nothing, and says so.
-pub fn take_ended(state: &mut UiState, snapshot: &Snapshot, clips: &[TakeClip]) {
+/// played wrote nothing, and says so; one that recorded an input
+/// (`recorded_audio`) has that to show for itself.
+pub fn take_ended(state: &mut UiState, snapshot: &Snapshot, clips: &[TakeClip], recorded_audio: bool) {
     let written: Vec<&TakeClip> = clips.iter().filter(|clip| snapshot.clip(clip.clip).is_some()).collect();
     let Some(last) = written.last() else {
-        state.toasts.info("Nothing was played during the take, so nothing was recorded");
+        if !recorded_audio {
+            state.toasts.info("Nothing was played during the take, so nothing was recorded");
+        }
         return;
     };
     state.select_track(last.track);

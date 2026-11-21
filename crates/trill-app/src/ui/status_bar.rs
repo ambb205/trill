@@ -12,7 +12,7 @@ use super::shortcuts::{self, Command};
 use super::state::{AudioSummary, Cx};
 use eframe::egui::{self, Align2, Color32, Painter, Rect, Sense, Ui, pos2};
 use trill_core::device::{BUILTIN_SCHEME, split_uri};
-use trill_noir::{TextStyle, paint, text};
+use trill_noir::{TextStyle, fade, paint, text};
 
 pub const HEIGHT: f32 = 22.0;
 const EDGE: f32 = 10.0;
@@ -45,6 +45,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         row.readout(label, &value);
     }
     let audio_items = Rect::from_min_max(pos2(bar.left(), bar.top()), pos2(row.x - GAP + 6.0, bar.bottom()));
+    // An input that is open hears the room: said for as long as it is,
+    // whatever else the bar has to say.
+    let live_item = row.live(ui);
     let plugins = plugin_count(row.cx);
     match (row.cx.catalog_ready, plugins) {
         (false, _) => row.status(theme.ink_faint, "Scanning plugins\u{2026}"),
@@ -91,6 +94,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     cx.hint(&response, about);
     if response.clicked() {
         audio_settings::open(cx);
+    }
+    if let Some(response) = live_item {
+        let about = super::inputs::live_hint(cx);
+        cx.hint(&response, about);
+        if response.clicked() {
+            audio_settings::open_on_input(cx);
+        }
     }
     if let Some(response) = short_item {
         cx.hint(
@@ -147,6 +157,24 @@ impl Row<'_, '_> {
         // A long device name gives way before it pushes the rest out.
         let room = self.rest().with_max_x(self.x + 300.0);
         self.x += text::paint(self.painter, room, Align2::LEFT_CENTER, style, value, theme.ink_dim) + GAP;
+    }
+
+    /// That the audio input is open, in the signal color: a button that
+    /// opens the audio settings. `None` while it is closed.
+    fn live(&mut self, ui: &Ui) -> Option<egui::Response> {
+        let words = super::inputs::live_words(self.cx)?;
+        let theme = self.cx.theme;
+        let start = self.x;
+        self.x = paint::dot(self.painter, pos2(self.x, self.bar.center().y), theme.metric.dot, theme.signal) + 5.0;
+        self.x += text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, &words, theme.signal);
+        let rect = Rect::from_min_max(pos2(start - 4.0, self.bar.top()), pos2(self.x + 4.0, self.bar.bottom()));
+        self.x += GAP;
+        let response = ui.interact(rect, ui.scope_id().with("input-live"), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &words));
+        if response.hovered() {
+            self.painter.rect_filled(rect, 0.0, fade(theme.signal, 0.12));
+        }
+        Some(response)
     }
 
     /// That the song is more than the machine plays in time, in the signal
@@ -214,6 +242,11 @@ fn problems(cx: &Cx) -> Vec<String> {
     let mut problems = Vec::new();
     if let Some(warning) = &cx.audio.info.warning {
         problems.push(warning.clone());
+    }
+    // An input that something needs and that is not there, or not as it
+    // was asked for.
+    if let Some(problem) = &cx.live.input.problem {
+        problems.push(problem.clone());
     }
     // A file that is not on disk is said by the item beside this one,
     // once for the song, and not here again for each clip that names it.

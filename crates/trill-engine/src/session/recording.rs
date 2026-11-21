@@ -60,6 +60,9 @@ const TRY_AGAIN: Duration = Duration::from_secs(3);
 const HANDLE_SECONDS: f64 = 0.05;
 /// The shortest stretch that is worth a take, in beats.
 const SHORTEST_TAKE: f64 = 1.0 / 64.0;
+/// The shortest beginning of another pass of the loop that is a take, in
+/// beats, where the song was stopped in it.
+const SHORTEST_PASS: f64 = 1.0;
 /// The folder beside a song that holds what was recorded for it.
 const TAKES_FOLDER: &str = "takes";
 
@@ -1197,6 +1200,12 @@ fn passes(audio: &AudioTake, rolled: Rolled, stopped: (u64, f64)) -> Vec<Pass> {
         passes.push(pass);
     }
     passes.retain(|pass| pass.end - pass.start >= SHORTEST_TAKE);
+    // A song that went round and was stopped just after it came round
+    // again has the beginning of a pass nobody meant to sing: under a
+    // beat of it is no take. It is in the file all the same.
+    if passes.len() > 1 && passes.last().is_some_and(|last| !last.whole && last.end - last.start < SHORTEST_PASS) {
+        passes.pop();
+    }
     passes
 }
 

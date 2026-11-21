@@ -467,8 +467,170 @@ pub struct Live {
     pub reading: HashMap<DeviceId, trill_core::Reading>,
     /// Bars of count-in before a take that starts from a stopped song.
     pub count_in: u32,
+    /// The audio device's input: whether it is open, what is arriving,
+    /// and the takes that are growing.
+    pub input: InputLive,
     pub master: MeterState,
     tracks: HashMap<TrackId, MeterState>,
+}
+
+/// A take's recording while it is written, as the arrangement draws it:
+/// what the writer has seen of it, a column of its lowest and highest
+/// sample for every [`trill_engine::COLUMN_FRAMES`] frames. Nothing reads
+/// the file that is being written.
+#[derive(Clone)]
+pub struct Grown {
+    pub track: TrackId,
+    /// The file it is written to, for telling one take's from the next.
+    pub path: PathBuf,
+    /// Where in the song the pass that is being recorded began, once the
+    /// song rolls, and the frame of the file that was sung to it.
+    pub start_beat: Option<f64>,
+    pub first_frame: u64,
+    pub sample_rate: f64,
+    pub columns: Vec<[f32; 2]>,
+    /// Why nothing more is written to it, if writing has stopped.
+    pub failed: Option<String>,
+}
+
+impl Default for Grown {
+    fn default() -> Self {
+        Self {
+            track: TrackId(0),
+            path: PathBuf::new(),
+            start_beat: None,
+            first_frame: 0,
+            sample_rate: 48_000.0,
+            columns: Vec::new(),
+            failed: None,
+        }
+    }
+}
+
+/// What the window shows of the audio device's input. A microphone that
+/// is open is live, whether or not anything is done with what it hears,
+/// so `open` is shown wherever the window is looked at.
+#[derive(Default)]
+pub struct InputLive {
+    pub open: Option<trill_engine::InputInfo>,
+    /// Whether anything needs the input: an armed or monitored track, a
+    /// measurement, a panel that shows its level.
+    pub needed: bool,
+    /// Why it is not open although something needs it, or what is wrong
+    /// with it as it is.
+    pub problem: Option<String>,
+    /// The level of each channel, and whether it reached full scale.
+    channels: Vec<MeterState>,
+    /// How long sound takes to go round, while the input is open.
+    pub latency: Option<trill_engine::RecordingLatency>,
+    pub measurement: Option<trill_engine::Measurement>,
+    /// Whether a take records only inside the loop's stretch.
+    pub punch: bool,
+    /// The take that is heard in place of what its track plays.
+    pub heard_take: Option<ClipId>,
+    pub growing: Vec<Grown>,
+}
+
+impl InputLive {
+    /// The level of what a track records: its channel, or its pair.
+    pub fn meter(&self, input: trill_core::TrackInput) -> MeterState {
+        let (left, right) = input.channels();
+        let of = |channel: usize| self.channels.get(channel).copied().unwrap_or_default();
+        let (one, other) = (of(left), of(right.unwrap_or(left)));
+        MeterState {
+            left_db: one.left_db,
+            right_db: other.left_db,
+            peak_db: one.peak_db.max(other.peak_db),
+            clipped: one.clipped || other.clipped,
+            ..MeterState::default()
+        }
+    }
+
+    /// The level of channel `index`, counted from 0.
+    pub fn channel(&self, index: usize) -> MeterState {
+        self.channels.get(index).copied().unwrap_or_default()
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// Puts the lamps out: they stay lit until somebody has seen them.
+    pub fn clear_lamps(&mut self) {
+        for channel in &mut self.channels {
+            channel.clipped = false;
+        }
+    }
+
+    /// Reads the input as the session has it, and feeds the meters what
+    /// has arrived since the last look.
+    pub fn update(&mut self, session: &mut Session, dt: f32) {
+        let status = session.input_status();
+        (self.open, self.needed, self.problem) = (status.open, status.needed, status.problem);
+        self.latency = session.recording_latency();
+        self.measurement = Some(session.measurement());
+        self.punch = session.punch();
+        self.heard_take = session.heard_take();
+        let levels = if self.open.is_some() { session.input_levels() } else { Vec::new() };
+        self.feed(&levels, dt);
+        self.grow(session.growing_takes());
+    }
+
+    /// Feeds the meters the highest level each channel had (1 is full
+    /// scale) and whether it was at full scale. No levels at all is an
+    /// input that is closed: its meters go, lamps and all.
+    pub fn feed(&mut self, levels: &[(f32, bool)], dt: f32) {
+        if levels.is_empty() && self.open.is_none() {
+            self.channels.clear();
+            return;
+        }
+        if !levels.is_empty() {
+            self.channels.resize(levels.len(), MeterState::default());
+        }
+        for (index, meter) in self.channels.iter_mut().enumerate() {
+            let (level, clipped) = levels.get(index).copied().unwrap_or((0.0, false));
+            meter.feed(level, level, dt);
+            // A recording clips at full scale, not above it.
+            meter.clipped |= clipped;
+        }
+    }
+
+    /// Shows `levels` as what is arriving, whatever is: a made-up scene's,
+    /// which is the same on every frame.
+    pub fn show(&mut self, levels: &[(f32, bool)]) {
+        self.channels.resize(levels.len(), MeterState::default());
+        for (meter, (level, clipped)) in self.channels.iter_mut().zip(levels) {
+            *meter = MeterState::default();
+            meter.feed(*level, *level, 0.0);
+            meter.clipped = *clipped;
+        }
+    }
+
+    /// Takes in what the writer has seen of the takes being recorded:
+    /// only the columns that are new since the last look.
+    fn grow(&mut self, takes: Vec<trill_engine::GrowingTake>) {
+        self.growing.retain(|grown| takes.iter().any(|take| take.file.path() == grown.path));
+        for take in takes {
+            let path = take.file.path();
+            let index = match self.growing.iter().position(|grown| grown.path == path) {
+                Some(index) => index,
+                None => {
+                    self.growing.push(Grown { track: take.track, path: path.to_path_buf(), ..Grown::default() });
+                    self.growing.len() - 1
+                }
+            };
+            let grown = &mut self.growing[index];
+            (grown.start_beat, grown.first_frame) = (take.start_beat, take.first_frame);
+            grown.sample_rate = take.file.sample_rate();
+            grown.columns.extend(take.file.columns(grown.columns.len()));
+            grown.failed = take.file.failed();
+        }
+    }
+
+    /// True while a meter of the input still shows something.
+    pub fn is_moving(&self) -> bool {
+        self.channels.iter().any(MeterState::is_moving)
+    }
 }
 
 impl Live {
@@ -541,7 +703,7 @@ impl Live {
 
     /// True while any meter still shows something.
     pub fn meters_moving(&self) -> bool {
-        self.master.is_moving() || self.tracks.values().any(MeterState::is_moving)
+        self.master.is_moving() || self.tracks.values().any(MeterState::is_moving) || self.input.is_moving()
     }
 }
 

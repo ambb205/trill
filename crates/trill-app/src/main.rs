@@ -31,9 +31,15 @@ fn main() -> anyhow::Result<()> {
     // shared by the window and the MCP server. It lives until the window
     // closes; dropping it saves the settings.
     // A scene puts made-up audio and MIDI devices in the hardware's place.
-    let started = match cli.audio_scene {
-        Some(scene) => Runtime::start_custom(cli.runtime_options(), scene.parts()),
-        None => Runtime::start(cli.runtime_options()),
+    let recording = cli.recording.map(ui::RecordingScene::open);
+    let (recording_parts, staging) = match recording {
+        Some((parts, staging)) => (Some(parts), Some(staging)),
+        None => (None, None),
+    };
+    let started = match (recording_parts, cli.audio_scene) {
+        (Some(parts), _) => Runtime::start_custom(cli.runtime_options(), parts),
+        (None, Some(scene)) => Runtime::start_custom(cli.runtime_options(), scene.parts()),
+        (None, None) => Runtime::start(cli.runtime_options()),
     };
     let runtime = Arc::new(started.context("could not start Trill")?);
     runtime.do_jobs_as_usual();
@@ -70,6 +76,11 @@ fn main() -> anyhow::Result<()> {
     }
     if cli.making_of_scene {
         ui::play_making_of_scene(&mut session.lock());
+    }
+    // A made-up session of recording is played out on the song that is
+    // open: its track, its takes and what was made of them.
+    if let Some(staging) = &staging {
+        staging.play(&runtime);
     }
     if let Some(clip) = cli.clip_to_select(session.lock().project())? {
         options.select_clip = Some(clip);

@@ -763,7 +763,10 @@ fn a_songs_recordings_come_beside_it_when_it_is_saved_and_the_unused_ones_can_be
         rig.session.stop();
         rig.session.last_recording().unwrap().takes[0].file.clone()
     };
-    let unsaved = folder.path().join("unsaved");
+    // A folder of this song's own, in the one the program keeps for
+    // songs that have no place yet.
+    let unsaved = rig.session.recordings_folder();
+    assert!(unsaved.starts_with(folder.path().join("unsaved")) && unsaved != folder.path().join("unsaved"));
     let first = record(&mut rig, 48_000.0);
     assert_eq!(first, unsaved.join("Lead Vox.wav"), "an unsaved song's takes are in the program's own folder");
     assert_eq!(rig.session.recordings_folder(), unsaved);
@@ -828,10 +831,10 @@ fn a_songs_recordings_come_beside_it_when_it_is_saved_and_the_unused_ones_can_be
     assert_eq!(unused.len(), 1, "{unused:?}");
     assert_eq!(unused[0].0, third);
     assert!(unused[0].1 > 24_000 * 4, "its size in bytes: {}", unused[0].1);
-    let refusal = rig.session.delete_unused_recordings(&[new_first.clone()]).unwrap_err().to_string();
+    let refusal = rig.session.delete_unused_recordings(std::slice::from_ref(&new_first)).unwrap_err().to_string();
     assert!(refusal.contains("nothing was deleted") && refusal.contains("Lead Vox 3.wav"), "{refusal}");
     assert!(new_first.is_file());
-    assert_eq!(rig.session.delete_unused_recordings(&[third.clone()]).unwrap(), unused[0].1);
+    assert_eq!(rig.session.delete_unused_recordings(std::slice::from_ref(&third)).unwrap(), unused[0].1);
     assert!(!third.exists() && rig.session.unused_recordings().is_empty());
 }
 

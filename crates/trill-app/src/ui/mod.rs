@@ -66,6 +66,7 @@ mod dragging;
 mod editors;
 mod files;
 mod filming;
+mod inputs;
 mod instrument_panel;
 mod keyboard;
 mod load;
@@ -75,6 +76,7 @@ mod mixer;
 mod opening;
 mod piano_roll;
 mod recording;
+mod recording_scene;
 mod recovery;
 mod response;
 mod sample_panels;
@@ -106,6 +108,7 @@ pub use load::LoadScene;
 pub use making_of::Start as MakingOfStart;
 pub use making_of::scene::play as play_making_of_scene;
 pub use opening::OpeningScene;
+pub use recording_scene::RecordingScene;
 pub use setup_scene::SetupScene;
 pub use state::{BrowserTab, DetailTab};
 pub use study::{Shown as StudyShown, Side as StudySide, Whole as StudyWhole};
@@ -202,6 +205,9 @@ pub struct UiOptions {
     /// Show a song in the middle of being opened, made up: for a picture
     /// or a test.
     pub opening_scene: Option<OpeningScene>,
+    /// Show a made-up session of recording as one: its takes unfolded,
+    /// its input's level as the scene has it. For a picture or a test.
+    pub recording_scene: Option<RecordingScene>,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
     /// Open on the stage.
@@ -248,6 +254,7 @@ impl Default for UiOptions {
             show_load: false,
             load_scene: None,
             opening_scene: None,
+            recording_scene: None,
             record: false,
             stage: false,
             making_of: None,

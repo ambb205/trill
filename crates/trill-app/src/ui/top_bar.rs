@@ -38,11 +38,22 @@ const SIGNATURE_WIDTH: f32 = 52.0;
 const COUNT_WIDTH: f32 = 66.0;
 /// The song position without its clock, as the narrowest windows show it.
 const POSITION_COMPACT: f32 = 76.0;
-const TRANSPORT_WIDTH: f32 =
-    6.0 * BUTTON_WIDTH + COUNT_WIDTH + 4.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
-/// What the narrowest windows leave out of the transport: the clock, and
-/// the button that opens the stage (its key and the View menu still do).
-const TRANSPORT_GIVES_UP: f32 = (POSITION_WIDTH - POSITION_COMPACT) + BUTTON_WIDTH + 4.0;
+/// The switch that has a take record only inside the loop's stretch.
+const PUNCH_WIDTH: f32 = 46.0;
+const TRANSPORT_WIDTH: f32 = 6.0 * BUTTON_WIDTH
+    + COUNT_WIDTH
+    + PUNCH_WIDTH
+    + 5.0 * 4.0
+    + 10.0
+    + POSITION_WIDTH
+    + 6.0
+    + TEMPO_WIDTH
+    + 6.0
+    + SIGNATURE_WIDTH;
+/// What the narrowest windows leave out of the transport: the clock, the
+/// button that opens the stage (its key and the View menu still do) and
+/// the punch switch (its key still does, and a take says when it is on).
+const TRANSPORT_GIVES_UP: f32 = (POSITION_WIDTH - POSITION_COMPACT) + BUTTON_WIDTH + 4.0 + PUNCH_WIDTH + 4.0;
 const TRANSPORT_COMPACT: f32 = TRANSPORT_WIDTH - TRANSPORT_GIVES_UP;
 const CPU_METER_WIDTH: f32 = 54.0;
 
@@ -180,6 +191,11 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     // and whom Trill names for the ones it offers.
     if MenuItem::new("Credits\u{2026}").show(ui, theme).clicked() {
         credits::open(cx);
+    }
+    // The recordings nothing in the song plays any more: listed with
+    // their sizes, and deleted only when that is asked for twice.
+    if MenuItem::new("Unused recordings\u{2026}").show(ui, theme).clicked() {
+        super::inputs::open_unused(cx);
     }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Save", Command::Save, true) {
@@ -465,6 +481,20 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
     let rect = boxed(bar, rect.right() - 1.0, COUNT_WIDTH + 1.0);
     count_in(ui, cx, rect, id.with("count-in"));
     x = rect.right() + 4.0;
+
+    // Punch: a take records only inside the loop's stretch.
+    if !compact {
+        let punch = cx.live.input.punch;
+        let rect = boxed(bar, x, PUNCH_WIDTH);
+        x = rect.right() + 4.0;
+        let chip = Chip::new("Punch", punch).accent(theme.signal).named("Punch in");
+        let response = trill_noir::chip(ui, theme, rect, id.with("punch"), &chip);
+        let about = recording::punch_words(punch, &cx.snap.project);
+        cx.hint(&response, shortcuts::with_keys(&about, Command::TogglePunch, cx.keyboard.is_on()));
+        if response.clicked() {
+            recording::toggle_punch(cx);
+        }
+    }
 
     let looping = cx.snap.project.loop_region.enabled;
     let color = if looping { theme.ink } else { theme.ink_dim };
@@ -827,8 +857,12 @@ mod tests {
         assert_eq!(transport_width(full + 200.0), (TRANSPORT_WIDTH, false));
         assert_eq!(transport_width(full), (TRANSPORT_WIDTH, false), "an exact fit is a fit");
         assert_eq!(transport_width(full - 1.0), (TRANSPORT_COMPACT, true));
-        let given_up = (POSITION_WIDTH - POSITION_COMPACT) + BUTTON_WIDTH + 4.0;
-        assert_eq!(TRANSPORT_WIDTH - TRANSPORT_COMPACT, given_up, "the clock and the stage's button are what go");
+        let given_up = (POSITION_WIDTH - POSITION_COMPACT) + BUTTON_WIDTH + 4.0 + PUNCH_WIDTH + 4.0;
+        assert_eq!(
+            TRANSPORT_WIDTH - TRANSPORT_COMPACT,
+            given_up,
+            "the clock, the stage's button and the punch switch are what go"
+        );
         // The smallest window with everything in the bar that can be: the
         // name cut to a few letters, the dot of unsaved work, the MCP chip.
         // Wordmark and menus take about 290 points and the right about

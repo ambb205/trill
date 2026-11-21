@@ -1612,7 +1612,8 @@ fn hear_input(track: &mut TrackNode, common: &Common, room: &mut Room) {
     let Room { left, right, shares, .. } = room;
     let (left, right, shares) = (&mut left[..frames], &mut right[..frames], &mut shares[..frames]);
     match track.state.under.fill(!common.over.contains(track.id), common.declick, shares) {
-        Some(share) if share == 1.0 => {}
+        // Wide open: what the track has under the take is as it was.
+        Some(share) if share >= 1.0 => {}
         Some(share) => {
             scale(left, share);
             scale(right, share);
@@ -1632,7 +1633,8 @@ fn hear_input(track: &mut TrackNode, common: &Common, room: &mut Room) {
     // One channel alone is in the middle; a pair is left and right.
     let other = tap.right.map_or(Some(one), from).unwrap_or(&one[..0]);
     match share {
-        Some(share) if share == 0.0 => {}
+        // Shut: nothing of the input is heard.
+        Some(share) if share <= 0.0 => {}
         Some(share) => {
             add_scaled(&one[..frames], left, share);
             add_scaled(&other[..frames.min(other.len())], right, share);
