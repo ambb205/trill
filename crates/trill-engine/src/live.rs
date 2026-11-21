@@ -178,14 +178,24 @@ pub(crate) enum AudioMark {
         latency: u32,
         delay: u32,
     },
-    /// The loop came round: `pass` is the pass now beginning.
-    Wrapped {
-        pass: u32,
+    /// The song is no longer where the frames handed over lead to: it was
+    /// at `from` and is at `to`. It came round its loop (`round`), or was
+    /// sent there. What is handed over from here on was sung to another
+    /// place of the song.
+    Jumped {
+        from: f64,
+        to: f64,
+        round: bool,
     },
-    /// The song came into, or left, the stretch the take is punched in
-    /// over.
-    PunchedIn,
-    PunchedOut,
+    /// The song, at `beat`, came into the stretch the take is punched in
+    /// over; and left it. Each time it does: a song that is sent back
+    /// into the stretch comes into it again.
+    PunchedIn {
+        beat: f64,
+    },
+    PunchedOut {
+        beat: f64,
+    },
     /// The song stopped at `beat`, or the take was ended there.
     Stopped {
         beat: f64,

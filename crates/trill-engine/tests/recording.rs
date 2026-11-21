@@ -407,8 +407,9 @@ fn every_pass_of_a_loop_is_a_take_that_begins_on_the_loops_first_frame_through_a
         .iter()
         .map(|take| (take.start_beat, (take.length_beats * 100.0).round() / 100.0, take.chosen))
         .collect();
-    // 60,000 frames at 120 are two and a half beats.
-    assert_eq!(said, [(6.0, 10.0, false), (8.0, 8.0, false), (8.0, 8.0, true), (8.0, 2.5, false)]);
+    // 60,000 frames at 120 are two and a half beats. The track plays the
+    // last whole pass, and of the first what was sung before the loop.
+    assert_eq!(said, [(6.0, 10.0, true), (8.0, 8.0, false), (8.0, 8.0, true), (8.0, 2.5, false)]);
     let track = rig.session.project().track(voice).unwrap().clone();
     assert_eq!(track.takes.iter().map(|take| take.lane).collect::<Vec<_>>(), [0, 1, 2, 3], "each in a lane of its own");
     assert_eq!(
@@ -1226,4 +1227,225 @@ fn recording_eight_inputs_and_hearing_them_costs_a_small_share_of_a_buffer_of_12
         without * 100.0
     );
     assert!(cost < 0.08, "eight inputs take {:.1} % of a buffer's time", cost * 100.0);
+}
+
+// ---- nothing that was recorded lands nowhere -----------------------------------
+
+/// A rig with a track that records, armed, whose input hears bumps; the
+/// song counts nothing in unless a test says so.
+fn rolling_rig() -> (Rig, TrackId, Bumps, tempfile::TempDir) {
+    let (mut rig, folder) = rig_on(studio(microphone()), AudioConfig::default());
+    let bumps = Bumps::default();
+    rig.host.hear(bumps.heard(|_| 0.0));
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    rig.run(40);
+    (rig, voice, bumps, folder)
+}
+
+/// How many frames of the device have gone by while the song rolled, as
+/// the test counts them: the take is asked for now, and the next buffer
+/// is the first that rolls.
+struct Rolled {
+    began: f64,
+}
+
+impl Rolled {
+    fn start(rig: &mut Rig) -> Self {
+        rig.session.record().unwrap();
+        Self { began: rig.now() }
+    }
+
+    /// Stops the take and says how many frames the song rolled for.
+    fn stop(self, rig: &mut Rig) -> f64 {
+        let frames = rig.now() - self.began;
+        rig.session.stop();
+        frames
+    }
+}
+
+/// Every take the last recording left, as (start beat, length in frames,
+/// on the track), and the sum of their lengths in frames: what was sung
+/// while the song rolled, all of which has to be in one of them.
+fn landed(rig: &Rig) -> (Vec<(f64, f64, bool)>, f64) {
+    let recorded = rig.session.last_recording().expect("a recording").clone();
+    assert!(recorded.ended_early.is_none(), "{:?}", recorded.ended_early);
+    let takes: Vec<(f64, f64, bool)> =
+        recorded.takes.iter().map(|take| (take.start_beat, take.seconds * SR, take.chosen)).collect();
+    let sum = takes.iter().map(|take| take.1).sum();
+    (takes, sum)
+}
+
+/// The file of the last recording is in use by the song: it is not among
+/// the recordings that could be removed.
+fn in_use(rig: &Rig) {
+    let recorded = rig.session.last_recording().unwrap();
+    assert!(!recorded.takes.is_empty(), "nothing landed");
+    let unused = rig.session.unused_recordings();
+    assert!(unused.is_empty(), "a recording whose take is in the song is offered for removal: {unused:?}");
+}
+
+#[test]
+fn a_take_sung_past_a_loop_that_is_on_lands_where_it_was_sung() {
+    // The loop is on over the first two bars, and the song stands at bar
+    // five: it never comes round, and a take sung there is a take there.
+    let (mut rig, voice, bumps, _folder) = rolling_rig();
+    rig.session.edit(|project| project.set_loop(true, 0.0, 8.0)).unwrap();
+    rig.session.seek(16.0);
+    rig.run(4);
+    let began = rig.now() + LATENCY;
+    bumps.at((began + 30_000.0) / SR);
+    let rolled = Rolled::start(&mut rig);
+    rig.run_until(rig.now() + 3.0 * SR);
+    let frames = rolled.stop(&mut rig);
+
+    let (takes, sum) = landed(&rig);
+    assert_eq!(takes.len(), 1, "{takes:?}");
+    assert_eq!((takes[0].0, takes[0].2), (16.0, true), "it lies where the song was, and is on the track");
+    assert!((sum - frames).abs() <= 2.0, "{sum} frames in takes of {frames} sung");
+    let off = off_its_place(&rig.session, voice, 16.0 * FRAMES_PER_BEAT + 30_000.0);
+    assert!(off.abs() <= 1.0, "{off:.3}");
+    in_use(&rig);
+}
+
+#[test]
+fn a_song_that_is_sent_elsewhere_during_a_take_ends_one_stretch_and_begins_another() {
+    let (mut rig, voice, bumps, _folder) = rolling_rig();
+    // From bar three; a second in, the song is sent back to bar one.
+    rig.session.seek(8.0);
+    rig.run(4);
+    let began = rig.now() + LATENCY;
+    bumps.at((began + 12_000.0) / SR);
+    let rolled = Rolled::start(&mut rig);
+    rig.run_until(rig.now() + SR);
+    rig.session.seek(0.0);
+    let jumped = rig.now() + LATENCY;
+    bumps.at((jumped + 20_000.0) / SR);
+    rig.run_until(rig.now() + SR);
+    // And then on, to bar seven.
+    rig.session.seek(24.0);
+    let again = rig.now() + LATENCY;
+    bumps.at((again + 9_000.0) / SR);
+    rig.run_until(rig.now() + SR);
+    let frames = rolled.stop(&mut rig);
+
+    let (takes, sum) = landed(&rig);
+    let places: Vec<(f64, bool)> = takes.iter().map(|take| (take.0, take.2)).collect();
+    assert_eq!(places, [(8.0, true), (0.0, true), (24.0, true)], "each where it was sung, each on the track");
+    for take in &takes {
+        assert!((take.1 - SR).abs() <= 1.0, "a second each: {takes:?}");
+    }
+    assert!((sum - frames).abs() <= 3.0, "{sum} frames in takes of {frames} sung");
+    // What was sung to each stretch is in its place there.
+    for (beat, frames_in) in [(8.0, 12_000.0), (0.0, 20_000.0), (24.0, 9_000.0)] {
+        let off = off_its_place(&rig.session, voice, beat * FRAMES_PER_BEAT + frames_in);
+        assert!(off.abs() <= 1.0, "the stretch at beat {beat}: {off:.3}");
+    }
+    assert_eq!(rig.session.project().track(voice).unwrap().takes.len(), 3);
+    in_use(&rig);
+
+    // Sent back and stopped before where the take began: both are there.
+    rig.session.seek(8.0);
+    rig.run(4);
+    let rolled = Rolled::start(&mut rig);
+    rig.run_until(rig.now() + SR);
+    rig.session.seek(2.0);
+    rig.run_until(rig.now() + 0.5 * SR);
+    let frames = rolled.stop(&mut rig);
+    let (takes, sum) = landed(&rig);
+    assert_eq!(takes.iter().map(|take| take.0).collect::<Vec<_>>(), [8.0, 2.0]);
+    assert!((sum - frames).abs() <= 2.0, "{sum} frames in takes of {frames} sung");
+    in_use(&rig);
+}
+
+#[test]
+fn a_loop_that_is_switched_off_during_a_take_lets_the_take_go_on_past_its_end() {
+    let (mut rig, voice, bumps, _folder) = rolling_rig();
+    rig.session.edit(|project| project.set_loop(true, 0.0, 4.0)).unwrap();
+    rig.session.seek(0.0);
+    rig.run(4);
+    let rolled = Rolled::start(&mut rig);
+    // Once round, and half a second into the second pass the loop goes off.
+    let pass = 4.0 * FRAMES_PER_BEAT;
+    rig.run_until(rig.now() + pass + 24_000.0);
+    rig.session.edit(|project| project.set_loop(false, 0.0, 4.0)).unwrap();
+    // What is sung a beat past the loop's end is sung there.
+    let second = rig.now() - 24_000.0 + LATENCY;
+    bumps.at((second + 5.0 * FRAMES_PER_BEAT) / SR);
+    rig.run_until(rig.now() - 24_000.0 + 6.0 * FRAMES_PER_BEAT);
+    let frames = rolled.stop(&mut rig);
+
+    let (takes, sum) = landed(&rig);
+    let places: Vec<(f64, f64, bool)> =
+        takes.iter().map(|take| (take.0, (take.1 / FRAMES_PER_BEAT * 100.0).round() / 100.0, take.2)).collect();
+    // One pass of the loop, and one stretch that goes on past its end:
+    // the track plays that one.
+    assert_eq!(places, [(0.0, 4.0, false), (0.0, 6.0, true)], "{takes:?}");
+    assert!((sum - frames).abs() <= 2.0, "{sum} frames in takes of {frames} sung");
+    let off = off_its_place(&rig.session, voice, 5.0 * FRAMES_PER_BEAT);
+    assert!(off.abs() <= 1.0, "{off:.3}");
+    in_use(&rig);
+}
+
+#[test]
+fn all_that_was_sung_is_in_a_take_round_a_loop_punched_in_and_after_a_count_in() {
+    // Round a loop: every pass, and of the last one what was sung of it.
+    let (mut rig, _voice, _bumps, _folder) = rolling_rig();
+    rig.session.edit(|project| project.set_loop(true, 4.0, 8.0)).unwrap();
+    rig.session.seek(4.0);
+    rig.run(4);
+    let rolled = Rolled::start(&mut rig);
+    let until = rig.now() + 2.0 * 4.0 * FRAMES_PER_BEAT + 2.5 * FRAMES_PER_BEAT;
+    run_taking(&mut rig, until);
+    let frames = rolled.stop(&mut rig);
+    let (takes, sum) = landed(&rig);
+    assert_eq!(takes.len(), 3, "{takes:?}");
+    assert!((sum - frames).abs() <= 3.0, "{sum} frames in takes of {frames} sung");
+    in_use(&rig);
+
+    // Punched in over a stretch the song plays through: what was sung
+    // inside it, and nothing else, is the take.
+    rig.session.edit(|project| project.set_loop(true, 2.0, 5.0)).unwrap();
+    rig.session.set_punch(true);
+    rig.session.seek(0.0);
+    rig.run(4);
+    let rolled = Rolled::start(&mut rig);
+    rig.run_until(rig.now() + 7.0 * FRAMES_PER_BEAT);
+    rolled.stop(&mut rig);
+    let (takes, sum) = landed(&rig);
+    assert_eq!(takes.iter().map(|take| take.0).collect::<Vec<_>>(), [2.0]);
+    assert!((sum - 3.0 * FRAMES_PER_BEAT).abs() <= 1.5, "three beats were inside: {sum}");
+    in_use(&rig);
+    // And a song that is sent back into the stretch comes into it again.
+    rig.session.seek(1.0);
+    rig.run(4);
+    let rolled = Rolled::start(&mut rig);
+    rig.run_until(rig.now() + 3.0 * FRAMES_PER_BEAT);
+    rig.session.seek(6.0);
+    rig.run_until(rig.now() + FRAMES_PER_BEAT);
+    rig.session.seek(3.0);
+    rig.run_until(rig.now() + FRAMES_PER_BEAT);
+    rolled.stop(&mut rig);
+    let (takes, sum) = landed(&rig);
+    // In from beat two until the song is sent away at four, and from
+    // three, where it comes back, for a beat.
+    assert_eq!(takes.iter().map(|take| take.0).collect::<Vec<_>>(), [2.0, 3.0], "{takes:?}");
+    assert!((sum - 3.0 * FRAMES_PER_BEAT).abs() <= 2.5, "two beats and one: {sum}");
+    in_use(&rig);
+    rig.session.set_punch(false);
+    rig.session.edit(|project| project.set_loop(false, 2.0, 5.0)).unwrap();
+
+    // After a count-in: the take is what was sung once the song rolled.
+    rig.session.set_count_in(1);
+    rig.session.seek(8.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    let asked = rig.now();
+    // A bar is counted in, two seconds at this tempo; then three seconds.
+    rig.run_until(asked + 2.0 * SR + 3.0 * SR);
+    rig.session.stop();
+    let (takes, sum) = landed(&rig);
+    assert_eq!(takes.len(), 1);
+    assert_eq!(takes[0].0, 8.0);
+    assert!((sum - 3.0 * SR).abs() <= 2.0, "three seconds were sung to the song: {sum}");
+    in_use(&rig);
 }

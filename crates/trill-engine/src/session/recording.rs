@@ -201,10 +201,26 @@ pub struct GrowingTake {
 /// What the audio thread said of a take's audio.
 #[derive(Copy, Clone, Debug)]
 struct Rolled {
-    at: u64,
     beat: f64,
     latency: u32,
     delay: u32,
+}
+
+/// A stretch of a take's audio that was sung to one stretch of the song.
+/// The song goes where it goes while a take is recorded: round its loop
+/// or not, to wherever it is sent, past a loop that was switched off. Each
+/// time it is no longer where the frames lead to, one stretch ends and
+/// another begins; each lands where it was sung.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Stretch {
+    /// The frame handed over as it began.
+    at: u64,
+    start: f64,
+    /// Where the song was when it ended; `None` while it goes on.
+    end: Option<f64>,
+    /// Where the song came round from, and to, if it began by the song
+    /// coming round its loop: how long a whole pass of it is.
+    round: Option<(f64, f64)>,
 }
 
 /// A take's audio between [`Session::record`] and its end.
@@ -217,13 +233,13 @@ pub(super) struct AudioTake {
     /// The tracks that record an input, in the order of their files.
     tracks: Vec<TrackId>,
     rolled: Option<Rolled>,
-    /// Where each later pass of the loop began: the frame handed over.
-    wraps: Vec<u64>,
-    punched: (Option<u64>, Option<u64>),
+    /// The stretches of the song the take was sung to, in the order they
+    /// were sung: as the audio thread said them, and never as a switch
+    /// leads anyone to expect.
+    stretches: Vec<Stretch>,
     stopped: Option<(u64, f64)>,
     ended: bool,
-    /// The loop the take goes round, or the stretch it is punched in over.
-    loop_region: Option<(f64, f64)>,
+    /// The stretch the take is punched in over, if it is.
     punch: Option<(f64, f64)>,
     /// What stands in place of what the output says, where the round trip
     /// was measured, and what was added by hand: in frames, as the take
@@ -658,7 +674,6 @@ impl Session {
         &mut self,
         id: u32,
         tracks: &[TrackId],
-        loop_region: Option<(f64, f64)>,
         punch: Option<(f64, f64)>,
     ) -> Result<(), SessionError> {
         let refuse = |sentence: String| Err(SessionError::Recording(sentence));
@@ -713,11 +728,9 @@ impl Session {
             writer: Some(writer),
             tracks: recorded.iter().map(|(track, ..)| *track).collect(),
             rolled: None,
-            wraps: Vec::new(),
-            punched: (None, None),
+            stretches: Vec::new(),
             stopped: None,
             ended: false,
-            loop_region,
             punch,
             measured,
             adjust,
@@ -740,12 +753,46 @@ impl Session {
     /// stands.
     pub(super) fn audio_mark(&mut self, at: u64, mark: AudioMark) {
         let Some(audio) = self.recording.take.as_mut().filter(|audio| audio.begun && !audio.ended) else { return };
+        let rate = self.engine.sample_rate();
+        // What the song did after the take was stopped is not the take's.
+        if audio.stopped.is_some() && !matches!(mark, AudioMark::Ended) {
+            return;
+        }
         match mark {
-            AudioMark::Rolling { beat, latency, delay } => audio.rolled = Some(Rolled { at, beat, latency, delay }),
-            AudioMark::Wrapped { .. } => audio.wraps.push(at),
-            AudioMark::PunchedIn => audio.punched.0 = Some(at),
-            AudioMark::PunchedOut => audio.punched.1 = Some(at),
-            AudioMark::Stopped { beat } => audio.stopped = Some((at, beat)),
+            AudioMark::Rolling { beat, latency, delay } => {
+                audio.rolled = Some(Rolled { beat, latency, delay });
+                // A take that is punched in begins where the song comes
+                // into its stretch, which is said when it does.
+                if audio.punch.is_none() {
+                    audio.begin(at, beat, None);
+                }
+            }
+            AudioMark::Jumped { from, to, round } => {
+                // What was being sung to ends where the song was; what is
+                // sung from here on is sung to where it is now.
+                if audio.end(from) || audio.punch.is_none() {
+                    audio.begin(at, to, round.then_some((from, to)));
+                }
+            }
+            AudioMark::PunchedIn { beat } => {
+                if let Some((from, _)) = audio.punch {
+                    // A song that plays into the stretch reaches it on the
+                    // first frame at or past its edge: that is the edge.
+                    let map = self.project.tempo_map();
+                    let on_the_edge = beat >= from && map.frames_between(from, beat, rate) < 2.0;
+                    audio.end(beat);
+                    audio.begin(at, if on_the_edge { from } else { beat }, None);
+                }
+            }
+            AudioMark::PunchedOut { beat } => {
+                if let Some((_, to)) = audio.punch {
+                    audio.end(beat.min(to));
+                }
+            }
+            AudioMark::Stopped { beat } => {
+                audio.end(beat);
+                audio.stopped = Some((at, beat));
+            }
             AudioMark::Ended => audio.ended = true,
         }
     }
@@ -755,14 +802,13 @@ impl Session {
     pub fn growing_takes(&self) -> Vec<GrowingTake> {
         let Some(audio) = &self.recording.take else { return Vec::new() };
         let Some(writer) = &audio.writer else { return Vec::new() };
+        // The stretch that is being sung to now, if one is: a take that
+        // is punched in has none before the song comes into its stretch.
         let pass = audio.rolled.map(|rolled| {
             let shift = shift_of(audio, rolled);
-            match (audio.punch, audio.wraps.last(), audio.loop_region) {
-                (Some((from, _)), ..) => {
-                    (audio.punched.0.map(|_| from.max(rolled.beat)), audio.punched.0.unwrap_or(0) + shift)
-                }
-                (None, Some(at), Some((start, _))) => (Some(start), at + shift),
-                _ => (Some(rolled.beat), rolled.at + shift),
+            match audio.stretches.last().filter(|stretch| stretch.end.is_none()) {
+                Some(stretch) => (Some(stretch.start), stretch.at + shift),
+                None => (None, shift),
             }
         });
         let files = writer.files().iter().map(|file| GrowingTake {
@@ -847,7 +893,7 @@ impl Session {
             // written.
             (files.iter().map(|file| file.frames()).min().unwrap_or(0), self.engine.position())
         });
-        let mut passes = passes(&audio, rolled, stopped);
+        let mut passes = passes(&audio, stopped);
         if files.iter().any(|file| file.failed().is_some()) {
             // A file that took no more holds less than was sung: the take
             // is what the file holds, whole up to there, and no longer.
@@ -891,14 +937,15 @@ impl Session {
         // frames of the pass that is under way, from where it began.
         let written = writer.files().iter().map(|file| file.frames()).min()?;
         let at = written.checked_sub(shift)?;
-        let (from, start) = match (audio.wraps.last(), audio.loop_region) {
-            (Some(at), Some((start, _))) => (*at, start),
-            _ => (rolled.at, rolled.beat),
+        // How far the song had got in the stretch that is being sung to,
+        // by the frames of it that are written.
+        let reached = match audio.stretches.last().filter(|stretch| stretch.end.is_none()) {
+            Some(open) => self.project.tempo_map().beat_after(open.start, at.checked_sub(open.at)? as f64, rate),
+            None => audio.stretches.last().and_then(|last| last.end).unwrap_or(rolled.beat),
         };
-        let reached = self.project.tempo_map().beat_after(start, at.checked_sub(from)? as f64, rate);
         let stopped = audio.stopped.filter(|(stopped, _)| *stopped <= at).unwrap_or((at, reached));
         let mut project = self.project.clone();
-        put_takes(&mut project, &audio.tracks, &paths, &passes(audio, rolled, stopped), shift, rate).ok()?;
+        put_takes(&mut project, &audio.tracks, &paths, &passes(audio, stopped), shift, rate).ok()?;
         Some(project)
     }
 
@@ -1333,16 +1380,24 @@ fn put_takes(
                 project.add_take(*track, format!("Take {number}"), pass.start, pass.end - pass.start, content)?;
             made.push((take, pass));
         }
-        let whole = made.iter().skip(1).rev().find(|(_, pass)| pass.whole).map(|(take, _)| *take);
-        let mut chosen = Vec::new();
-        if let Some((first, _)) = made.first() {
-            project.choose_take(*first)?;
-            chosen.push(*first);
-            if let Some(whole) = whole {
-                project.choose_take(whole)?;
-                chosen = vec![whole];
-            }
+        // On the track, in the order they were sung: a later one takes
+        // the place of an earlier one where the two lie over one another,
+        // which keeps the earlier one as the take it already is.
+        for (take, _) in made.iter().filter(|(_, pass)| pass.whole) {
+            project.choose_take(*take)?;
         }
+        // What the track plays of them now: the ones nothing sung later
+        // lies over the whole of.
+        let covered = |index: usize, pass: &Pass| {
+            let later = made[index + 1..].iter().filter(|(_, later)| later.whole);
+            later.into_iter().any(|(_, later)| later.start <= pass.start + 1e-9 && later.end >= pass.end - 1e-9)
+        };
+        let chosen: Vec<ClipId> = made
+            .iter()
+            .enumerate()
+            .filter(|(index, (_, pass))| pass.whole && !covered(*index, pass))
+            .map(|(_, (take, _))| *take)
+            .collect();
         for (take, pass) in made {
             landed.push(RecordedTake {
                 track: *track,
@@ -1422,40 +1477,58 @@ struct Pass {
     at: u64,
     start: f64,
     end: f64,
-    /// Whether it ran the whole loop.
+    /// Whether it is put on the track: every stretch that was sung is,
+    /// but for a pass of the loop that did not run the whole of it, which
+    /// would cover the whole pass before it with less.
     whole: bool,
 }
 
-/// The takes a take's audio comes to: one, or one for each pass of the
-/// loop it went round, or the stretch it was punched in over.
-fn passes(audio: &AudioTake, rolled: Rolled, stopped: (u64, f64)) -> Vec<Pass> {
-    let mut passes = Vec::new();
-    if let Some((from, to)) = audio.punch {
-        if let Some(at) = audio.punched.0 {
-            let end = if audio.punched.1.is_some() { to } else { stopped.1.min(to) };
-            passes.push(Pass { at, start: from.max(rolled.beat), end, whole: false });
+impl AudioTake {
+    /// Ends the stretch that is being sung to, where the song was; says
+    /// whether there was one.
+    fn end(&mut self, beat: f64) -> bool {
+        match self.stretches.last_mut().filter(|stretch| stretch.end.is_none()) {
+            Some(open) => {
+                open.end = Some(beat);
+                true
+            }
+            None => false,
         }
-    } else {
-        let (loop_start, loop_end) = audio.loop_region.unwrap_or((rolled.beat, f64::INFINITY));
-        let mut pass =
-            Pass { at: rolled.at, start: rolled.beat, end: loop_end, whole: rolled.beat <= loop_start + 1e-9 };
-        for at in &audio.wraps {
-            passes.push(pass);
-            pass = Pass { at: *at, start: loop_start, end: loop_end, whole: true };
-        }
-        // The last one ends where the song stopped.
-        pass.whole &= stopped.1 >= loop_end - 1e-6;
-        pass.end = stopped.1.min(loop_end);
-        passes.push(pass);
     }
-    passes.retain(|pass| pass.end - pass.start >= SHORTEST_TAKE);
-    // A song that went round and was stopped just after it came round
-    // again has the beginning of a pass nobody meant to sing: under a
-    // beat of it is no take. It is in the file all the same.
-    if passes.len() > 1 && passes.last().is_some_and(|last| !last.whole && last.end - last.start < SHORTEST_PASS) {
+
+    /// Begins a stretch at `start`, with the frame handed over next.
+    fn begin(&mut self, at: u64, start: f64, round: Option<(f64, f64)>) {
+        self.stretches.push(Stretch { at, start, end: None, round });
+    }
+}
+
+/// The takes a take's audio comes to: one for each stretch of the song it
+/// was sung to, as the audio thread said them. `stopped` is where the
+/// song stopped, or was last known to be, for a stretch nobody ended.
+///
+/// Every stretch is a take, and is put on the track where it was sung;
+/// but a pass of the loop that did not run the whole of it is a take and
+/// is not put there, since the whole pass before it is the better thing
+/// to hear. And the beginning of one more pass, under a beat of it, when
+/// the song was stopped just after it came round, is no take at all: it is
+/// in the file, after the pass before it.
+fn passes(audio: &AudioTake, stopped: (u64, f64)) -> Vec<Pass> {
+    let mut passes: Vec<(Pass, bool)> = audio
+        .stretches
+        .iter()
+        .map(|stretch| {
+            let end = stretch.end.unwrap_or(stopped.1);
+            let whole = stretch.round.is_none_or(|(from, to)| end - stretch.start >= from - to - 1e-9);
+            (Pass { at: stretch.at, start: stretch.start, end, whole }, stretch.round.is_some())
+        })
+        .collect();
+    passes.retain(|(pass, _)| pass.end - pass.start >= SHORTEST_TAKE);
+    let sliver =
+        |(last, came_round): &(Pass, bool)| *came_round && !last.whole && last.end - last.start < SHORTEST_PASS;
+    if passes.len() > 1 && passes.last().is_some_and(sliver) {
         passes.pop();
     }
-    passes
+    passes.into_iter().map(|(pass, _)| pass).collect()
 }
 
 /// The signal a measurement plays: a quarter of a second of nothing, a

@@ -173,9 +173,9 @@ struct Recording {
     standing_due: bool,
     /// The stretch of the song the take is punched in over, if it is: only
     /// what is played and sung inside it is the take's. And whether the
-    /// song has been said to have come into it, and to have left it.
+    /// song was inside it when that was last looked at.
     punch: Option<(f64, f64)>,
-    punched: (bool, bool),
+    inside: bool,
 }
 
 /// A signal played to the output while an input is listened to, to find
@@ -476,9 +476,9 @@ impl Processor {
         self.read_what_is_wanted();
     }
 
-    /// Says, once each, that the song has come into the stretch a take is
-    /// punched in over, and that it has left it: asked at the first frame
-    /// of every block, and blocks end on both edges.
+    /// Says that the song has come into the stretch a take is punched in
+    /// over, and that it has left it, each time it does: asked at the
+    /// first frame of every block, and blocks end on both edges.
     fn mark_punch(&mut self) {
         let Some(recording) = self.recording else { return };
         let Some((from, to)) = recording.punch else { return };
@@ -487,18 +487,16 @@ impl Processor {
         }
         let position = self.position();
         let at = self.feeds.as_ref().map_or(0, |feeds| feeds.handed);
-        let (was_in, was_out) = recording.punched;
-        let now_in = was_in || (position >= from - 1e-9 && position < to - 1e-9);
-        let now_out = was_out || position >= to - 1e-9;
+        let inside = position >= from - 1e-9 && position < to - 1e-9;
+        if inside == recording.inside {
+            return;
+        }
         if let Some(recording) = &mut self.recording {
-            recording.punched = (now_in, now_out);
+            recording.inside = inside;
         }
-        if now_in && !was_in {
-            self.report(Captured::Audio { at, mark: AudioMark::PunchedIn });
-        }
-        if now_out && !was_out {
-            self.report(Captured::Audio { at, mark: AudioMark::PunchedOut });
-        }
+        let mark =
+            if inside { AudioMark::PunchedIn { beat: position } } else { AudioMark::PunchedOut { beat: position } };
+        self.report(Captured::Audio { at, mark });
     }
 
     pub fn sample_rate(&self) -> f64 {
@@ -695,6 +693,27 @@ impl Processor {
         self.continuity = 0;
         self.before_jump = before;
         self.jump_was_wrap = wrap;
+        // A take's audio is told where the song was sent. (Where it came
+        // round its loop is said there, by the loop's own end.)
+        let to = self.position();
+        if !wrap && to != before {
+            self.mark_jump(before, to, false);
+        }
+    }
+
+    /// Tells a take's audio that the song is no longer where the frames
+    /// handed over lead to: what is handed over from here on was sung to
+    /// another place. Only while the take's song rolls; where it rolls
+    /// from is said when it does.
+    fn mark_jump(&mut self, from: f64, to: f64, round: bool) {
+        let rolls = self.playing && self.recording.is_some_and(|recording| recording.count_in == 0);
+        if rolls
+            && self.feeding
+            && self.trailing.is_none()
+            && let Some(at) = self.feeds.as_ref().map(|feeds| feeds.handed)
+        {
+            self.report(Captured::Audio { at, mark: AudioMark::Jumped { from, to, round } });
+        }
     }
 
     /// Silences everything immediately, including reverb and delay tails.
@@ -884,9 +903,8 @@ impl Processor {
         let count_in_beats = if self.playing || !count_in_beats.is_finite() { 0.0 } else { count_in_beats.max(0.0) };
         let count_in = (count_in_beats / self.beats_per_frame()).round() as u64;
         let click_shift = if bar > 0.0 { (count_in_beats / bar).ceil() * bar } else { 0.0 };
-        let punched = (false, false);
         self.recording =
-            Some(Recording { tracks, count_in, click_shift, pass: 0, standing_due: false, punch, punched });
+            Some(Recording { tracks, count_in, click_shift, pass: 0, standing_due: false, punch, inside: false });
         if count_in == 0 {
             self.play();
             self.rolling();
@@ -1089,7 +1107,7 @@ impl Processor {
                 if self.frames >= self.stretch_frames && wrap.is_none() {
                     self.begin_stretch();
                 }
-                if let Some((start, _)) = wrap {
+                if let Some((start, end)) = wrap {
                     // Restart exactly on the loop start. The block above ran
                     // to the first frame at or past the loop end, so a loop
                     // is at most one frame longer than its length in beats,
@@ -1100,16 +1118,15 @@ impl Processor {
                     self.chase = true;
                     self.take_back = true;
                     self.jumped(reached, true);
+                    // A take's audio came round with it: a pass ends on
+                    // the loop's end, and the next begins on its start.
+                    self.mark_jump(end, start, true);
                     let pass = self.recording.as_mut().map(|recording| {
                         recording.pass += 1;
                         recording.pass
                     });
                     if let Some(pass) = pass {
                         self.report(Captured::Wrapped { pass });
-                        if let (true, Some(feeds)) = (self.feeding, &self.feeds) {
-                            let at = feeds.handed;
-                            self.report(Captured::Audio { at, mark: AudioMark::Wrapped { pass } });
-                        }
                     }
                 }
             }

@@ -499,7 +499,7 @@ impl Session {
         let id = self.playing.takes;
         // The tracks that record an input: their files are begun, and the
         // input is opened, before anything else is. What cannot be says so.
-        self.begin_audio_take(id, &tracks, loop_region, punch)?;
+        self.begin_audio_take(id, &tracks, punch)?;
         if punch.is_some() && region.enabled {
             // The graph that plays does not go round from here on.
             self.compile_and_swap();
