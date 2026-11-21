@@ -215,7 +215,7 @@ async fn every_installed_consort_plugin_is_scanned_made_and_heard() {
         .filter(|device| device["uri"].as_str().is_some_and(|uri| uri.starts_with("vst3:")))
         .collect();
     eprintln!("{} Consort plugins found in {FOLDER}", devices.len());
-    assert!(devices.len() >= 20, "the collection has about 25 plugins; found {}", devices.len());
+    assert!(devices.len() >= 20, "the collection has more than twenty plugins; found {}", devices.len());
     let mut failed: Vec<String> = Vec::new();
     for device in &devices {
         let (name, uri) = (device["name"].as_str().unwrap_or("?"), device["uri"].as_str().unwrap_or("?"));
