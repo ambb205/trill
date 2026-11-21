@@ -6,7 +6,7 @@ reads as well for people.
 
 ## Building and testing
 
-`cargo test --workspace` runs about 2,800 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,900 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
