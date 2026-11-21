@@ -2052,3 +2052,183 @@ fn an_input_on_the_outputs_clock_at_its_rate_is_recorded_as_the_device_gave_it_t
         assert_eq!(other, None, "exclusive: {exclusive}; the first frame that is not what the device gave");
     }
 }
+
+// ---- time stamps may establish one clock, as they may overturn it -----------------
+
+/// What an input hears that says which frame of the host's clock it is:
+/// every frame another value.
+fn noise_at(frame: u64) -> f32 {
+    let mut bits = frame.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+    bits ^= bits >> 29;
+    bits = bits.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    bits ^= bits >> 32;
+    ((bits >> 40) as f32 / (1u64 << 23) as f32 - 1.0) * 0.5
+}
+
+/// A rig on a microphone that runs `ppm` parts a million from the output
+/// and of which the system says nothing, hearing [`noise_at`], with a
+/// track that records it, armed.
+fn two_devices(ppm: f64) -> (Rig, TrackId, tempfile::TempDir) {
+    let (mut rig, folder) = rig_on(studio(ScriptedInput { ppm, ..microphone() }), AudioConfig::default());
+    rig.host.hear(Hears::Sound(Arc::new(|_, seconds| noise_at((seconds * SR).round() as u64))));
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    assert_eq!(rig.session.input_status().clock, Some(trill_engine::InputClock::Own), "as the system has it");
+    (rig, voice, folder)
+}
+
+/// Runs second by second, with the session's chores, until the input is
+/// said to be on `clock` or `seconds` have gone by. Returns how many did.
+fn run_until_on(rig: &mut Rig, clock: trill_engine::InputClock, seconds: usize) -> usize {
+    for second in 0..seconds {
+        if rig.session.input_status().clock == Some(clock) {
+            return second;
+        }
+        rig.run_until(rig.now() + SR);
+        rig.session.housekeeping();
+    }
+    seconds
+}
+
+/// The first frame of the take a track plays that is not a frame of what
+/// the device heard as the device gave it, to the bit; `None` where the
+/// file is that, frame for frame, some whole number of frames on.
+fn not_as_the_device_gave_it(session: &Session, voice: TrackId) -> Option<usize> {
+    let (_, _, _, audio) = clip_at(session, voice, 1.0);
+    let file = frames_of(Path::new(&audio.path), 1, 0, 3 * 48_000);
+    assert!(file.len() >= 2 * 48_000, "{} frames", file.len());
+    let from = 1000usize;
+    let Some(ahead) = (0..40_000_000u64)
+        .find(|ahead| (0..8).all(|n| file[from + n].to_bits() == noise_at(from as u64 + n as u64 + ahead).to_bits()))
+    else {
+        return Some(from);
+    };
+    (0..file.len()).find(|n| file[*n].to_bits() != noise_at(*n as u64 + ahead).to_bits())
+}
+
+#[test]
+fn a_pair_the_system_says_nothing_of_is_held_to_one_clock_once_its_stamps_have_said_so_for_a_minute() {
+    use trill_engine::InputClock;
+    let (mut rig, voice, _folder) = two_devices(0.0);
+    let opened = rig.now();
+    // With nothing kept of the input, a minute of stamps is what it takes.
+    let waited = run_until_on(&mut rig, InputClock::FoundShared, 120);
+    let took = (rig.now() - opened) / SR;
+    let seen = rig.session.input_clock_seen().unwrap();
+    println!("one clock taken for two: held to one clock {took:.0} s after it was opened ({seen:?})");
+    assert!(waited < 120 && (60.0..=72.0).contains(&took), "after {took} s: {seen:?}");
+    assert!(seen.one && seen.scatter_us < 5.0 && seen.moving_ppm.abs() < 0.05, "{seen:?}");
+
+    // From then on a frame of the input is a frame of the song: a take
+    // is what the device gave, to the bit.
+    let before = rig.session.input_health().unwrap();
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    let until = rig.now() + 3.0 * SR;
+    run_taking(&mut rig, until);
+    rig.session.stop();
+    let after = rig.session.input_health().unwrap();
+    assert_eq!((after.jumps, after.lost, after.late), (before.jumps, 0, 0), "{after:?}");
+    assert_eq!(not_as_the_device_gave_it(&rig.session, voice), None, "frame for frame, to the bit");
+    assert_eq!(rig.session.input_status().clock, Some(InputClock::FoundShared));
+
+    // Closed and opened again in this run, the pair is one clock from the
+    // first: what its stamps said is remembered.
+    rig.session.set_armed(voice, false).unwrap();
+    rig.session.housekeeping();
+    assert!(rig.session.input_status().open.is_none());
+    rig.session.set_armed(voice, true).unwrap();
+    rig.session.housekeeping();
+    assert_eq!(rig.session.input_status().clock, Some(InputClock::FoundShared));
+}
+
+#[test]
+fn a_pair_is_not_held_to_one_clock_under_a_take_and_is_as_soon_as_the_take_has_ended() {
+    use trill_engine::InputClock;
+    let (mut rig, _voice, _folder) = two_devices(0.0);
+    let opened = rig.now();
+    rig.run_until(opened + 20.0 * SR);
+    rig.session.housekeeping();
+    // A take from twenty seconds in to ninety: the stamps have had their
+    // minute in the middle of it.
+    let before = rig.session.input_health().unwrap();
+    rig.session.record().unwrap();
+    for second in 21..=90 {
+        run_taking(&mut rig, opened + second as f64 * SR);
+        assert_eq!(rig.session.input_status().clock, Some(InputClock::Own), "{second} s: the place stays under a take");
+    }
+    let seen = rig.session.input_clock_seen().unwrap();
+    assert!(seen.one, "the stamps have said so meanwhile: {seen:?}");
+    let during = rig.session.input_health().unwrap();
+    assert_eq!((during.jumps, during.lost, during.late), (before.jumps, 0, 0), "{during:?}");
+    rig.session.stop();
+    assert_eq!(rig.session.last_recording().unwrap().silent_frames, 0);
+    // Ended: nothing is kept of the input, and the pair is one clock.
+    let waited = run_until_on(&mut rig, InputClock::FoundShared, 5);
+    assert!(waited <= 2, "held to one clock {waited} s after the take");
+}
+
+#[test]
+fn a_pair_a_part_in_a_million_apart_or_more_is_not_taken_for_one_clock() {
+    use trill_engine::InputClock;
+    for ppm in [1.0, 2.0, 5.0, -5.0] {
+        let (mut rig, _voice, _folder) = two_devices(ppm);
+        let waited = run_until_on(&mut rig, InputClock::FoundShared, 150);
+        let seen = rig.session.input_clock_seen().unwrap();
+        println!(
+            "{ppm} parts in a million apart: the stamps have them moving by {:.2}, and by no more than {:.2}",
+            seen.moving_ppm, seen.within_ppm
+        );
+        assert_eq!(waited, 150, "{ppm} parts in a million apart were taken for one clock: {seen:?}");
+        assert_eq!(rig.session.input_status().clock, Some(InputClock::Own));
+        assert!(!seen.one && (seen.moving_ppm - ppm).abs() < 0.2, "{ppm}: {seen:?}");
+    }
+    // Half a part in a million is less than the stamps tell from none in
+    // a minute: such a pair is taken for one. (It is parted again when it
+    // has run a seventh of a millisecond apart, which takes it five
+    // minutes: the test below.)
+    let (mut rig, _voice, _folder) = two_devices(0.5);
+    assert!(run_until_on(&mut rig, InputClock::FoundShared, 150) < 80);
+}
+
+#[test]
+fn a_pair_held_to_one_clock_by_its_stamps_that_runs_apart_is_parted_again_and_not_taken_so_twice() {
+    use trill_engine::InputClock;
+    let (mut rig, voice, _folder) = two_devices(0.0);
+    assert!(run_until_on(&mut rig, InputClock::FoundShared, 120) < 80);
+    // Its clock comes to run twenty parts in a million from the output's
+    // (two devices after all, whose crystals had happened to agree).
+    rig.host.drift_input(20.0);
+    let jumps = rig.session.input_health().unwrap().jumps;
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    let began = rig.now();
+    let mut found = None;
+    for second in 1..=40 {
+        run_taking(&mut rig, began + second as f64 * SR);
+        if found.is_none() && rig.session.input_status().clock == Some(InputClock::Own) {
+            found = Some(second);
+        }
+    }
+    let health = rig.session.input_health().unwrap();
+    rig.session.stop();
+    let found = found.expect("it was never parted");
+    println!("held to one clock by its stamps, then 20 parts in a million apart: parted {found} s into the take");
+    assert!(found <= 20, "parted after {found} s");
+    assert_eq!((health.jumps, health.lost, health.late), (jumps, 0, 0), "without a step: {health:?}");
+    assert_eq!(rig.session.last_recording().unwrap().silent_frames, 0);
+
+    // Steady again, it is not taken for one clock a second time while it
+    // is open, whatever its stamps come to say.
+    rig.host.drift_input(0.0);
+    assert_eq!(run_until_on(&mut rig, InputClock::FoundShared, 100), 100);
+    assert_eq!(rig.session.input_status().clock, Some(InputClock::Own));
+    // Nor when it is opened again in this run.
+    rig.session.set_armed(voice, false).unwrap();
+    rig.session.housekeeping();
+    rig.session.set_armed(voice, true).unwrap();
+    rig.session.housekeeping();
+    assert_eq!(rig.session.input_status().clock, Some(InputClock::Own));
+    assert_eq!(run_until_on(&mut rig, InputClock::FoundShared, 100), 100);
+}

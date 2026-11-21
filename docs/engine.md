@@ -541,6 +541,29 @@ nothing is kept of the input (no take is asked for, nothing measures) that place
 stamps come to have it a frame from where it is, which is a frame's step in what a track lets through in the
 first seconds an input is open and in nothing that is kept; from the moment a take is asked for, it stays.
 
+*And one the stamps may establish.* A pair the system says nothing of (a laptop's own sound card, a virtual
+cable) is read as two clocks at first, and its stamps are heard on that too. Stretch by stretch of two seconds,
+the least late stamp of each device says where its count of frames stood. How far the input's count lies ahead
+of the engine's, reckoned at one rate for both, stays where it is on one clock, whatever that clock's own rate
+is against the machine's, and moves by a millionth of a second a second for every part in a million that two
+are apart. A line is laid through those stretches by the middle one of the slopes any two of them have between
+them, so that a stretch whose stamps were all late together does not turn it; how the others scatter about it
+says what its slope may be out by. When the line shows the two moving apart by less than three quarters of a
+part in a million, even at four times what it may be out by, over a minute of stamps at the least, the pair is
+held to one clock: read from then on as an input of the output's own device is, frame for frame where the rates
+are one, and parted again by the rule above. Not under a take or a measurement, where the place would move by
+a frame: it waits for the take to end. The audio thread only writes the stretches down; they are judged with
+the session's chores. The verdict is the pair's for as long as the program runs, so the input is one clock from
+the first when it is opened again, and a pair that was held to one clock so and then ran apart is not taken for
+one a second time.
+
+It takes a minute where the stamps are good: 61 s on scripted devices, and a minute through the cable below on
+a machine other work kept busy, twice, where the stretches scattered by 12 and 13 millionths of a second about
+their line. Stamps that scatter more take as long as it takes them to be sure, up to the five minutes of them
+that are kept: 93 s in a third run through the cable, where they scattered by 28. It tells three quarters of a part in a million from none: pairs 1, 2 and 5 parts in a million apart are
+seen moving by 1.00, 2.00 and 5.00 and are not taken for one, however long they are watched. Half a part in a
+million is taken for one, and such a pair is parted when it has run 0.15 ms apart, which takes it five minutes.
+
 *No step in a take.* The place an input is read at is put by the first stamps of the two devices, each of
 which may be as late as any, and put again a quarter of a second on by the least late of them: a step. A take
 that is asked for before then, and is not counted in, begins when it has been taken, as after a count-in that
@@ -582,6 +605,10 @@ tests):
 | An input said to share the output's clock that runs 20 parts in a million from it | found out; no step; clicks within 2 ms before and 0.5 ms after | found out 11 s into the take; 0.20 ms before, 0.08 ms after |
 | The same at 100 parts in a million, either way | the same | found out after 5 s; 0.39 ms before, 0.13 ms after |
 | One that does share it | never doubted | never; clicks within 0.03 ms |
+| A pair the system says nothing of, on one clock | held to one clock by its stamps after a minute; a take is then the device's frames to the bit; one clock from the first when opened again | after 61 s; to the bit |
+| The same with a take running when the minute is up | not held to one clock under the take, and no step in it; held to one within two seconds of its end | so |
+| Pairs 1, 2 and 5 parts in a million apart | not taken for one clock in two and a half minutes | seen moving by 1.00, 2.00 and 5.00 |
+| A pair held to one clock by its stamps that comes to run 20 parts in a million apart | parted again without a step, and not taken for one twice, open or opened again | parted 17 s into the take |
 | A buffer stamped 30 ms late, one without a stamp, one stamped a second early, three late in a row | no frame silent, nothing put elsewhere, every click within a frame | so |
 | Ten buffers the device says are missing, by its count or without one | silence of their length, and what follows in its place | so |
 | The same ten gone and nothing said | no silence made up by one stamp; the line begun anew within half a second | once, and in place from then on |
@@ -598,23 +625,32 @@ average and 9 ms at the most of sixty, on this machine's disk, against ten secon
 
 *Through a cable* (`tests/cable.rs`, opt-in: 'Line 1' of a virtual audio cable, out and in, on a machine that
 other work kept busy). Its two ends are one device with one clock, and the system says nothing of that (the
-cable has no device the system knows of, as a built-in device has none), so Trill reads it by its time stamps,
-as two clocks. Both are measured: the cable as the system has it, and with its two ends said to be one clock,
-which a test may say and the window cannot yet.
+cable has no device the system knows of, as a built-in device has none), so Trill reads it by its time stamps
+at first, as two clocks, and holds it to one clock once its stamps have said so. Measured are the cable in its
+first minute, read by its stamps; the cable once the stamps have said one clock; and, for the figures to hold
+that against, the cable with its two ends said to be one clock from the first, which a test may say.
 
 The null is what is left of four seconds of noise up to 12 kHz when what was recorded is taken from what was
 played, laid on it to a fraction of a frame and at the level that fits. The cable alone, with nothing of Trill
 between its ends, leaves 65.6 dB: its samples lie on the steps of 16 bits, a whole number of frames late.
 
-| The two ends said to be one clock | Shared, 480 frames | Exclusive at both ends, 256 frames |
+| Once its stamps have said one clock | Shared, 480 frames | Exclusive at both ends, 256 frames |
 |---|---|---|
-| A click by what the devices say of themselves | 211 frames late, all eight alike | 189 frames early, all eight alike |
-| The round trip, measured three times | 60.042, 60.000, 60.000 ms | 24.813, 24.833, 24.833 ms |
+| How long the stamps took, from when the input was opened | a minute: sixty seconds of stamps | the same |
+| What they said by then: the scatter of the stretches, and the most the two may be apart | 12 millionths of a second; 0.56 parts in a million | 13; 0.68 |
+| The round trip, measured three times | 59.687, 59.646, 59.646 ms | 24.854, 24.854, 24.854 ms |
 | A click once that was taken | 0.00 frames, all eight | 0.00 frames, all eight |
 | What was recorded less what was played | 65.9 dB under it: the cable's own 16 bits, as the system dithers them | nothing: 183,967 of 184,000 frames the same to the bit, and the other 33 a zero of the other sign |
 | The delay that fits | a whole number of frames, the same in every half second | the same |
 
-| As the system has it: two clocks | Shared, 480 frames | Exclusive at both ends, 256 frames |
+| The two ends said to be one clock from the first | Shared, 480 frames | Exclusive at both ends, 256 frames |
+|---|---|---|
+| A click by what the devices say of themselves | 211 frames late, all eight alike | 189 frames early, all eight alike |
+| The round trip, measured three times | 60.042, 60.000, 60.000 ms | 24.813, 24.833, 24.833 ms |
+| A click once that was taken | 0.00 frames, all eight | 0.00 frames, all eight |
+| What was recorded less what was played | 65.9 dB under it | nothing: 183,967 of 184,000 frames the same to the bit |
+
+| In its first minute, read by its stamps as two clocks | Shared, 480 frames | Exclusive at both ends, 256 frames |
 |---|---|---|
 | A click by what the devices say of themselves | 276 to 286 frames late | 195 to 197 frames early |
 | The round trip, measured three times | 60.086, 60.088, 60.102 ms | 24.838, 24.826, 24.828 ms |
@@ -632,17 +668,20 @@ rounded them, and 67.3 dB was left. It rounds now.) So at a ratio of exactly one
 the bit. On two clocks the input is read between its frames at a place that follows the time stamps, and the
 stamps are each a frame or two out: the place wanders by a frame or so over seconds, which is 20 or 30
 millionths of a second in where a take lands and some ten parts in a million in its pitch, and which noise this
-wide shows at a hundredth of a frame. That is the price of telling two clocks apart by their stamps, paid here
-by a pair that has only one; it is not the filter, which the engine's own tests hold to 100 dB.
+wide shows at a hundredth of a frame. That is the price of telling two clocks apart by their stamps, which a
+pair that has only one pays for its first minute; it is not the filter, which the engine's own tests hold to
+100 dB.
 
 A take of ten minutes, shared, with the round trip measured first, on a machine that other work kept busy,
-sixty clicks ten seconds apart. With the two ends said to be one clock: 598.03 s recorded with no frame silent,
-and every click one frame from its place, the first, the last and the worst alike (the place was put a frame
-on after the measurement, while nothing was kept of the input, and did not move again). As the system has the cable,
-read by its time stamps: 598.05 s with no frame silent; the first click 9.4 frames from its place, the last
-25.7, the worst of the sixty 28.9 (0.6 ms); the two ends read 0.9 parts in a million apart. On a busy machine
-the stamps are that much worse than a clock: the first build of this took the cable's ends for one clock on the
-system's word and had 4.8 frames at the worst, and a pair the system says nothing of is no longer taken so.
+sixty clicks ten seconds apart. Read by its time stamps as two clocks from first to last, which is what a pair
+the system says nothing of got before its stamps could say one clock: 598.05 s with no frame silent; the first
+click 9.4 frames from its place, the last 25.7, the worst of the sixty 28.9 (0.6 ms). On a busy machine the
+stamps are that much worse than a clock. Left to its stamps as it is now: they said one clock 93 s after the
+input was opened (they scattered by 28 millionths of a second that time), the round trip was measured, and of
+598.09 s recorded with no frame silent every click is 0.00 frames from its place, the first, the last and the
+worst of the sixty alike. With the two ends said to be one clock from
+the first: 598.03 s, and every click one frame from its place, the first, the last and the worst alike (the
+place was put a frame on after the measurement, while nothing was kept of the input, and did not move again).
 
 So what devices say of themselves was wrong by 4 to 6 ms one way and 4 ms the other on one machine, which is
 why the measurement is there and why the window says, until it has run, that the figure is the devices' own.

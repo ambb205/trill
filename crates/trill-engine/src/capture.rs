@@ -253,6 +253,12 @@ pub(crate) struct Link {
     /// through the first one the device gave, which may be as late as any
     /// and which the line is begun again without.
     settled: AtomicBool,
+    /// The least late stamp of the stretch that last went by, as the
+    /// line was shown it: its frame and its moment, behind a turn of
+    /// their own (see [`Link::line`]).
+    least_turn: AtomicU64,
+    least_frame: AtomicU64,
+    least_ns: AtomicU64,
     /// The first frame the engine has yet to read: what lies before it
     /// was read, as what it was or as silence for what had not arrived.
     unread: AtomicU64,
@@ -280,6 +286,9 @@ impl Link {
             lost: AtomicU64::new(0),
             restarts: AtomicU32::new(0),
             settled: AtomicBool::new(false),
+            least_turn: AtomicU64::new(0),
+            least_frame: AtomicU64::new(0),
+            least_ns: AtomicU64::new(0),
             unread: AtomicU64::new(0),
             peaks: (0..channels).map(|_| AtomicU32::new(0)).collect(),
             clipped: (0..channels).map(|_| AtomicU32::new(0)).collect(),
@@ -292,6 +301,25 @@ impl Link {
         self.line_ns.store(line.ns, Ordering::SeqCst);
         self.line_rate.store(line.rate.to_bits(), Ordering::SeqCst);
         self.turn.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn publish_least(&self, frame: f64, ns: u64) {
+        self.least_turn.fetch_add(1, Ordering::SeqCst);
+        self.least_frame.store(frame.to_bits(), Ordering::SeqCst);
+        self.least_ns.store(ns, Ordering::SeqCst);
+        self.least_turn.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The least late stamp that was last said, with the turn it was said
+    /// at; nothing where none has been or it was being written.
+    fn least(&self) -> Option<(u64, f64, u64)> {
+        let before = self.least_turn.load(Ordering::SeqCst);
+        if before == 0 || before % 2 == 1 {
+            return None;
+        }
+        let frame = f64::from_bits(self.least_frame.load(Ordering::SeqCst));
+        let ns = self.least_ns.load(Ordering::SeqCst);
+        (self.least_turn.load(Ordering::SeqCst) == before).then_some((before, frame, ns))
     }
 
     /// The line as it was last said, or nothing where none has been said
@@ -340,6 +368,8 @@ pub struct Sink {
     least_late: LeastLate,
     /// The stamp of the buffer before, believed or not.
     stamped: Option<u64>,
+    /// How many least late stamps had been said to the reader.
+    picks_said: u32,
 }
 
 /// What a device says of a buffer it hands over, beyond its frames.
@@ -392,6 +422,11 @@ struct LeastLate {
     /// When the stretch began, and whether any has ended yet.
     since: u64,
     chosen_once: bool,
+    /// The stamp the line was last shown (its frame and its moment), and
+    /// how many it has been shown: for whoever holds one device's least
+    /// late stamps against another's ([`Evidence`]).
+    picked: (f64, u64),
+    picks: u32,
 }
 
 impl LeastLate {
@@ -402,7 +437,7 @@ impl LeastLate {
     /// late of that stretch, and shown one of each stretch after.
     fn shown(&mut self, fit: Option<Fit>, frame: f64, ns: u64, nominal: f64) -> (Fit, bool) {
         let Some(fit) = fit else {
-            *self = Self { best: None, since: ns, chosen_once: false };
+            *self = Self { best: None, since: ns, chosen_once: false, picked: (0.0, 0), picks: self.picks };
             return (Fit::begun(frame, ns, nominal), true);
         };
         let ahead = frame - fit.line().at(ns as f64);
@@ -412,6 +447,7 @@ impl LeastLate {
         match self.best {
             Some((_, frame, at)) if ns.saturating_sub(self.since) as f64 >= LEAST_LATE_OF * 1e9 => {
                 (self.best, self.since) = (None, ns);
+                (self.picked, self.picks) = ((frame, at), self.picks.wrapping_add(1));
                 match std::mem::replace(&mut self.chosen_once, true) {
                     true => fit.shown(frame, at),
                     false => (Fit::begun(frame, at, nominal), true),
@@ -440,7 +476,15 @@ pub fn pair(rate: f64, channels: usize) -> (Sink, Source) {
 /// reads.
 pub(crate) fn link(rate: f64, channels: usize) -> (Sink, Arc<Link>) {
     let link = Arc::new(Link::new(rate, channels));
-    (Sink { link: link.clone(), fit: None, written: 0, least_late: LeastLate::default(), stamped: None }, link)
+    let sink = Sink {
+        link: link.clone(),
+        fit: None,
+        written: 0,
+        least_late: LeastLate::default(),
+        stamped: None,
+        picks_said: 0,
+    };
+    (sink, link)
 }
 
 impl Sink {
@@ -535,6 +579,10 @@ impl Sink {
         link.written.store(self.written, Ordering::Release);
         if let Some((fit, _)) = shown {
             link.publish(fit.line());
+        }
+        if self.least_late.picks != self.picks_said {
+            self.picks_said = self.least_late.picks;
+            link.publish_least(self.least_late.picked.0, self.least_late.picked.1);
         }
         link.settled.store(self.fit.is_some() && self.least_late.chosen_once, Ordering::Relaxed);
     }
@@ -655,18 +703,235 @@ const PARTED_LOOKS_BACK: f64 = 1.0;
 /// for two clocks.)
 const OUT_OF_PLACE: f64 = 1.0;
 const WELL_PUT_AFTER: f64 = 1.0;
+/// What it takes for the time stamps of a pair that is taken for two
+/// clocks to say that it is one ([`look`]). The two devices' least late
+/// stamps are held against one another stretch by stretch of
+/// [`SEEN_EVERY`] seconds; a line is laid through how far apart the two
+/// lay in each stretch, over a minute of them at the least
+/// ([`SEEN_OVER`]) and five at the most ([`SEEN_KEPT`]); and the pair is
+/// one clock when that line shows the two moving apart by less than
+/// [`SEEN_ONE`] (three quarters of a part in a million) even at the far
+/// end of what the stamps leave unsure, which is [`SEEN_SURE`] times what
+/// the line's slope is out by going by how the stretches scatter about
+/// it. So stamps that are good say so in a minute, and stamps that
+/// scatter take as long as it takes them to be sure: on a machine that
+/// other work kept busy, through a virtual cable, two to three minutes.
+///
+/// Two crystals are seldom that near one another, and a pair that is and
+/// is taken for one is parted again when it has run 0.15 ms apart
+/// ([`Reader::parts`]), which at half a part in a million takes five
+/// minutes.
+const SEEN_EVERY: f64 = 2.0;
+const SEEN_OVER: usize = 30;
+const SEEN_KEPT: usize = 150;
+const SEEN_ONE: f64 = 0.75e-6;
+const SEEN_SURE: f64 = 4.0;
 
 /// What a [`Reader`] counts, for whoever asks from another thread.
-#[derive(Default)]
 pub(crate) struct Counts {
     late: AtomicU64,
     jumps: AtomicU32,
     /// Set when an input that was taken to count time by the output's
     /// clock was found, by its time stamps, to have one of its own.
     parted: AtomicBool,
+    /// Set when an input that was taken to have a clock of its own was
+    /// found, by its time stamps, to count time by the output's.
+    established: AtomicBool,
+    /// How far apart the two devices' counts lay in each of the last
+    /// stretches (the input's less the engine's, in seconds, as the bits
+    /// of an `f64`): a ring the audio thread writes ([`Evidence`]) and
+    /// whoever judges it reads ([`look`]). `apart_said` is how many have
+    /// been written in all, and `apart_from` how many had been when what
+    /// is there now began: a line that is begun anew begins it again.
+    apart: [AtomicU64; SEEN_KEPT],
+    apart_said: AtomicU32,
+    apart_from: AtomicU32,
+    /// Whether they say the two are one clock: judged off the audio
+    /// thread, read on it.
+    looks_one: AtomicBool,
     /// The ratio the input is read at against what the two rates say, in
     /// parts a million, as the bits of an `f64`.
     off_ppm: AtomicU64,
+}
+
+impl Default for Counts {
+    fn default() -> Self {
+        Self {
+            late: AtomicU64::new(0),
+            jumps: AtomicU32::new(0),
+            parted: AtomicBool::new(false),
+            established: AtomicBool::new(false),
+            apart: std::array::from_fn(|_| AtomicU64::new(0)),
+            apart_said: AtomicU32::new(0),
+            apart_from: AtomicU32::new(0),
+            looks_one: AtomicBool::new(false),
+            off_ppm: AtomicU64::new(0),
+        }
+    }
+}
+
+/// What the time stamps of two devices that are taken for two clocks say
+/// of whether they are one, stretch by stretch: the audio thread's part.
+///
+/// A stamp is late or right, never early, so of each device the least
+/// late stamp of a stretch says where its count of frames stood at a
+/// moment, to a frame or so. Frames are made time of by one rate for
+/// both (the engine's own line's; an input's frames by the ratio the two
+/// rates have on paper), which is right for both if they are one clock
+/// and for neither otherwise: so how far the input's count is ahead of
+/// the engine's, in seconds, stays where it is from stretch to stretch
+/// on one clock, whatever that clock's own rate is against the host's,
+/// and moves by a millionth of a second a second for every part in a
+/// million that two are apart. What that comes to is judged elsewhere
+/// ([`look`]): here it is only written down.
+#[derive(Copy, Clone)]
+struct Evidence {
+    /// The stretch that is going by: when it began, the rate it is
+    /// reckoned at, and how far ahead of its moment the least late stamp
+    /// of each side has its frames, in seconds.
+    since: u64,
+    rate: f64,
+    engine: f64,
+    input: f64,
+}
+
+/// What the stamps come to: see [`look`].
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct ClockSeen {
+    /// Seconds of stamps this is said of.
+    pub seconds: f64,
+    /// How far a stretch typically lies from the line through all of
+    /// them, in millionths of a second: what the stamps are out by.
+    pub scatter_us: f64,
+    /// How fast the two are seen to move apart, in parts a million.
+    pub moving_ppm: f64,
+    /// The most they may be moving apart by, given how the stamps
+    /// scatter, in parts a million.
+    pub within_ppm: f64,
+    /// Whether that is one clock.
+    pub one: bool,
+}
+
+impl Evidence {
+    fn begun(now_ns: u64, rate: f64) -> Self {
+        Self { since: now_ns, rate, engine: f64::NEG_INFINITY, input: f64::NEG_INFINITY }
+    }
+
+    /// The engine was at `frame` at `ns`, by the least late of its stamps.
+    fn engine_was(&mut self, frame: f64, ns: u64) {
+        self.engine = self.engine.max(frame / self.rate - ns as f64 / 1e9);
+    }
+
+    /// The input was at `frame` at `ns`, by the least late of its stamps;
+    /// `ratio` frames of it go by for one of the engine's, on paper.
+    fn input_was(&mut self, frame: f64, ns: u64, ratio: f64) {
+        self.input = self.input.max(frame / (self.rate * ratio) - ns as f64 / 1e9);
+    }
+
+    /// Ends the stretch that is going by if it has lasted its time at
+    /// `now_ns`, writes how far apart the two lay in it into `counts`,
+    /// and begins the next at `rate`.
+    fn turn(&mut self, now_ns: u64, rate: f64, counts: &Counts) {
+        if (now_ns.saturating_sub(self.since) as f64) < SEEN_EVERY * 1e9 {
+            return;
+        }
+        let said = counts.apart_said.load(Ordering::Relaxed);
+        if self.engine.is_finite() && self.input.is_finite() {
+            counts.apart[said as usize % SEEN_KEPT].store((self.input - self.engine).to_bits(), Ordering::Relaxed);
+            counts.apart_said.store(said.wrapping_add(1), Ordering::Release);
+        } else {
+            // A stretch one of the two said nothing in: begun again.
+            counts.apart_from.store(said, Ordering::Release);
+            counts.looks_one.store(false, Ordering::Relaxed);
+        }
+        *self = Self::begun(now_ns, rate);
+    }
+}
+
+/// The middle one of `values`, which are put in order for it.
+fn middle(values: &mut [f64]) -> f64 {
+    values.sort_unstable_by(f64::total_cmp);
+    match values.len() {
+        0 => 0.0,
+        count if count % 2 == 1 => values[count / 2],
+        count => (values[count / 2 - 1] + values[count / 2]) / 2.0,
+    }
+}
+
+/// What a row of stretches comes to: `apart` is how far apart the two
+/// devices' counts lay in each, in seconds, in the order they went by.
+///
+/// The line through them is the one whose slope is the middle one of the
+/// slopes any two of them have between them, which a stretch or two that
+/// lie far out (every stamp of one of them late together, on a machine
+/// that is busy) do not turn. How the others scatter about it says what
+/// its slope may be out by.
+pub(crate) fn judge(apart: &[f64]) -> ClockSeen {
+    let count = apart.len();
+    let seconds = count as f64 * SEEN_EVERY;
+    if count < 3 {
+        return ClockSeen { seconds, ..ClockSeen::default() };
+    }
+    let mut slopes = Vec::with_capacity(count * (count - 1) / 2);
+    for (first, early) in apart.iter().enumerate() {
+        for (second, late) in apart.iter().enumerate().skip(first + 1) {
+            slopes.push((late - early) / (second - first) as f64);
+        }
+    }
+    let slope = middle(&mut slopes);
+    let mut levels: Vec<f64> = apart.iter().enumerate().map(|(index, apart)| apart - slope * index as f64).collect();
+    let level = middle(&mut levels.clone());
+    for value in &mut levels {
+        *value = (*value - level).abs();
+    }
+    // (The middle one of how far they lie out, as what a bell's width is.)
+    let scatter = 1.4826 * middle(&mut levels);
+    let stretches = count as f64;
+    let unsure = scatter * (12.0 / (stretches * (stretches * stretches - 1.0))).sqrt();
+    let (moving, unsure) = (slope / SEEN_EVERY, unsure / SEEN_EVERY);
+    let within = moving.abs() + SEEN_SURE * unsure;
+    ClockSeen {
+        seconds,
+        scatter_us: scatter * 1e6,
+        moving_ppm: moving * 1e6,
+        within_ppm: within * 1e6,
+        one: count >= SEEN_OVER && within <= SEEN_ONE,
+    }
+}
+
+/// How far apart the two devices' counts lay in each of the stretches
+/// that are kept, in seconds, the oldest first.
+pub(crate) fn apart(counts: &Counts) -> Vec<f64> {
+    let said = counts.apart_said.load(Ordering::Acquire);
+    let from = counts.apart_from.load(Ordering::Acquire);
+    let there = (said.wrapping_sub(from) as usize).min(SEEN_KEPT);
+    let first = said.wrapping_sub(there as u32);
+    let read = |index: u32| f64::from_bits(counts.apart[index as usize % SEEN_KEPT].load(Ordering::Relaxed));
+    let mut row: Vec<f64> = (0..there as u32).map(|index| read(first.wrapping_add(index))).collect();
+    // One that was written meanwhile took the oldest one's place.
+    if counts.apart_said.load(Ordering::Acquire) != said && there == SEEN_KEPT && !row.is_empty() {
+        row.remove(0);
+    }
+    row
+}
+
+/// How many stretches the audio thread has written down in all, and
+/// begun again from: another number whenever there is something new to
+/// judge.
+pub(crate) fn stretches_said(counts: &Counts) -> u32 {
+    counts.apart_said.load(Ordering::Acquire).wrapping_add(counts.apart_from.load(Ordering::Acquire))
+}
+
+/// Looks at what the audio thread has written of the two clocks, judges
+/// it, and says the verdict where the audio thread reads it: asked now
+/// and then by whoever looks after the input, never on an audio thread.
+pub(crate) fn look(counts: &Counts) -> ClockSeen {
+    let from = counts.apart_from.load(Ordering::Acquire);
+    let seen = judge(&apart(counts));
+    // (Not of a row that was begun again while it was being judged.)
+    let still = counts.apart_from.load(Ordering::Acquire) == from;
+    counts.looks_one.store(seen.one && still, Ordering::Relaxed);
+    seen
 }
 
 /// The end of an input that the engine's thread reads: a frame of every
@@ -710,6 +975,15 @@ pub(crate) struct Reader {
     agreed_for: f64,
     /// Whether something keeps what is read: see [`Reader::keep`].
     kept: bool,
+    /// What the stamps say of whether two devices that are taken for two
+    /// clocks are one; which of each side's least late stamps it has
+    /// been shown; whether it says they are one; and whether it is asked
+    /// at all (not of a pair that was parted). See [`Reader::see`].
+    evidence: Option<Evidence>,
+    picks_seen: u32,
+    least_seen: u64,
+    seen_one: bool,
+    may_establish: bool,
     /// What the place was off by a moment ago, and for how long it has
     /// been leaving where the time stamps have it: see [`Reader::parts`].
     off_before: f64,
@@ -755,6 +1029,11 @@ impl Reader {
             whole: one_clock && (link.rate - engine_rate).abs() < 1e-9,
             agreed_for: 0.0,
             kept: false,
+            evidence: None,
+            picks_seen: 0,
+            least_seen: 0,
+            seen_one: false,
+            may_establish: true,
             off_before: 0.0,
             leaving_for: 0.0,
             placed_for: 0.0,
@@ -809,6 +1088,44 @@ impl Reader {
         self.kept = kept;
     }
 
+    /// This pair was taken for one clock on the word of its time stamps
+    /// before, and they then said otherwise: it is not taken so again.
+    pub fn keep_apart(&mut self) {
+        self.may_establish = false;
+    }
+
+    /// Writes down what the two devices' time stamps say of whether they
+    /// count time by one clock, while they are taken for two: asked with
+    /// every block. `rate` is the engine's, by its own line.
+    fn see(&mut self, now_ns: u64, rate: f64, anew: bool) {
+        if self.one_clock || !self.may_establish {
+            self.seen_one = false;
+            return;
+        }
+        // A line that was begun anew counts its frames from another
+        // moment: what was seen of the one before says nothing of it.
+        let evidence = match (&mut self.evidence, anew) {
+            (Some(evidence), false) => evidence,
+            (evidence, _) => {
+                let said = self.counts.apart_said.load(Ordering::Relaxed);
+                self.counts.apart_from.store(said, Ordering::Release);
+                self.counts.looks_one.store(false, Ordering::Relaxed);
+                evidence.insert(Evidence::begun(now_ns, rate))
+            }
+        };
+        if self.least_late.picks != self.picks_seen {
+            self.picks_seen = self.least_late.picks;
+            evidence.engine_was(self.least_late.picked.0, self.least_late.picked.1);
+        }
+        if let Some((turn, frame, ns)) = self.link.least().filter(|(turn, ..)| *turn != self.least_seen) {
+            self.least_seen = turn;
+            evidence.input_was(frame, ns, self.link.rate / self.engine_rate);
+        }
+        evidence.turn(now_ns, rate, &self.counts);
+        // What whoever judges it has come to say.
+        self.seen_one = self.counts.looks_one.load(Ordering::Relaxed);
+    }
+
     /// Says which channels are read from here on, a bit each: the others
     /// cost nothing and are silence.
     pub fn want(&mut self, channels: u32) {
@@ -849,6 +1166,23 @@ impl Reader {
         // has its first frame.
         let due = engine.ns as f64 + (made - engine.frame) / engine.rate * 1e9;
         let meant = input.at(due - self.delay_ns as f64);
+        // What the stamps say of the two clocks, while they are taken for
+        // two. Once they have said for a minute that the two are one,
+        // they are held to be: from here on, as an input of the output's
+        // own device is, and parted again by the same rule. Not while
+        // something is kept of the input (a take, a measurement): the
+        // place may move by it, a frame or less, and nothing that is kept
+        // has a step put in it. It waits for the take to end.
+        self.see(now_ns, engine.rate, anew);
+        if self.seen_one && !self.one_clock && !self.kept && self.placed && !anew {
+            (self.one_clock, self.whole) = (true, (self.link.rate - self.engine_rate).abs() < 1e-9);
+            (self.seen_one, self.evidence) = (false, None);
+            (self.trim, self.off_before, self.leaving_for, self.agreed_for) = (0.0, 0.0, 0.0, 0.0);
+            if self.whole {
+                (self.place, self.ratio) = (meant.round(), 1.0);
+            }
+            self.counts.established.store(true, Ordering::Relaxed);
+        }
         let off = meant - self.place;
         if !self.placed || anew || off.abs() > JUMP_SECONDS * self.link.rate {
             if self.placed && off.abs() > 0.5 {
@@ -944,6 +1278,9 @@ impl Reader {
             return false;
         }
         (self.one_clock, self.whole) = (false, false);
+        // And not taken for one again on the word of its stamps: a pair
+        // that near one clock would be parted again, and again.
+        self.may_establish = false;
         self.trim = 0.0;
         // What the place is off by is brought in as slowly as it is of an
         // input that has long been open: this one has, and its line is
@@ -1076,6 +1413,12 @@ pub(crate) fn health(link: &Link, counts: &Counts) -> Health {
 /// to have one of its own: see [`Reader::parts`].
 pub(crate) fn parted(counts: &Counts) -> bool {
     counts.parted.load(Ordering::Relaxed)
+}
+
+/// Whether an input that was taken to have a clock of its own was found
+/// to count time by the engine's: see [`Evidence`].
+pub(crate) fn established(counts: &Counts) -> bool {
+    counts.established.load(Ordering::Relaxed)
 }
 
 /// How far the ratio an input is read at is from what the two rates say,
@@ -1544,6 +1887,57 @@ mod tests {
         let health = health(&link, &reader.counts());
         assert_eq!((health.lost, health.late), (0, 0), "{health:?}");
         assert!(!parted(&reader.counts()), "and they go on being taken for one clock");
+    }
+
+    /// Two devices taken for two clocks, the input `ppm` parts a million
+    /// from the engine, each stamping one buffer in five up to three
+    /// milliseconds late: what the stamps have come to say after
+    /// `seconds`, and after how many seconds the pair was held to one
+    /// clock, if it was.
+    fn seen_of(ppm: f64, seconds: u64) -> (ClockSeen, Option<u64>) {
+        let (mut sink, link) = link(48_000.0, 1);
+        let mut reader = Reader::new(link.clone(), 48_000.0, 2000, false);
+        reader.want(1);
+        let rate = 48_000.0 * (1.0 + ppm / 1e6);
+        let late = |buffer: u64| match buffer.wrapping_mul(2_654_435_761) % 5 {
+            0 => buffer.wrapping_mul(40_503) % 3_000_000,
+            _ => 0,
+        };
+        let (mut handed, mut held_at, mut seen) = (0u64, None, ClockSeen::default());
+        for buffer in 0..seconds * 100 {
+            let now = 1_000_000 + buffer * 10_000_000;
+            // What the input has heard to the end of by now, a buffer of
+            // 480 of its own frames at a time.
+            while ((handed + 1) * 480) as f64 / rate * 1e9 <= (buffer * 10_000_000) as f64 {
+                let heard = 1_000_000 + ((handed * 480) as f64 / rate * 1e9).round() as u64;
+                sink.push(heard + late(handed), 480, |_, _| 0.25);
+                handed += 1;
+            }
+            reader.begin(now + late(buffer + 3) / 10, 480);
+            reader.take(480);
+            // Whoever looks after the input looks five times a second.
+            if buffer % 20 == 0 {
+                seen = look(&reader.counts());
+            }
+            if held_at.is_none() && established(&reader.counts()) {
+                held_at = Some(buffer / 100);
+            }
+        }
+        (seen, held_at)
+    }
+
+    #[test]
+    fn stamps_that_say_for_a_minute_that_two_devices_are_one_clock_are_believed() {
+        let (seen, held_at) = seen_of(0.0, 80);
+        let held_at = held_at.unwrap_or_else(|| panic!("never held to one clock: {seen:?}"));
+        assert!((60..=70).contains(&held_at), "held to one clock after {held_at} s: {seen:?}");
+        // A part in a million apart, and five, are not one: the stamps
+        // say how fast the two move apart, and that is not believed away.
+        for ppm in [1.0, 5.0, -5.0, 25.0] {
+            let (seen, held_at) = seen_of(ppm, 150);
+            assert_eq!(held_at, None, "{ppm} parts in a million apart were taken for one clock: {seen:?}");
+            assert!((seen.moving_ppm - ppm).abs() < 0.3 && !seen.one, "{ppm}: {seen:?}");
+        }
     }
 
     #[test]

@@ -297,6 +297,9 @@ pub struct InputInfo {
     /// of the device that is played through. Then nothing drifts, and
     /// nothing has to be told apart.
     pub shares_clock: bool,
+    /// Whether that is the word of its own time stamps, from when it was
+    /// open before in this run of the program, and not the system's.
+    pub by_stamps: bool,
     /// Set when the input is not open as it was asked for: it could not
     /// be taken exclusively. In words fit to show the user.
     pub warning: Option<String>,
@@ -308,6 +311,10 @@ struct Input {
     link: Arc<capture::Link>,
     counts: Arc<capture::Counts>,
     info: InputInfo,
+    /// What its time stamps were last judged to say of its clock, and how
+    /// many stretches of them had been written down by then.
+    seen: capture::ClockSeen,
+    judged: u32,
     /// When it was opened, on the host's clock.
     opened_ns: u64,
 }
@@ -895,6 +902,13 @@ pub struct Engine {
     /// whatever the system says of the two: see
     /// [`Engine::say_one_clock`].
     one_clock_said: bool,
+    /// The pairs of an input and an output whose time stamps said, in
+    /// this run of the program, that the two count time by one clock: an
+    /// input of such a pair is opened as one from then on. And the pairs
+    /// that were taken for one on that word and then ran apart, which are
+    /// not taken so again.
+    one_clock_seen: Vec<(String, Option<String>)>,
+    two_clocks_seen: Vec<(String, Option<String>)>,
     host: Arc<dyn AudioHost>,
     /// What plays when no device will: nothing, at real-time pace.
     null: Arc<NullHost>,
@@ -1001,6 +1015,8 @@ impl Engine {
             retire: None,
             messages_lost: false,
             one_clock_said: false,
+            one_clock_seen: Vec::new(),
+            two_clocks_seen: Vec::new(),
             host: setup.host,
             null: Arc::new(NullHost::new(FALLBACK_SAMPLE_RATE)),
             config: setup.config,
@@ -1275,10 +1291,17 @@ impl Engine {
                 engine_rate,
                 self.info.buffer_frames,
             );
-            // One clock by the system's word, or by the word of whoever
-            // knows the two ends: a belief either way.
-            let shares_clock = format.shares_clock || self.one_clock_said;
-            let reader = Reader::new(open.link.clone(), engine_rate, delay, shares_clock);
+            // One clock by the system's word, by the word of whoever knows
+            // the two ends, or by what the pair's own time stamps said
+            // when it was open before: a belief either way.
+            let pair = (format.device.clone(), self.info.device.clone());
+            let said = format.shares_clock || self.one_clock_said;
+            let by_stamps = !said && self.one_clock_seen.contains(&pair);
+            let shares_clock = said || by_stamps;
+            let mut reader = Reader::new(open.link.clone(), engine_rate, delay, shares_clock);
+            if self.two_clocks_seen.contains(&pair) {
+                reader.keep_apart();
+            }
             let counts = reader.counts();
             let warning = refusals.first().map(|refusal| {
                 format!(
@@ -1295,6 +1318,7 @@ impl Engine {
                 exclusive: format.exclusive,
                 delay_frames: delay,
                 shares_clock,
+                by_stamps,
                 warning,
             };
             if !self.send(Message::Input(Some(Box::new(reader)))) {
@@ -1308,7 +1332,8 @@ impl Engine {
             }
             log::info!("recording from {} ({} Hz, {} channels)", info.device, info.sample_rate, info.channels);
             let opened_ns = self.host.now_ns();
-            self.input = Some(Input { stream: open.handle, link: open.link, counts, info, opened_ns });
+            let seen = capture::ClockSeen::default();
+            self.input = Some(Input { stream: open.handle, link: open.link, counts, info, seen, judged: 0, opened_ns });
             return Ok(());
         }
         Err(NoInput::Refused(refusals.join("; ")))
@@ -1323,6 +1348,51 @@ impl Engine {
         self.one_clock_said = said;
     }
 
+    /// Keeps what the open input's time stamps have said of its pair, for
+    /// when it is opened again: that the two are one clock, or that a
+    /// pair that was taken for one on that word has run apart.
+    ///
+    /// And judges what they have said since: the audio thread only writes
+    /// it down, and reads the verdict ([`capture::look`]).
+    pub(crate) fn note_clocks(&mut self) {
+        let Some(input) = &mut self.input else { return };
+        // (Once for every stretch that was written down since: it is a
+        // sort of every pair of them.)
+        let said = capture::stretches_said(&input.counts);
+        if std::mem::replace(&mut input.judged, said) != said {
+            input.seen = capture::look(&input.counts);
+        }
+        let pair = (input.info.device.clone(), self.info.device.clone());
+        let (one, parted) = (capture::established(&input.counts), capture::parted(&input.counts));
+        if (one || input.info.by_stamps) && parted {
+            self.one_clock_seen.retain(|seen| *seen != pair);
+            if !self.two_clocks_seen.contains(&pair) {
+                self.two_clocks_seen.push(pair);
+            }
+        } else if one && !self.one_clock_seen.contains(&pair) {
+            self.one_clock_seen.push(pair);
+        }
+    }
+
+    /// Whether the open input was taken to have a clock of its own and
+    /// was found, by its time stamps, to count time by the output's.
+    pub fn input_established(&self) -> bool {
+        self.input.as_ref().is_some_and(|input| capture::established(&input.counts))
+    }
+
+    /// What the open input's time stamps have said so far of whether it
+    /// counts time by the output's clock, while it is taken not to.
+    pub fn input_clock_seen(&self) -> Option<capture::ClockSeen> {
+        self.input.as_ref().map(|input| input.seen)
+    }
+
+    /// How far apart the two devices' counts of frames lay in each of the
+    /// stretches the stamps are judged by, in seconds, the oldest first:
+    /// for whoever measures.
+    pub fn input_clock_apart(&self) -> Vec<f64> {
+        self.input.as_ref().map(|input| capture::apart(&input.counts)).unwrap_or_default()
+    }
+
     /// Whether the audio thread runs by itself: not one that is driven by
     /// hand, which makes a buffer only when it is told to.
     pub(crate) fn runs_by_itself(&self) -> bool {
@@ -1331,6 +1401,7 @@ impl Engine {
 
     /// Closes the input: nothing needs it any more, or it has failed.
     pub(crate) fn close_input(&mut self) {
+        self.note_clocks();
         let Some(input) = self.input.take() else { return };
         self.send(Message::Input(None));
         let stream = input.stream;
