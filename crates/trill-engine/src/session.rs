@@ -31,6 +31,7 @@ mod params;
 mod playing;
 mod presets;
 mod probing;
+mod recording;
 mod sounds;
 mod story;
 mod take;
@@ -45,6 +46,9 @@ pub use files::file_facts;
 pub use opening::{Arriving, Made};
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
+pub use recording::{
+    Correction, GrowingTake, InputStatus, Measured, Measurement, Recorded, RecordedTake, RecordingLatency,
+};
 pub use take::TakeClip;
 
 const UNDO_LIMIT: usize = 200;
@@ -173,6 +177,8 @@ pub struct Session {
     metronome: bool,
     /// Arming, the selection, and the take being recorded.
     playing: playing::Playing,
+    /// The input, a take's audio, and how long sound takes to go round.
+    recording: recording::Audio,
     /// The journal of the open project: how it came to be.
     story: story::Keeping,
     /// What is kept of how the song is played: see [`cores`].
@@ -255,6 +261,7 @@ impl Session {
             gesture: None,
             metronome: false,
             playing: playing::Playing::new(),
+            recording: recording::Audio::default(),
             story: story::Keeping::new(),
             cores: cores::Watch::default(),
             another_song: false,
@@ -978,6 +985,10 @@ impl Session {
         {
             std::fs::create_dir_all(parent).map_err(|e| io_error(path, e))?;
         }
+        // What was recorded before the song had a place comes beside it:
+        // copied there first, so that the file about to be written names
+        // recordings that are there.
+        let brought = if self.path.is_none() { self.bring_recordings_beside(path)? } else { Vec::new() };
         // Write beside the target and rename, so a crash mid-save cannot
         // leave a truncated project file.
         // The song goes into the file with what is known of its files,
@@ -987,6 +998,14 @@ impl Session {
         std::fs::rename(&temporary, path).map_err(|e| io_error(path, e))?;
         self.path = Some(path.to_path_buf());
         self.saved_revision = self.revision;
+        // The song's file names the copies now: nothing is left where the
+        // recordings were. (One that cannot be taken away stays, and costs
+        // its room and nothing else.)
+        for old in brought {
+            if let Err(error) = std::fs::remove_file(&old) {
+                log::warn!("'{}' was copied beside the song and could not be taken away: {error}", old.display());
+            }
+        }
         // The journal is written with the song, in the program's own
         // folder: the file just written holds none of it.
         self.write_journal(path);
@@ -1079,6 +1098,7 @@ impl Session {
         self.look(false);
         self.tend_audio();
         self.recover_lost_messages();
+        self.tend_input();
         self.tend_take();
         self.tend_journal();
         if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
@@ -1109,6 +1129,7 @@ impl Session {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Seek(0.0));
         self.abandon_take();
+        self.abandon_audio_take();
         self.project = project;
         self.undo.clear();
         self.redo.clear();
@@ -1157,6 +1178,15 @@ impl Session {
         // Read before compiling: a stretch that ends while the compile runs
         // may be too late for it, and must still count as news afterwards.
         self.stretches_seen = self.audio.finished();
+        // What goes on beside the song: which tracks are armed, and a
+        // take that is heard in place of what its track plays. A take
+        // that is punched in plays through its loop.
+        let live = self.live_now();
+        let looping = !self.recording.punching();
+        let heard = self.recording.heard_take().and_then(|take| {
+            let mut with_take = self.project.clone();
+            with_take.choose_take(take).ok().map(|_| with_take)
+        });
         let (graph, problems) = Compiler {
             factory: self.factory.as_ref(),
             bank: &mut self.bank,
@@ -1166,7 +1196,7 @@ impl Session {
             sample_rate,
             purpose: trill_core::device::Purpose::Playing,
         }
-        .compile(&self.project, true);
+        .compile_live(heard.as_ref().unwrap_or(&self.project), looping, &live);
         self.problems = problems;
         // Which of its tracks can be made at once, for when the song is
         // more than one thread plays in time.

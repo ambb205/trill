@@ -13,15 +13,17 @@
 //! graph and every running device, stays where it is, in a `Seat` that one
 //! stream after another renders from.
 
+use crate::capture::{self, Reader};
 use crate::graph::{AudioData, Graph};
 use crate::host::priority::AudioPriority;
 use crate::host::{
-    AudioConfig, AudioDevices, AudioHost, FailureCallback, NULL_DEVICE, NullHost, OpenError, OpenStream, StreamFailure,
-    StreamHandle, StreamRequest, SystemHost, Timing,
+    AudioConfig, AudioDevices, AudioHost, FailureCallback, InputRequest, NULL_DEVICE, NullHost, OpenError, OpenStream,
+    StreamFailure, StreamHandle, StreamRequest, SystemHost, Timing,
 };
 use crate::live::{Captured, LiveInput, LiveSender, LiveTarget, TrackSet};
-use crate::processor::{Processor, Taken};
+use crate::processor::{Measure, Processor, Taken};
 use crate::queue::Queue;
+use crate::recorder::Feeds;
 use crate::spread::Workers;
 use crate::team::{Team, TeamStats, Watch};
 use std::cell::UnsafeCell;
@@ -261,6 +263,38 @@ fn frames_to_ms(frames: u32, sample_rate: f64) -> f64 {
     if sample_rate > 0.0 { frames as f64 * 1000.0 / sample_rate } else { 0.0 }
 }
 
+/// The input that is open: what is recorded from, as it turned out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputInfo {
+    /// The device's name.
+    pub device: String,
+    /// The rate it runs at, which need not be the engine's.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// How many frames it hands over at a time.
+    pub buffer_frames: u32,
+    /// How many of its own frames the device says lie between its
+    /// microphone and a buffer it hands over.
+    pub latency_frames: u32,
+    /// Whether it was taken for this program alone.
+    pub exclusive: bool,
+    /// How many of the engine's frames before the engine reads a frame
+    /// the input heard it: the device's own latency and what handing the
+    /// sound across takes, which is constant for as long as it is open.
+    pub delay_frames: u32,
+    /// Set when the input is not open as it was asked for: it could not
+    /// be taken exclusively. In words fit to show the user.
+    pub warning: Option<String>,
+}
+
+/// An input that is open, as the engine holds it.
+struct Input {
+    stream: StreamHandle,
+    link: Arc<capture::Link>,
+    counts: Arc<capture::Counts>,
+    info: InputInfo,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("audio output unavailable: {0}")]
@@ -302,12 +336,22 @@ pub(crate) enum Message {
     /// Count the cycles threads run over each track's block, or stop.
     CountCycles(bool),
     /// Starts the take numbered `take` on `tracks`, after `count_in_beats`
-    /// of count-in if the song is not already playing.
+    /// of count-in if the song is not already playing; with `punch`, over
+    /// that stretch of the song only.
     Record {
         take: u32,
         tracks: TrackSet,
         count_in_beats: f64,
+        punch: Option<(f64, f64)>,
     },
+    /// Ends the take that is being recorded and lets the song play on.
+    EndTake,
+    /// What an input device hears from now on, or nothing.
+    Input(Option<Box<Reader>>),
+    /// Where the recorded inputs of the take asked for next go.
+    Feeds(Box<Feeds>),
+    /// Plays a signal and listens for it: see [`Measure`].
+    Measure(Box<Measure>),
 }
 
 /// What the audio thread hands back to be freed elsewhere.
@@ -317,6 +361,13 @@ pub(crate) enum Garbage {
     /// Threads the song is no longer made on: sent home, and waited for,
     /// by whoever collects this.
     Team(Box<Team>),
+    /// What an input device heard, which nothing reads any more.
+    Input(Box<Reader>),
+    /// The audio thread's ends of a take's files, which nothing more is
+    /// handed to.
+    Feeds(Box<Feeds>),
+    /// A measurement, with what it heard.
+    Measure(Box<Measure>),
 }
 
 /// Whether a take is being recorded, as the audio thread has it.
@@ -341,8 +392,9 @@ struct Shared {
     callbacks: AtomicU64,
     /// The output latency the host last reported, in frames.
     latency_frames: AtomicU32,
-    /// A [`StreamFailure`] code, or 0.
+    /// A [`StreamFailure`] code, or 0; and the same for the input.
     failure: AtomicU8,
+    input_failure: AtomicU8,
     /// A [`RecordPhase`].
     recording: AtomicU8,
     /// Times live input was lost for want of room.
@@ -433,13 +485,39 @@ impl Realtime {
                 }
                 Message::SpreadFrom(share) => self.processor.spread_from(share),
                 Message::CountCycles(on) => self.processor.count_cycles(on),
-                Message::Record { take, tracks, count_in_beats } => {
-                    self.processor.record(take, tracks, count_in_beats);
+                Message::Record { take, tracks, count_in_beats, punch } => {
+                    self.processor.record(take, tracks, count_in_beats, punch);
+                }
+                Message::EndTake => self.processor.end_take(),
+                Message::Input(input) => {
+                    if let Some(before) = self.processor.set_input(input) {
+                        let _ = self.garbage.push(Garbage::Input(before));
+                    }
+                }
+                Message::Feeds(feeds) => {
+                    if let Some(before) = self.processor.set_feeds(feeds) {
+                        let _ = self.garbage.push(Garbage::Feeds(before));
+                    }
+                }
+                Message::Measure(measure) => {
+                    if let Some(before) = self.processor.start_measure(measure) {
+                        let _ = self.garbage.push(Garbage::Measure(before));
+                    }
                 }
             }
         }
         if let Some(finished) = self.processor.take_finished_audition() {
             let _ = self.garbage.push(Garbage::Audio(finished));
+        }
+    }
+
+    /// Hands back what the buffer just made was the last to use.
+    fn hand_back(&mut self) {
+        if let Some(feeds) = self.processor.take_finished_feeds() {
+            let _ = self.garbage.push(Garbage::Feeds(feeds));
+        }
+        if let Some(measure) = self.processor.take_finished_measure() {
+            let _ = self.garbage.push(Garbage::Measure(measure));
         }
     }
 
@@ -542,6 +620,7 @@ impl Realtime {
         }
         self.apply_messages();
         self.processor.set_output_latency(timing.latency_frames);
+        self.processor.begin_input(timing.now_ns, total);
         self.take_live_input(total, timing);
         let mut done = 0;
         while done < total {
@@ -550,6 +629,7 @@ impl Realtime {
             sink(&self.left[..frames], &self.right[..frames]);
             done += frames;
         }
+        self.hand_back();
 
         let shared = &self.shared;
         shared.playing.store(self.processor.is_playing(), Ordering::Relaxed);
@@ -796,9 +876,13 @@ pub struct Engine {
     null: Arc<NullHost>,
     config: AudioConfig,
     patience: Patience,
-    // Field order is drop order: the stream goes before the driver thread
-    // that opened it.
+    // Field order is drop order: the streams go before the driver thread
+    // that opened them.
     stream: Option<StreamHandle>,
+    /// The input, while something needs it: see [`Engine::open_input`].
+    input: Option<Input>,
+    /// The last measurement that ended, until it is asked for.
+    measured: Option<Box<Measure>>,
     driver: Driver,
     /// Whether the stream is one that should be asking for audio by
     /// itself, and so can be caught stalling.
@@ -897,6 +981,8 @@ impl Engine {
             config: setup.config,
             patience: setup.patience,
             stream: None,
+            input: None,
+            measured: None,
             driver: Driver::start()?,
             watched: false,
             last_callbacks: 0,
@@ -1100,6 +1186,129 @@ impl Engine {
         &self.live
     }
 
+    // ---- the input ------------------------------------------------------
+
+    /// The input that is open, if one is.
+    pub fn input(&self) -> Option<&InputInfo> {
+        self.input.as_ref().map(|input| &input.info)
+    }
+
+    /// Opens the device that is recorded from ([`AudioConfig::input`]),
+    /// if it is not open: taken for this program alone where the output
+    /// is and the device allows, shared otherwise. From then on the audio
+    /// thread has a frame of it for every frame it makes. An input is
+    /// open only while something needs it, which is the session's to say.
+    ///
+    /// Why it could not be opened is a sentence fit to show the user.
+    pub(crate) fn open_input(&mut self) -> Result<(), String> {
+        if self.input.is_some() {
+            return Ok(());
+        }
+        let engine_rate = self.info.sample_rate;
+        let shared = self.shared.clone();
+        shared.input_failure.store(0, Ordering::Relaxed);
+        let on_failure: FailureCallback = Arc::new(move |failure: StreamFailure| {
+            shared.input_failure.store(failure.code(), Ordering::Relaxed);
+        });
+        let wish = InputRequest {
+            device: self.config.input.clone(),
+            exclusive: self.info.exclusive,
+            sample_rate: Some(engine_rate.round() as u32),
+            buffer_size: Some(self.info.buffer_frames).filter(|frames| *frames > 0),
+        };
+        let mut tries = vec![wish.clone()];
+        if wish.exclusive {
+            tries.push(InputRequest { exclusive: false, ..wish });
+        }
+        let mut refusals: Vec<String> = Vec::new();
+        for request in tries {
+            let (host, attempt, failed) = (self.host.clone(), request.clone(), on_failure.clone());
+            let opened = self
+                .driver
+                .call(self.patience.device, move || host.open_input(&attempt, failed))
+                .unwrap_or_else(|| Err(OpenError::Failed("the input device did not answer".into())));
+            let open = match opened {
+                Ok(open) => open,
+                Err(error) => {
+                    refusals.push(error.to_string());
+                    continue;
+                }
+            };
+            let format = open.format;
+            let delay = capture::delay_frames(
+                format.sample_rate as f64,
+                format.buffer_frames,
+                format.latency_frames,
+                engine_rate,
+                self.info.buffer_frames,
+            );
+            let reader = Reader::new(open.link.clone(), engine_rate, delay);
+            let counts = reader.counts();
+            let warning = refusals.first().map(|refusal| {
+                format!(
+                    "{refusal}. '{}' is open shared with other programs instead, which is a longer way in.",
+                    format.device
+                )
+            });
+            let info = InputInfo {
+                device: format.device,
+                sample_rate: format.sample_rate,
+                channels: format.channels,
+                buffer_frames: format.buffer_frames,
+                latency_frames: format.latency_frames,
+                exclusive: format.exclusive,
+                delay_frames: delay,
+                warning,
+            };
+            log::info!("recording from {} ({} Hz, {} channels)", info.device, info.sample_rate, info.channels);
+            self.send(Message::Input(Some(Box::new(reader))));
+            self.input = Some(Input { stream: open.handle, link: open.link, counts, info });
+            return Ok(());
+        }
+        Err(refusals.join("; "))
+    }
+
+    /// Closes the input: nothing needs it any more, or it has failed.
+    pub(crate) fn close_input(&mut self) {
+        let Some(input) = self.input.take() else { return };
+        self.send(Message::Input(None));
+        let stream = input.stream;
+        self.driver.call(self.patience.device, move || drop(stream));
+        log::info!("the input {} is closed", input.info.device);
+    }
+
+    /// What went wrong with the input since this was last asked, if
+    /// anything did.
+    pub(crate) fn input_failure(&mut self) -> Option<StreamFailure> {
+        StreamFailure::from_code(self.shared.input_failure.swap(0, Ordering::Relaxed))
+    }
+
+    /// The highest level each channel of the input has had since this was
+    /// last asked (1 is full scale), and whether it was at full scale or
+    /// over. Empty with no input open.
+    pub fn take_input_levels(&self) -> Vec<(f32, bool)> {
+        self.input.as_ref().map(|input| input.link.take_levels()).unwrap_or_default()
+    }
+
+    /// How the input has done since it was opened: what never arrived and
+    /// what came too late, each of which is silence where it would have
+    /// been.
+    pub fn input_health(&self) -> Option<capture::Health> {
+        self.input.as_ref().map(|input| capture::health(&input.link, &input.counts))
+    }
+
+    /// How far the input's clock is from the output's as the engine reads
+    /// it now, in parts a million.
+    pub fn input_drift_ppm(&self) -> Option<f64> {
+        self.input.as_ref().map(|input| capture::off_ppm(&input.counts))
+    }
+
+    /// The last measurement that ended, with what it heard.
+    pub(crate) fn take_measured(&mut self) -> Option<Box<Measure>> {
+        self.collect_garbage();
+        self.measured.take()
+    }
+
     pub(crate) fn record_phase(&self) -> RecordPhase {
         match self.shared.recording.load(Ordering::Relaxed) {
             1 => RecordPhase::CountIn,
@@ -1151,6 +1360,9 @@ impl Engine {
                 Garbage::Audio(audio) => drop(audio),
                 // Its threads are told to go home and waited for.
                 Garbage::Team(team) => drop(team),
+                Garbage::Input(input) => drop(input),
+                Garbage::Feeds(feeds) => drop(feeds),
+                Garbage::Measure(measure) => self.measured = Some(measure),
             }
         }
     }
@@ -1345,6 +1557,9 @@ impl Engine {
     /// nearest thing to it. Fails only if nothing at all can be opened and
     /// `silent_fallback` is off.
     fn open(&mut self, silent_fallback: bool) -> Result<Applied, EngineError> {
+        // The input was read for the stream that goes: whoever needs one
+        // opens it again for the stream that comes.
+        self.close_input();
         self.close();
         let mut reset = false;
         if self.seat.claim(self.patience.audio_thread).is_none() {
@@ -1476,6 +1691,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.close_input();
         self.close();
         self.collect_garbage();
     }

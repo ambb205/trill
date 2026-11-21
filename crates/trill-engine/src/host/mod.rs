@@ -109,6 +109,46 @@ pub struct StreamFormat {
     pub exclusive: bool,
 }
 
+/// One attempt to open a device to record from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputRequest {
+    /// `None` for the system's default input.
+    pub device: Option<String>,
+    /// Take the device for this program alone, at `sample_rate` and with
+    /// buffers of `buffer_size`. A device that is shared runs at the rate
+    /// and the buffer the system has it at, whatever is asked.
+    pub exclusive: bool,
+    pub sample_rate: Option<u32>,
+    pub buffer_size: Option<u32>,
+}
+
+/// What an input turned out to be.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputFormat {
+    /// The device's name, as [`AudioDevice::name`] has it.
+    pub device: String,
+    /// The rate it runs at, which need not be the engine's: what comes in
+    /// is brought into the engine's clock whatever it is
+    /// ([`capture`](crate::capture)).
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// How many frames it hands over at a time.
+    pub buffer_frames: u32,
+    /// How many of its frames the device says lie between its microphone
+    /// and a buffer it hands over. What it does not say is found by
+    /// measuring ([`Session::measure_latency`](crate::Session::measure_latency)).
+    pub latency_frames: u32,
+    pub exclusive: bool,
+}
+
+/// An input a host has opened. Dropping `handle` closes it; the host's
+/// thread has handed over its last buffer by the time the drop returns.
+pub struct OpenInput {
+    pub format: InputFormat,
+    pub handle: StreamHandle,
+    pub(crate) link: Arc<crate::capture::Link>,
+}
+
 /// Why a device could not be opened.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OpenError {
@@ -116,6 +156,8 @@ pub enum OpenError {
     NotFound(String),
     #[error("the system has no audio output device")]
     NoDevice,
+    #[error("the system has no audio input device")]
+    NoInput,
     /// The device is there, but not in the way that was asked for.
     #[error("{0}")]
     Refused(String),
@@ -197,6 +239,17 @@ pub trait AudioHost: Send + Sync {
         renderer: Renderer,
         on_failure: FailureCallback,
     ) -> Result<OpenStream, OpenError>;
+
+    /// Opens a device to record from and starts it. From then on the
+    /// host's thread hands every buffer the device gives to the
+    /// [`Sink`](crate::capture::Sink) the host made for it
+    /// ([`capture::link`](crate::capture)), with the time on this host's
+    /// clock at which the buffer's first frame was heard; `on_failure` is
+    /// called if the stream stops working. A host without inputs refuses.
+    fn open_input(&self, request: &InputRequest, on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+        let _ = (request, on_failure);
+        Err(OpenError::NoInput)
+    }
 
     /// Called while the engine waits for the audio thread to do something.
     /// A real host has an audio thread of its own and does nothing here; a

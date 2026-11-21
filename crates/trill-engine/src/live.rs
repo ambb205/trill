@@ -159,6 +159,39 @@ pub(crate) enum Captured {
     Wrapped { pass: u32 },
     /// The transport stopped at `beat`, and with it the take.
     Stopped { beat: f64, pass: u32 },
+    /// Something happened to the take's audio when `at` frames of the
+    /// recorded inputs had been handed to its files: the frame handed
+    /// over next is the first that `mark` is true of.
+    Audio { at: u64, mark: AudioMark },
+}
+
+/// What a take's audio is placed by: see [`Captured::Audio`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum AudioMark {
+    /// The song began to roll from `beat`. The input frame handed over
+    /// next was read as the song's first frame was made, which is heard
+    /// `latency` frames later; the input was heard `delay` frames before
+    /// it was read. So what was sung to the song's first frame is that
+    /// many frames further on in the file.
+    Rolling {
+        beat: f64,
+        latency: u32,
+        delay: u32,
+    },
+    /// The loop came round: `pass` is the pass now beginning.
+    Wrapped {
+        pass: u32,
+    },
+    /// The song came into, or left, the stretch the take is punched in
+    /// over.
+    PunchedIn,
+    PunchedOut,
+    /// The song stopped at `beat`, or the take was ended there.
+    Stopped {
+        beat: f64,
+    },
+    /// Nothing more is handed over.
+    Ended,
 }
 
 #[cfg(test)]

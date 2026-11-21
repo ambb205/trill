@@ -3,10 +3,10 @@
 //! plugins and audio files.
 
 use crate::graph::{
-    AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation,
-    RegionAudio, SendNode, TrackNode, TrackState,
+    AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, InputTap, MAX_BLOCK, MasterNode, Meter, NoteEvent,
+    ParamAutomation, RegionAudio, SendNode, TrackNode, TrackState,
 };
-use crate::processor::CLIP_FADE_SECONDS;
+use crate::processor::{CLIP_FADE_SECONDS, CROSS_FADE_SECONDS};
 use crate::ready::{LoadWatch, Plugins};
 use crate::sources::AudioSources;
 use parking_lot::Mutex;
@@ -17,7 +17,7 @@ use trill_core::device::{
     DeviceController, DeviceError, DeviceFactory, DeviceInstance, DeviceWarning, ParamInfo, Purpose,
 };
 use trill_core::project::{AudioContent, AutomationTarget, Clip, ClipContent};
-use trill_core::{ClipId, Device, DeviceId, Project, TempoMap, Track, TrackId, TrackKind};
+use trill_core::{ClipId, Device, DeviceId, Monitoring, Project, TempoMap, Track, TrackId, TrackKind};
 use trill_dsp::util::db_to_gain;
 
 /// How far apart, in beats, the end of one clip and the start of the next
@@ -215,10 +215,25 @@ fn said_if_slow(asked: Instant, what: impl FnOnce() -> String) {
     }
 }
 
+/// What is going on beside the song that a graph which is played has to
+/// know of: none of it is the song's, and a render knows none of it.
+#[derive(Clone, Debug, Default)]
+pub struct Live {
+    /// The tracks that are armed: one that records an input and is
+    /// monitored while armed lets it through.
+    pub armed: HashSet<TrackId>,
+}
+
 impl Compiler<'_> {
     /// Builds a graph for `project`. Devices already in the bank are left
     /// for the audio thread to carry over; new ones are created here.
     pub fn compile(&mut self, project: &Project, looping: bool) -> (Box<Graph>, Vec<Problem>) {
+        self.compile_live(project, looping, &Live::default())
+    }
+
+    /// [`Compiler::compile`], for a song that is played while `live` goes
+    /// on beside it.
+    pub fn compile_live(&mut self, project: &Project, looping: bool, live_now: &Live) -> (Box<Graph>, Vec<Problem>) {
         // A reference is a track with a rule of its own for when it is
         // heard: it comes to a mute and a solo here, and nothing further
         // on knows that there are references.
@@ -249,6 +264,10 @@ impl Compiler<'_> {
             }
             let mut notes = Vec::new();
             let mut audio = Vec::new();
+            // What each region is of its clip, for the seams between
+            // clips: whether it is the clip's first piece and is faded
+            // across what ends there, and whether it is its last.
+            let mut edges: Vec<(bool, bool)> = Vec::new();
             for clip in track.clips.iter().filter(|clip| !clip.muted) {
                 let content = match &clip.content {
                     ClipContent::Midi(_) => {
@@ -299,6 +318,7 @@ impl Compiler<'_> {
                     let (seam_before, seam_after) = (index > 0, index < last);
                     let before = if seam_before { seam_beats(pieces[index - 1].tempo) } else { 0.0 };
                     let after = if seam_after { seam_beats(pieces[index + 1].tempo) } else { 0.0 };
+                    edges.push((index == 0 && content.crossfade, index == last));
                     audio.push(AudioRegion {
                         start: piece.start - before,
                         end: piece.end + after,
@@ -306,6 +326,8 @@ impl Compiler<'_> {
                         clip_end: clip.end(),
                         seam_before,
                         seam_after,
+                        cross_before: false,
+                        cross_after: false,
                         fade_in: content.fade_in,
                         fade_out: content.fade_out,
                         joins_previous: false,
@@ -319,6 +341,18 @@ impl Compiler<'_> {
             }
             notes.sort_by(|a, b| a.start.total_cmp(&b.start));
             join_continuations(&mut audio);
+            cross_seams(&mut audio, &edges, &tempo_map);
+            // What the track records, and whether it is let through to
+            // its devices now. Never in a render: it hears no input.
+            let input = track.input.filter(|_| live).map(|input| {
+                let (left, right) = input.channels();
+                let heard = match input.monitor {
+                    Monitoring::Off => false,
+                    Monitoring::Armed => live_now.armed.contains(&track.id),
+                    Monitoring::Always => true,
+                };
+                InputTap { left, right, heard }
+            });
 
             let meter = self.meters.tracks.entry(track.id).or_default().clone();
             let chain = self.chain(&track.devices, project, &routing.keys, &mut problems);
@@ -327,6 +361,7 @@ impl Compiler<'_> {
             let unsaid = track.profile.articulations.iter().find(|way| way.default && way.key.is_some());
             tracks.push(TrackNode {
                 id: track.id,
+                input,
                 switches,
                 switch_keys,
                 stay_keys,
@@ -389,8 +424,12 @@ impl Compiler<'_> {
         let region = project.loop_region;
         let moves_params =
             !master.chain.automation.is_empty() || tracks.iter().any(|track| !track.chain.automation.is_empty());
+        let bit = |channel: usize| 1u32.checked_shl(channel as u32).unwrap_or(0);
+        let inputs = tracks.iter().filter_map(|track| track.input.filter(|tap| tap.heard));
+        let inputs = inputs.fold(0, |mask, tap| mask | bit(tap.left) | tap.right.map_or(0, bit));
         let graph = Graph {
             moves_params,
+            inputs,
             tracks,
             buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
             keys: routing.keys.iter().map(|_| Bus::new()).collect(),
@@ -684,6 +723,31 @@ fn pieces(content: &AudioContent, clip: &Clip, map: &TempoMap) -> Vec<Piece> {
         }
     }
     cut
+}
+
+/// Fades the clips that are marked for it across the clip that ends where
+/// they begin ([`AudioContent::crossfade`]): each of the two is played
+/// half the fade into the other's time. `edges` says of each region
+/// whether it is the first piece of such a clip, and whether it is the
+/// last piece of its clip. Clips that carry straight on from one another
+/// are one sound already, and are left as they are.
+fn cross_seams(regions: &mut [AudioRegion], edges: &[(bool, bool)], map: &TempoMap) {
+    for later in 0..regions.len() {
+        if !edges[later].0 || regions[later].joins_previous {
+            continue;
+        }
+        let seam = regions[later].clip_start;
+        let earlier = (0..regions.len()).find(|&index| {
+            let region = &regions[index];
+            index != later && edges[index].1 && !region.joins_next && (region.clip_end - seam).abs() <= TOUCHING_BEATS
+        });
+        let Some(earlier) = earlier else { continue };
+        let half = 0.5 * CROSS_FADE_SECONDS * map.tempo_at(seam) / 60.0;
+        regions[earlier].cross_after = true;
+        regions[earlier].end += half;
+        regions[later].cross_before = true;
+        regions[later].start = (regions[later].start - half).max(0.0);
+    }
 }
 
 /// Finds the clips that carry straight on from another (the halves of a
