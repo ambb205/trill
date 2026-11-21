@@ -48,6 +48,11 @@ thread_local! {
 
 /// The calls made by the threads a song is spread over, all told.
 static TEAM_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Held by a test for as long as it has threads a song is spread over:
+/// their calls are counted in one place, and threads of another test that
+/// are starting or being let go of at that moment would be counted with
+/// them.
+static ONE_TEAM_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct CountingAllocator;
 
@@ -427,6 +432,7 @@ fn notes_and_controllers_on_sixteen_channels_never_touch_the_allocator() {
 
 #[test]
 fn a_song_spread_over_several_threads_touches_the_allocator_on_none_of_them() {
+    let _turn = ONE_TEAM_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::sync::atomic::Ordering;
     use trill_core::project::{AutomationPoint, AutomationTarget};
     use trill_core::{ChainRef, Note, TrackKind};
@@ -818,6 +824,7 @@ fn the_counting_allocator_counts() {
 
 #[test]
 fn inputs_that_are_heard_through_tracks_on_several_threads_touch_the_allocator_on_none_of_them() {
+    let _turn = ONE_TEAM_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::sync::atomic::Ordering;
     use trill_core::{ChainRef, Monitoring, Note, TrackInput};
     use trill_engine::team::Team;
