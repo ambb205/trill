@@ -13,6 +13,18 @@ Only Windows has been run so far.
 - An input and an output on two real clocks, measured. The engine follows the two clocks and its tests hold it
   to a click within half a millisecond over half an hour at 200 parts in a million; on hardware it has been run
   through a virtual cable only, whose two ends share one clock. See [the engine's page](engine.md).
+- Saying that an input and an output are one device. Where the system says so (an interface with its own
+  input and output), a frame of the input is a frame of the song, to the bit. Where it says nothing, as of a
+  built-in device or a virtual cable, Trill reads the input by its time stamps as it would a second clock: a
+  take then lands within a frame or two and is not a copy of what was heard to the bit. A user cannot yet say
+  "these two are one device"; a test can.
+- A device's own word that frames are missing, on a real device. What a device says of a buffer (its flag, its
+  count of frames, a stamp it does not stand by) is taken as the tests' scripted devices say it; no real device
+  was made to drop frames.
+- The engine's own clock through a callback that is late and caught up. An output that asks for a buffer more
+  than a fiftieth of a second late is taken to have played that long without the engine, which is so where it
+  ran dry; a device that holds more than that and catches up puts a step in what is recorded then, and another
+  when its line is found again.
 - Takes of notes. A take of what a keyboard plays is written into the track's clip, each pass of a loop layered
   onto the last, as before; lanes of takes and a comp are for audio.
 - A crossfade at a comp's seam is 12 ms and equal in power; its length and shape cannot be chosen.

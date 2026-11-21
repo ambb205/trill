@@ -156,6 +156,30 @@ struct LiveEvent {
     early: f64,
 }
 
+/// A take that was asked for while the place its input is read at had yet
+/// to be put for good: it begins when it has been, or when it has waited
+/// `frames` frames more.
+///
+/// An input's place is put by the first time stamps its device and the
+/// engine's give, each of which may be as late as any, and put again a
+/// quarter of a second on by the least late of them: at once, which is a
+/// step in what is read. A take that began in that quarter second would
+/// have the step in it, and what lies before it a few milliseconds from
+/// where it was sung.
+#[derive(Copy, Clone)]
+struct Waiting {
+    take: u32,
+    tracks: TrackSet,
+    count_in_beats: f64,
+    punch: Option<(f64, f64)>,
+    frames: u64,
+}
+
+/// How long a take waits for its input's place at the most, in seconds:
+/// four times what the place takes to be put. An input that hands nothing
+/// over has no place, and the take is not kept from beginning by it.
+const WAITS_FOR_ITS_PLACE: f64 = 1.0;
+
 /// A take in progress.
 #[derive(Copy, Clone)]
 struct Recording {
@@ -298,6 +322,7 @@ pub struct Processor {
     output_latency: f64,
     steady_latency: f64,
     recording: Option<Recording>,
+    waiting: Option<Waiting>,
     /// Where what is recorded goes; `None` when rendering offline.
     capture: Option<rtrb::Producer<Captured>>,
     /// Frames played since the song position last jumped (or playback
@@ -362,6 +387,7 @@ impl Processor {
             output_latency: 0.0,
             steady_latency: -1.0,
             recording: None,
+            waiting: None,
             capture: None,
             continuity: 0,
             before_jump: 0.0,
@@ -445,6 +471,8 @@ impl Processor {
     /// Ends the take that is being recorded and lets the song play on: its
     /// file is full, its device has gone.
     pub(crate) fn end_take(&mut self) {
+        // (One that still waited for its input's place begins and ends.)
+        self.begin_waiting(true);
         if let Some(heard) = self.heard() {
             let (beat, pass) = heard.at(0, 0.0);
             self.recording = None;
@@ -619,6 +647,9 @@ impl Processor {
     /// silence a key that hangs), and tails ring out. A take that was being
     /// recorded ends here.
     pub fn stop(&mut self) {
+        // A take that still waited for its input's place begins here and
+        // ends here: whoever asked for it is told both.
+        self.begin_waiting(true);
         if let Some(heard) = self.heard() {
             // Where the song was heard to be when it was stopped.
             let (beat, pass) = heard.at(0, 0.0);
@@ -894,6 +925,33 @@ impl Processor {
     /// here on, the count-in too: what was sung into the downbeat is there
     /// to be drawn out from under the clip's edge.
     pub(crate) fn record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64, punch: Option<(f64, f64)>) {
+        // No step inside a take: one that records an input and is not
+        // counted in begins when the place the input is read at has been
+        // put for good. (A take that is counted in begins at once: the
+        // place is put while the count-in goes by, ahead of the take's
+        // first frame, and stays from where the song begins to roll.)
+        let counted = !self.playing && count_in_beats.is_finite() && count_in_beats > 0.0;
+        let unsettled = self.input.as_ref().is_some_and(|input| !input.settled());
+        if self.feeds.is_some() && unsettled && !counted {
+            let frames = (WAITS_FOR_ITS_PLACE * self.sample_rate) as u64;
+            self.waiting = Some(Waiting { take, tracks, count_in_beats, punch, frames });
+            return;
+        }
+        self.begin_record(take, tracks, count_in_beats, punch);
+    }
+
+    /// Begins the take that waits for its input's place, if that has been
+    /// put, if the take has waited as long as one does, or `anyway`.
+    fn begin_waiting(&mut self, anyway: bool) {
+        let Some(waiting) = self.waiting else { return };
+        let settled = self.input.as_ref().is_none_or(|input| input.settled());
+        if anyway || settled || waiting.frames == 0 {
+            self.waiting = None;
+            self.begin_record(waiting.take, waiting.tracks, waiting.count_in_beats, waiting.punch);
+        }
+    }
+
+    fn begin_record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64, punch: Option<(f64, f64)>) {
         self.report(Captured::Began { take });
         (self.feeding, self.trailing) = (self.feeds.is_some(), None);
         // The take is counted in at the tempo, and in the meter, that the
@@ -913,6 +971,8 @@ impl Processor {
 
     pub(crate) fn record_phase(&self) -> RecordPhase {
         match &self.recording {
+            // A take that waits for its input's place has yet to roll.
+            None if self.waiting.is_some() => RecordPhase::CountIn,
             None => RecordPhase::Off,
             Some(recording) if recording.count_in > 0 => RecordPhase::CountIn,
             Some(_) => RecordPhase::Rolling,
@@ -1031,6 +1091,13 @@ impl Processor {
         let mut done = 0;
         while done < total {
             let mut frames = (total - done).min(MAX_BLOCK);
+
+            // A take that waited for the place its input is read at
+            // begins with the first block after it was put.
+            if let Some(waiting) = &mut self.waiting {
+                waiting.frames = waiting.frames.saturating_sub(frames as u64);
+                self.begin_waiting(false);
+            }
 
             // End the block exactly where a count-in ends, so the song
             // starts on the sample.

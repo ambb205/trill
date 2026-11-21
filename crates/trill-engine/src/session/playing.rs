@@ -97,6 +97,11 @@ pub(super) struct Playing {
     /// When the song was last said to have changed because audio is
     /// being recorded.
     audio_noted: Option<Instant>,
+    /// When the song was stopped under the take that is going on: the
+    /// take is over when the audio thread has said where it ended and the
+    /// last of its sound has come in, or when that has been waited for
+    /// long enough.
+    stopping: Option<Instant>,
 }
 
 impl Playing {
@@ -239,6 +244,9 @@ impl Session {
             return;
         }
         log::warn!("the audio thread missed messages while it was away; telling it again");
+        // An input that was closed again because it could not be told of
+        // it is opened now, if it is still needed.
+        self.input_is_to_be_tried();
         self.release_everything_played();
         self.compile_and_swap();
         let mut values = Vec::new();
@@ -606,10 +614,35 @@ impl Session {
         }
         self.write_take();
         // Over once the song has stopped and the last of the take's audio
-        // has been handed over.
-        if self.playing.take.as_ref().is_some_and(|active| active.take.is_stopped()) && self.recording.ended() {
+        // has been handed over. Or when the song was stopped and the audio
+        // thread never said so: the take then ends where the song was last
+        // known to be, with what there is of its sound.
+        let over = self.playing.take.as_ref().is_some_and(|active| active.take.is_stopped()) && self.recording.ended();
+        let given_up = self.playing.stopping.is_some_and(|at| at.elapsed() >= STOP_WAIT + AUDIO_WAIT);
+        if over || given_up {
             self.finish_take(false);
         }
+    }
+
+    /// The song was told to stop under a take. Where the take ended is the
+    /// audio thread's to say, and what was sung to the last of the song is
+    /// on its way in for as long as sound takes to go round: the take is
+    /// over when both have come, at a round of housekeeping
+    /// ([`Session::is_recording`] says when), and nobody waits for that
+    /// with the session held.
+    ///
+    /// Where the audio thread only runs when it is told to (a host that is
+    /// driven by hand, as tests have them), there is nobody to keep
+    /// waiting and no later moment unless one is made: the take is over
+    /// when this returns.
+    pub(super) fn end_take_when_it_is_in(&mut self) {
+        if self.playing.take.is_none() {
+            return;
+        }
+        if !self.engine.runs_by_itself() {
+            return self.finish_take(true);
+        }
+        self.playing.stopping.get_or_insert_with(Instant::now);
     }
 
     /// The output latency in beats, at the tempo the song has where it is.
@@ -645,6 +678,7 @@ impl Session {
     /// project, and the whole is one undo step. With `wait`, the audio
     /// thread is given a moment to say exactly where the take stopped.
     pub(super) fn finish_take(&mut self, wait: bool) {
+        self.playing.stopping = None;
         if self.playing.take.is_none() {
             return;
         }
@@ -694,7 +728,7 @@ impl Session {
     /// Drops a take without writing it: the project it belonged to is
     /// being replaced.
     pub(super) fn abandon_take(&mut self) {
-        self.playing.punched = false;
+        (self.playing.punched, self.playing.stopping) = (false, None);
         if let Some(active) = self.playing.take.take() {
             self.end_run();
             self.end_group(active.group);

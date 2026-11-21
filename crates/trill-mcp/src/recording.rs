@@ -143,7 +143,9 @@ pub struct RecordingLatencyRequest {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct UnusedRecordingsRequest {
-    /// Paths to delete, as the list gives them. Deleting cannot be undone. Omit to list only.
+    /// Paths to remove, as the list gives them. They go to the system's Recycle Bin (or, where there is none, a
+    /// `removed` folder beside the takes), never out of existence, and the reply says where. One that another
+    /// song plays is refused, with that song's name. Omit to list only.
     pub delete: Option<Vec<String>>,
 }
 

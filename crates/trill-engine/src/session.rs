@@ -894,10 +894,25 @@ impl Session {
         self.engine.send(Message::Play);
     }
 
-    /// Stops the song. A take that was being recorded ends here: the keys
-    /// still down end with it, and what was played is in the project by
-    /// the time this returns ([`Session::last_take`]).
+    /// Stops the song. A take that was being recorded ends with it: the
+    /// keys still down end there, and what was played and sung is in the
+    /// project a moment later ([`Session::is_recording`] says when,
+    /// [`Session::last_take`] and [`Session::last_recording`] what), once
+    /// the audio thread has said where the song stopped and the last of
+    /// what was sung has come in. That is a round of housekeeping's to
+    /// see: nobody waits for it with the session held. (Where the audio is
+    /// driven by hand, as in tests, the take is over when this returns:
+    /// see `end_take_when_it_is_in`.)
     pub fn stop(&mut self) {
+        self.engine.send(Message::Stop);
+        self.end_take_when_it_is_in();
+    }
+
+    /// Stops the song, and returns when a take that was being recorded is
+    /// in the project: for whoever has the session to itself (a test, a
+    /// program that measures). It waits for as long as sound takes to go
+    /// round, with the session held; a front end calls [`Session::stop`].
+    pub fn stop_and_wait(&mut self) {
         self.engine.send(Message::Stop);
         self.finish_take(true);
     }
@@ -910,7 +925,7 @@ impl Session {
     pub fn panic(&mut self) {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Panic);
-        self.finish_take(true);
+        self.end_take_when_it_is_in();
     }
 
     pub fn transport(&self) -> TransportStatus {

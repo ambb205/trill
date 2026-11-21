@@ -9,6 +9,14 @@
 //! that whatever becomes of the program the file is a WAV file that reads,
 //! holding all but its last second or so. It is 32-bit float, one channel
 //! or two, and nothing else: what a microphone gave, as it gave it.
+//!
+//! "On disk" is meant: each time, the audio is put through to the disk
+//! before the header is written, and the header after it. A machine that
+//! loses its power then leaves the same file a program that is killed
+//! leaves, and never a header that says more than is there. That costs two
+//! waits for the disk a second, on the thread that writes the take and no
+//! other; `what_putting_a_take_through_to_the_disk_costs` (opt-in) measures
+//! them, and the module's caller keeps ten seconds of room for them.
 
 use crate::MediaError;
 use std::fs::File;
@@ -55,6 +63,12 @@ pub struct GrowingWav {
     said: u64,
     /// What is handed over and not yet written.
     waiting: Vec<u8>,
+    /// Whether the file is put through to the disk each time: until the
+    /// system says it cannot be (a share that has no such thing), after
+    /// which it is not asked again.
+    through: bool,
+    /// The longest any one time took, the waits for the disk included.
+    slowest: std::time::Duration,
 }
 
 impl GrowingWav {
@@ -92,7 +106,14 @@ impl GrowingWav {
             frames: 0,
             said: 0,
             waiting: Vec::with_capacity(per_second + per_second / 4),
+            through: true,
+            slowest: std::time::Duration::ZERO,
         })
+    }
+
+    /// The longest that putting what it had on disk has taken, so far.
+    pub fn slowest_checkpoint(&self) -> std::time::Duration {
+        self.slowest
     }
 
     pub fn path(&self) -> &Path {
@@ -156,6 +177,7 @@ impl GrowingWav {
     /// audio first and the header after, so that the header never says
     /// more than is there.
     pub fn checkpoint(&mut self) -> Result<(), MediaError> {
+        let began = std::time::Instant::now();
         let written = (|| {
             if let Some(at) = self.limits.fails_at
                 && self.on_disk + self.waiting.len() as u64 > at
@@ -171,6 +193,8 @@ impl GrowingWav {
             self.file.write_all(&self.waiting)?;
             self.on_disk += self.waiting.len() as u64;
             self.waiting.clear();
+            // Through to the disk before the header says it is there.
+            self.put_through();
             let data = self.frames * u64::from(self.channels) * 4;
             self.file.seek(SeekFrom::Start(RIFF_LENGTH_AT))?;
             self.file.write_all(&((HEADER_BYTES - 8 + data) as u32).to_le_bytes())?;
@@ -179,8 +203,10 @@ impl GrowingWav {
             self.file.seek(SeekFrom::Start(DATA_LENGTH_AT))?;
             self.file.write_all(&(data as u32).to_le_bytes())?;
             self.file.seek(SeekFrom::End(0))?;
+            self.put_through();
             Ok(())
         })();
+        self.slowest = self.slowest.max(began.elapsed());
         written.map_err(|error: std::io::Error| match error.kind() {
             // In words: the system's own differ from one to the next.
             std::io::ErrorKind::StorageFull => MediaError::write(&self.path, "the disk is full"),
@@ -188,6 +214,15 @@ impl GrowingWav {
         })?;
         self.said = self.frames;
         Ok(())
+    }
+
+    /// Has the system put what it was handed through to the disk. Where
+    /// it says it cannot, the file is written as any file is, and what a
+    /// machine that loses its power leaves of it is the system's to say.
+    fn put_through(&mut self) {
+        if self.through && self.file.sync_data().is_err() {
+            self.through = false;
+        }
     }
 
     /// Ends the file: all of it is on disk, as far as the system will say.
@@ -296,5 +331,43 @@ mod tests {
         assert!((3.0..3.2).contains(&hours), "{hours} hours");
         assert!(GrowingWav::create(&folder.path().join("no.wav"), 0.0, 1).is_err());
         assert!(GrowingWav::create(&folder.path().join("no.wav"), 48_000.0, 3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cost {
+    use super::*;
+
+    /// What it costs to put a take through to the disk twice a second of
+    /// audio: `cargo test -p trill-media what_putting_a_take -- --ignored
+    /// --nocapture`. A minute of a pair at 48 kHz, written a second at a
+    /// time as fast as it goes, in the system's folder for temporary files
+    /// or in `TRILL_TAKE_FOLDER`.
+    #[test]
+    #[ignore = "measures this machine's disk"]
+    fn what_putting_a_take_through_to_the_disk_costs() {
+        let folder = match std::env::var_os("TRILL_TAKE_FOLDER") {
+            Some(folder) => tempfile::tempdir_in(folder).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        let second: Vec<f32> = (0..96_000).map(|n| (n % 2000) as f32 / 1000.0 - 1.0).collect();
+        let mut times = Vec::new();
+        let mut file = GrowingWav::create(&folder.path().join("take.wav"), 48_000.0, 2).unwrap();
+        for _ in 0..60 {
+            let began = std::time::Instant::now();
+            file.write(&second).unwrap();
+            times.push(began.elapsed().as_secs_f64() * 1000.0);
+        }
+        let through = file.through;
+        file.finish().unwrap();
+        times.sort_by(f64::total_cmp);
+        let mean = times.iter().sum::<f64>() / times.len() as f64;
+        println!(
+            "a second of a pair put through to the disk ({}): {mean:.2} ms on average, {:.2} ms at the middle, \
+             {:.2} ms at the most, of sixty",
+            if through { "the system did it each time" } else { "the system would not" },
+            times[times.len() / 2],
+            times[times.len() - 1]
+        );
     }
 }

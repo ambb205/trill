@@ -44,7 +44,7 @@ use super::bin::{Bin, Removed};
 use super::{Session, SessionError};
 use crate::capture::Health;
 use crate::compile::Live;
-use crate::engine::{InputInfo, Message};
+use crate::engine::{InputInfo, Message, NoInput};
 use crate::live::AudioMark;
 use crate::processor::Measure;
 use crate::recorder::{FileOf, Growing, TakeWriter};
@@ -449,8 +449,17 @@ impl Session {
         }
     }
 
-    fn cannot_open(&self, why: &str) -> String {
-        format!("the input cannot be opened: {why}. Choose the device that is recorded from in the audio settings")
+    fn cannot_open(&self, why: &NoInput) -> String {
+        match why {
+            NoInput::Refused(why) => format!(
+                "the input cannot be opened: {why}. Choose the device that is recorded from in the audio settings"
+            ),
+            // Nothing is wrong with the choice of device.
+            NoInput::Away(device) => format!(
+                "the audio device is not answering, so '{device}' was closed again: nothing would have heard it. \
+                 It is opened when the audio device answers"
+            ),
+        }
     }
 
     /// Whether anything needs the input: a track that records one is
@@ -788,7 +797,18 @@ impl Session {
             Ok(started) => started,
             Err(why) => return refuse(format!("the take cannot be written: {why}")),
         };
-        self.engine.send(Message::Feeds(feeds));
+        if !self.engine.send(Message::Feeds(feeds)) {
+            // The audio thread is not taking messages: it would never
+            // hand the take a frame. The files that were begun go, being
+            // of no length and nobody's.
+            for file in writer.finish() {
+                let _ = std::fs::remove_file(file.path());
+            }
+            return refuse(
+                "the audio device is not answering, so nothing can be recorded just now: record when it is back"
+                    .to_string(),
+            );
+        }
         self.recording.take = Some(AudioTake {
             id,
             begun: false,
@@ -1334,6 +1354,16 @@ impl Session {
             .collect();
         unused.sort();
         unused
+    }
+
+    /// Has the inputs that are opened from now on taken to count time by
+    /// the output's clock, whatever the system says of the pair: for a
+    /// test through a cable, whose two ends are one device of which the
+    /// system says nothing. A belief the time stamps may overturn, as the
+    /// system's own word is.
+    #[doc(hidden)]
+    pub fn say_input_shares_the_outputs_clock(&mut self, said: bool) {
+        self.engine.say_one_clock(said);
     }
 
     /// Holds the files of the takes recorded from now on to `limits`: for

@@ -86,9 +86,16 @@ const CLOCK_RANGE: f64 = 0.005;
 /// once, in seconds: an input that stopped and started, or an engine that
 /// was away. Anything less is steered out.
 const JUMP_SECONDS: f64 = 0.05;
-/// A buffer whose time stamp is this far ahead of the frames before it, in
-/// seconds, was preceded by frames the device never handed over. They are
-/// written as silence.
+/// A clock that is this far, in seconds, from where its line has it is
+/// not the clock the line was drawn through: an input whose stamps have
+/// fallen that far back, an engine whose device did not ask for that long.
+/// The line is begun anew.
+///
+/// (A stamp that far *ahead* on an input is a late stamp and nothing else.
+/// It was once taken for frames the device had not handed over, and
+/// silence written for them: a buffer handed over twenty milliseconds late
+/// then put everything after it twenty milliseconds late. Frames are
+/// missing when the device says so: see [`Missing`].)
 const GAP_SECONDS: f64 = 0.02;
 
 /// How many places between two frames of the input the filter is kept at.
@@ -198,6 +205,14 @@ impl Fit {
         let (expected, _) = moved.solve();
         let reach = OUT_AT_MOST * self.nominal;
         let away = frame - moved.base - expected;
+        // The line is shown the least late stamp of a stretch: one that is
+        // this far out had no stamp near the line in all that time, which
+        // is not lateness. The stream is not where the line has it (frames
+        // went missing that nobody said, or its clock was set), and the
+        // line is begun anew from where it is.
+        if away.abs() > GAP_SECONDS * self.nominal {
+            return (Self::begun(frame, ns, self.nominal), true);
+        }
         let out = match away {
             away if away > reach => self.out.max(0) + 1,
             away if away < -reach => self.out.min(0) - 1,
@@ -234,6 +249,10 @@ pub(crate) struct Link {
     /// begun anew because the device's clock was nowhere near it.
     lost: AtomicU64,
     restarts: AtomicU32,
+    /// Whether the line is through the least late stamp of a stretch: not
+    /// through the first one the device gave, which may be as late as any
+    /// and which the line is begun again without.
+    settled: AtomicBool,
     /// The first frame the engine has yet to read: what lies before it
     /// was read, as what it was or as silence for what had not arrived.
     unread: AtomicU64,
@@ -260,6 +279,7 @@ impl Link {
             line_rate: AtomicU64::new(0),
             lost: AtomicU64::new(0),
             restarts: AtomicU32::new(0),
+            settled: AtomicBool::new(false),
             unread: AtomicU64::new(0),
             peaks: (0..channels).map(|_| AtomicU32::new(0)).collect(),
             clipped: (0..channels).map(|_| AtomicU32::new(0)).collect(),
@@ -318,6 +338,46 @@ pub struct Sink {
     written: u64,
     /// Which stamps the line is shown.
     least_late: LeastLate,
+    /// The stamp of the buffer before, believed or not.
+    stamped: Option<u64>,
+}
+
+/// What a device says of a buffer it hands over, beyond its frames.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Said {
+    /// When it heard the buffer's first frame, on the host's clock.
+    /// Nothing where it gave no stamp, gave one it does not stand by, or
+    /// gave one that cannot be (the zero of its counter, a moment that has
+    /// yet to come): such a buffer's frames are taken and its stamp is not
+    /// shown to the line.
+    pub heard_ns: Option<u64>,
+    /// Whether it handed over every frame since the buffer before.
+    pub missing: Missing,
+}
+
+impl Said {
+    /// A buffer the device says nothing of but when it heard it.
+    pub fn at(heard_ns: u64) -> Self {
+        Self { heard_ns: Some(heard_ns), missing: Missing::Nothing }
+    }
+}
+
+/// Whether frames are missing before a buffer, by the device's own word:
+/// the flag it sets on a buffer that does not follow the one before, and
+/// its own count of the frames it has heard. Never by a time stamp alone:
+/// a stamp is late whenever a driver or a thread was, and frames taken for
+/// missing that were not put everything after them late.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Missing {
+    /// None that it says.
+    #[default]
+    Nothing,
+    /// So many, by its own count of frames.
+    Frames(u64),
+    /// Some, and it does not count them: as many as its time stamp has it
+    /// ahead of what it handed over. (None, where the stamp is not
+    /// believed: there is then nothing to tell how many by.)
+    Uncounted,
 }
 
 /// Picks, of the stamps of each stretch of [`LEAST_LATE_OF`] seconds, the
@@ -380,7 +440,7 @@ pub fn pair(rate: f64, channels: usize) -> (Sink, Source) {
 /// reads.
 pub(crate) fn link(rate: f64, channels: usize) -> (Sink, Arc<Link>) {
     let link = Arc::new(Link::new(rate, channels));
-    (Sink { link: link.clone(), fit: None, written: 0, least_late: LeastLate::default() }, link)
+    (Sink { link: link.clone(), fit: None, written: 0, least_late: LeastLate::default(), stamped: None }, link)
 }
 
 impl Sink {
@@ -390,33 +450,59 @@ impl Sink {
     }
 
     /// Takes `frames` frames that the device has just handed over, the
-    /// first of which it heard at `heard_ns` on the host's clock.
-    /// `sample(frame, channel)` reads one sample of them.
-    pub fn push(&mut self, heard_ns: u64, frames: usize, mut sample: impl FnMut(usize, usize) -> f32) {
+    /// first of which it heard at `heard_ns` on the host's clock, and of
+    /// which it says nothing else. `sample(frame, channel)` reads one
+    /// sample of them.
+    pub fn push(&mut self, heard_ns: u64, frames: usize, sample: impl FnMut(usize, usize) -> f32) {
+        self.push_said(Said::at(heard_ns), frames, sample);
+    }
+
+    /// Takes `frames` frames that the device has just handed over, with
+    /// what it `said` of them. `sample(frame, channel)` reads one sample
+    /// of them.
+    pub fn push_said(&mut self, said: Said, frames: usize, mut sample: impl FnMut(usize, usize) -> f32) {
         let link = &*self.link;
         let (rate, channels, mask) = (link.rate, link.channels, link.capacity - 1);
-        if let Some(fit) = self.fit {
-            // Where the clock has the device against how far it has got.
-            let ahead = fit.line().at(heard_ns as f64) - self.written as f64;
-            let gap = (GAP_SECONDS * rate).max(2.0 * frames as f64);
-            if ahead > gap {
-                // Frames that never came: silence of their length, so that
-                // what follows is where it belongs.
-                let missing = ahead.round() as u64;
-                for frame in 0..missing.min(link.capacity as u64) {
-                    let at = ((self.written + missing - 1 - frame) as usize & mask) * channels;
-                    for slot in &link.samples[at..at + channels] {
-                        slot.store(0, Ordering::Relaxed);
-                    }
+        // A buffer's first frame was heard after the first frame of the
+        // buffer before: a stamp that says otherwise is not believed. (It
+        // is held against the stamp before whether or not that one was
+        // believed, so that one stamp that is far out costs one.)
+        let heard = said.heard_ns.filter(|ns| self.stamped.is_none_or(|before| *ns > before));
+        self.stamped = said.heard_ns.or(self.stamped);
+        // Frames that never came, by the device's word: silence of their
+        // length, so that what follows is where it belongs.
+        let missing = match (said.missing, heard, self.fit) {
+            (Missing::Nothing, ..) => 0,
+            (Missing::Frames(frames), ..) => frames,
+            (Missing::Uncounted, Some(ns), Some(fit)) => {
+                (fit.line().at(ns as f64) - self.written as f64).round().max(0.0) as u64
+            }
+            (Missing::Uncounted, ..) => 0,
+        };
+        // (No device is believed that an hour went missing: a count that
+        // says so is a count gone wrong, and must not run this one over.)
+        let missing = missing.min((rate * 3600.0) as u64);
+        if missing > 0 {
+            for frame in 0..missing.min(link.capacity as u64) {
+                let at = ((self.written + missing - 1 - frame) as usize & mask) * channels;
+                for slot in &link.samples[at..at + channels] {
+                    slot.store(0, Ordering::Relaxed);
                 }
-                // Those the engine has read already it counted itself, as
-                // frames that had not arrived.
-                let unread = link.unread.load(Ordering::Relaxed).max(self.written);
-                self.written += missing;
-                link.lost.fetch_add(self.written.saturating_sub(unread), Ordering::Relaxed);
-            } else if ahead < -gap {
-                // The device's clock is nowhere near where it was: it is
-                // followed from here.
+            }
+            // Those the engine has read already it counted itself, as
+            // frames that had not arrived.
+            let unread = link.unread.load(Ordering::Relaxed).max(self.written);
+            self.written += missing;
+            link.lost.fetch_add(self.written.saturating_sub(unread), Ordering::Relaxed);
+        }
+        if let (Some(ns), Some(fit)) = (heard, self.fit) {
+            // Where the clock has the device against how far it has got.
+            let ahead = fit.line().at(ns as f64) - self.written as f64;
+            let gap = (GAP_SECONDS * rate).max(2.0 * frames as f64);
+            if ahead < -gap {
+                // The device's clock is nowhere near where it was, by two
+                // stamps running (the first of them went backwards, and
+                // was not believed): it is followed from here.
                 self.fit = None;
                 link.restarts.fetch_add(1, Ordering::Relaxed);
             }
@@ -435,15 +521,22 @@ impl Sink {
                 }
             }
         }
-        let (fit, anew) = self.least_late.shown(self.fit, self.written as f64, heard_ns, rate);
-        if anew {
-            // Whoever reads by the line reads by another one now.
-            link.restarts.fetch_add(1, Ordering::Relaxed);
+        // The line is shown the stamp, if it is one to believe; the frames
+        // are there either way.
+        let shown = heard.map(|ns| self.least_late.shown(self.fit, self.written as f64, ns, rate));
+        if let Some((fit, anew)) = shown {
+            if anew {
+                // Whoever reads by the line reads by another one now.
+                link.restarts.fetch_add(1, Ordering::Relaxed);
+            }
+            self.fit = Some(fit);
         }
-        self.fit = Some(fit);
         self.written += frames as u64;
         link.written.store(self.written, Ordering::Release);
-        link.publish(fit.line());
+        if let Some((fit, _)) = shown {
+            link.publish(fit.line());
+        }
+        link.settled.store(self.fit.is_some() && self.least_late.chosen_once, Ordering::Relaxed);
     }
 }
 
@@ -549,6 +642,18 @@ pub struct Health {
 const PARTED_BY: f64 = 0.00015;
 const PARTED_FOR: f64 = 3.0;
 const PARTED_LOOKS_BACK: f64 = 1.0;
+/// A place that is on a whole frame and stays there ([`Reader::whole`])
+/// is put again, while nobody reads the input, wherever the time stamps
+/// have it this many frames or more from where it is; and it counts as
+/// well put, for what may be concluded from its being off later, once
+/// the stamps have agreed with it for this many seconds. (The stamps an
+/// input opens with can all be late together, on a machine that is busy
+/// just then, and nothing draws such a place back afterwards: measured
+/// through a cable, a place put by the first quarter second alone was
+/// once a third of a millisecond out, and the two ends were then taken
+/// for two clocks.)
+const OUT_OF_PLACE: f64 = 1.0;
+const WELL_PUT_AFTER: f64 = 1.0;
 
 /// What a [`Reader`] counts, for whoever asks from another thread.
 #[derive(Default)]
@@ -595,6 +700,13 @@ pub(crate) struct Reader {
     /// Whether the input and the engine count time by one clock, and for
     /// how many seconds the place has been where it was last put.
     one_clock: bool,
+    /// Whether they count it by one clock at one rate: a frame of the
+    /// input is then a frame of the engine, and is handed across as it
+    /// is. See [`Reader::begin`].
+    whole: bool,
+    /// For how long the time stamps have agreed with where such a place
+    /// is, while nobody read the input: see [`WELL_PUT_AFTER`].
+    agreed_for: f64,
     /// What the place was off by a moment ago, and for how long it has
     /// been leaving where the time stamps have it: see [`Reader::parts`].
     off_before: f64,
@@ -637,6 +749,8 @@ impl Reader {
             line_number: 0,
             least_late: LeastLate::default(),
             one_clock,
+            whole: one_clock && (link.rate - engine_rate).abs() < 1e-9,
+            agreed_for: 0.0,
             off_before: 0.0,
             leaving_for: 0.0,
             placed_for: 0.0,
@@ -667,6 +781,19 @@ impl Reader {
         self.counts.clone()
     }
 
+    /// Whether the place that is read has been put by lines that are
+    /// through the least late stamps of their first stretch, the input's
+    /// and the engine's both. Until then it is where the first stamps had
+    /// it, which may each be as late as any, and is put again at once
+    /// when the lines are begun without them: a step, which a take must
+    /// not have in it. Asked after [`Reader::begin`] for a block.
+    pub fn settled(&self) -> bool {
+        self.placed
+            && self.least_late.chosen_once
+            && self.link.settled.load(Ordering::Relaxed)
+            && self.line_number == self.link.restarts.load(Ordering::Relaxed)
+    }
+
     /// Says which channels are read from here on, a bit each: the others
     /// cost nothing and are silence.
     pub fn want(&mut self, channels: u32) {
@@ -675,6 +802,18 @@ impl Reader {
 
     /// The engine has been asked for `frames` frames at `now_ns`: the
     /// ratio the input is read at is set for them.
+    ///
+    /// An input that counts time by the engine's own clock, at the
+    /// engine's rate, is not read between its frames at all: its place is
+    /// put on a whole frame, and a frame of the engine is a frame of the
+    /// input as the device gave it, to the bit. While nobody reads the
+    /// input (no track hears it, no take is asked for, nothing measures)
+    /// the place is put again wherever the time stamps come to have it a
+    /// frame from where it is, which nobody hears and which makes it the
+    /// better for every stamp since. From the moment something reads it,
+    /// it stays: the stamps then say nothing more but whether the two are
+    /// one clock at all ([`Reader::parts`]), and no filter and no creeping
+    /// place lies between a microphone and its file.
     pub fn begin(&mut self, now_ns: u64, frames: usize) {
         let made = self.made as f64;
         // An engine that was kept from making frames for a while (its
@@ -706,6 +845,26 @@ impl Reader {
                 true => self.link.rate / self.engine_rate,
                 false => input.rate / engine.rate,
             };
+            if self.whole {
+                (self.place, self.ratio, self.agreed_for) = (meant.round(), 1.0, 0.0);
+            }
+        } else if self.whole && self.wanted == 0 {
+            // Nobody reads it: the place is put where the stamps have it
+            // by now, if that is somewhere else.
+            let seconds = frames as f64 / self.engine_rate;
+            self.placed_for += seconds;
+            self.ratio = 1.0;
+            if off.abs() >= OUT_OF_PLACE {
+                self.place = meant.round();
+                (self.off_before, self.leaving_for, self.agreed_for) = (0.0, 0.0, 0.0);
+            } else {
+                self.agreed_for += seconds;
+            }
+        } else if self.whole && !self.parts(off, frames) {
+            // One clock at one rate: a frame for a frame, from where the
+            // place was put.
+            self.placed_for += frames as f64 / self.engine_rate;
+            self.ratio = 1.0;
         } else if self.one_clock && !self.parts(off, frames) {
             // One clock: a frame of the one is a frame of the other, and
             // the place never drifts. Where the time stamps have it is
@@ -758,11 +917,23 @@ impl Reader {
         let leaving =
             off.abs() > PARTED_BY * self.link.rate && off.signum() == before.signum() && off.abs() > before.abs();
         self.leaving_for = if leaving { self.leaving_for + seconds } else { 0.0 };
-        if self.leaving_for < PARTED_FOR {
+        // Where nothing draws the place (one rate, a frame for a frame),
+        // what it is off by is what the two clocks have run apart by and
+        // nothing else: twice as far out as may be doubted is not doubted.
+        // (Of a place the stamps had agreed with before anything read it.
+        // One that was read from the first may simply be out, and is
+        // doubted only as any other is.)
+        let well_put = self.whole && self.agreed_for >= WELL_PUT_AFTER;
+        let far = well_put && off.abs() > 2.0 * PARTED_BY * self.link.rate;
+        if self.leaving_for < PARTED_FOR && !far {
             return false;
         }
-        self.one_clock = false;
+        (self.one_clock, self.whole) = (false, false);
         self.trim = 0.0;
+        // What the place is off by is brought in as slowly as it is of an
+        // input that has long been open: this one has, and its line is
+        // not new.
+        self.placed_for = self.placed_for.max(PARTED_FOR + 1.0);
         self.counts.parted.store(true, Ordering::Relaxed);
         true
     }
@@ -807,6 +978,10 @@ impl Reader {
                 };
             }
         }
+        // A frame of the input for each of the engine's, and the place on
+        // one: nothing is read between frames, and what is handed across
+        // is what the device gave.
+        let as_it_is = self.whole && self.ratio == 1.0 && first_place.fract() == 0.0;
         // Frames whose filter reaches past what has arrived are silence as
         // a whole, and counted: half a sound is worse than none.
         let mut late = 0u64;
@@ -825,8 +1000,19 @@ impl Reader {
                 }
                 continue;
             }
-            self.kernel.row(place - frame, &mut self.row);
             let start = start as usize;
+            if as_it_is {
+                // (The frame at the place is the one the filter would
+                // have weighed by one, and every other by nothing.)
+                for channel in 0..channels {
+                    self.block[channel * MAX_BLOCK + index] = match self.wanted & (1 << channel) {
+                        0 => 0.0,
+                        _ => self.span[channel * self.span_frames + start + half - 1],
+                    };
+                }
+                continue;
+            }
+            self.kernel.row(place - frame, &mut self.row);
             for channel in 0..channels {
                 if self.wanted & (1 << channel) == 0 {
                     self.block[channel * MAX_BLOCK + index] = 0.0;
@@ -1135,7 +1321,11 @@ mod tests {
         for buffer in 0..400u64 {
             let first = buffer * 480;
             if !(100..110).contains(&buffer) {
-                sink.push(ns(first), 480, |index, _| ((first + index as u64) % 1000) as f32 / 1000.0);
+                // The device says so with the first buffer after them, by
+                // its own count.
+                let missing = if buffer == 110 { Missing::Frames(4800) } else { Missing::Nothing };
+                let said = Said { heard_ns: Some(ns(first)), missing };
+                sink.push_said(said, 480, |index, _| ((first + index as u64) % 1000) as f32 / 1000.0);
             }
             reader.begin(ns(first + 480), 480);
             reader.take(480);
@@ -1157,6 +1347,186 @@ mod tests {
         // And the gap itself is silence.
         let gap = 48_000 + 2000 - 480;
         assert!(out[gap + 200..gap + 4600].iter().all(|sample| sample.abs() < 1e-3));
+    }
+
+    /// A device that hands a ramp over, a buffer of 480 frames a hundredth
+    /// of a second, read by an engine 2000 frames later: `said` is what it
+    /// says of buffer `n`, given what it would say of one like any other.
+    /// Returns what the engine read, how the input did, and how often the
+    /// line was begun anew.
+    fn ramp_read(buffers: u64, said: impl Fn(u64, Said) -> Option<Said>) -> (Vec<f32>, Health, u32) {
+        let (mut sink, link) = link(48_000.0, 1);
+        let mut reader = Reader::new(link.clone(), 48_000.0, 2000, false);
+        reader.want(1);
+        let ns = |frame: u64| 1_000_000 + (frame as f64 / 48_000.0 * 1e9).round() as u64;
+        let mut out = Vec::new();
+        for buffer in 0..buffers {
+            let first = buffer * 480;
+            if let Some(said) = said(buffer, Said::at(ns(first))) {
+                sink.push_said(said, 480, |index, _| ((first + index as u64) % 1000) as f32 / 1000.0);
+            }
+            reader.begin(ns(first + 480), 480);
+            reader.take(480);
+            out.extend_from_slice(&reader.channel(0)[..480]);
+        }
+        (out, health(&link, &reader.counts()), link.restarts.load(Ordering::Relaxed))
+    }
+
+    /// What frame `made` of the engine reads of the ramp, when nothing
+    /// has moved it.
+    fn ramp_at(made: usize) -> f32 {
+        ((made as i64 + 480 - 2000).rem_euclid(1000)) as f32 / 1000.0
+    }
+
+    /// The first frame, after the first second, at which the engine read
+    /// something other than the ramp where it belongs.
+    fn off_the_ramp(out: &[f32]) -> Option<usize> {
+        (48_000..out.len()).find(|made| {
+            // (Not held to it near the ramp's own fall, which rings.)
+            let on_the_ramp = (*made as i64 + 480 - 2000).rem_euclid(1000);
+            (100..900).contains(&on_the_ramp) && (out[*made] - ramp_at(*made)).abs() > 2e-3
+        })
+    }
+
+    #[test]
+    fn a_stamp_that_is_late_is_a_late_stamp_and_not_frames_that_are_missing() {
+        // A buffer handed over thirty milliseconds late, and stamped so:
+        // more than the fiftieth of a second that a gap was once read
+        // into. Every frame is there.
+        let late = |buffer: u64, said: Said| {
+            let by = if buffer == 300 { 30_000_000 } else { 0 };
+            Some(Said { heard_ns: said.heard_ns.map(|ns| ns + by), ..said })
+        };
+        let (out, health, restarts) = ramp_read(600, late);
+        assert_eq!((health.lost, health.late, health.jumps), (0, 0, 0), "nothing was missing: {health:?}");
+        assert_eq!(off_the_ramp(&out), None, "and nothing was put anywhere else");
+        // The line was begun once, and once again from the least late
+        // stamp of its first quarter second: not a third time.
+        assert_eq!(restarts, 2);
+    }
+
+    #[test]
+    fn a_stamp_the_device_does_not_stand_by_or_that_cannot_be_is_not_believed() {
+        // One buffer without a stamp, one whose stamp is a second before
+        // the stamp of the buffer before it, and one stamped as if nothing
+        // had yet been heard: each time the frames are taken and the line
+        // is left as it is.
+        let odd = |buffer: u64, said: Said| {
+            let heard_ns = match buffer {
+                200 => None,
+                300 => said.heard_ns.map(|ns| ns - 1_000_000_000),
+                400 => Some(1),
+                _ => said.heard_ns,
+            };
+            Some(Said { heard_ns, ..said })
+        };
+        let (out, health, restarts) = ramp_read(600, odd);
+        assert_eq!((health.lost, health.late, health.jumps), (0, 0, 0), "{health:?}");
+        assert_eq!(off_the_ramp(&out), None);
+        assert_eq!(restarts, 2, "the line was never begun anew for them");
+    }
+
+    #[test]
+    fn frames_a_device_says_are_missing_without_counting_them_are_as_many_as_its_stamp_says() {
+        // Ten buffers never come, and the device says only that something
+        // is missing before the next.
+        let gap = |buffer: u64, said: Said| match buffer {
+            100..110 => None,
+            110 => Some(Said { missing: Missing::Uncounted, ..said }),
+            _ => Some(said),
+        };
+        let (out, health, _) = ramp_read(400, gap);
+        assert!((4800..4900).contains(&(health.lost + health.late)), "{health:?}");
+        for made in [20_000usize, 60_000, 150_000] {
+            assert!((out[made] - ramp_at(made)).abs() < 2e-3, "frame {made}: {} for {}", out[made], ramp_at(made));
+        }
+        // The same buffers gone and nothing said of them: no silence is
+        // made up for them by one stamp. But a whole quarter second with
+        // no stamp near the line is not lateness: the line is begun anew
+        // from where the device is, half a second after at the most.
+        let unsaid = |buffer: u64, said: Said| (!(100..110).contains(&buffer)).then_some(said);
+        let (out, health, restarts) = ramp_read(600, unsaid);
+        assert_eq!(health.lost, 0, "nothing was written for them: {health:?}");
+        assert_eq!(restarts, 3, "the line was begun anew, once");
+        assert_eq!(health.jumps, 1, "{health:?}");
+        let again = (1.1 + 0.6) * 48_000.0;
+        let off = (again as usize..out.len()).find(|made| {
+            let on_the_ramp = (*made as i64 + 480 - 2000).rem_euclid(1000);
+            (100..900).contains(&on_the_ramp) && (out[*made] - ramp_at(*made)).abs() > 2e-3
+        });
+        assert_eq!(off, None, "and the ramp is where it belongs from then on");
+    }
+
+    #[test]
+    fn the_place_is_settled_once_both_lines_are_through_their_least_late_stamps() {
+        let (mut sink, link) = link(48_000.0, 1);
+        let mut reader = Reader::new(link.clone(), 48_000.0, 2000, false);
+        reader.want(1);
+        let ns = |frame: u64| 1_000_000 + (frame as f64 / 48_000.0 * 1e9).round() as u64;
+        let mut settled_at = None;
+        let mut jumps_after = 0;
+        for buffer in 0..200u64 {
+            let first = buffer * 480;
+            // The first stamp of all is five milliseconds late.
+            let late = if buffer == 0 { 5_000_000 } else { 0 };
+            sink.push(ns(first) + late, 480, |_, _| 0.25);
+            reader.begin(ns(first + 480), 480);
+            let jumps = reader.counts.jumps.load(Ordering::Relaxed);
+            match settled_at {
+                None if reader.settled() => settled_at = Some((buffer, jumps)),
+                Some((_, then)) => jumps_after = jumps - then,
+                None => {}
+            }
+            reader.take(480);
+        }
+        let (at, jumps_before) = settled_at.expect("it settles");
+        // A quarter of a second, and the block it takes to be seen.
+        assert!((25..=27).contains(&at), "settled at buffer {at}");
+        assert_eq!(jumps_before, 1, "the place was put again, by the line that left the late stamp out");
+        assert_eq!(jumps_after, 0, "and never again");
+    }
+
+    #[test]
+    fn an_input_on_the_engines_own_clock_at_its_rate_is_handed_across_to_the_bit() {
+        let (mut sink, link) = link(48_000.0, 1);
+        let mut reader = Reader::new(link.clone(), 48_000.0, 2000, true);
+        reader.want(1);
+        let ns = |frame: u64| 1_000_000 + (frame as f64 / 48_000.0 * 1e9).round() as u64;
+        // What it hears is noise, every frame of it another: a frame that
+        // is not the one it should be, or is anything but itself, shows.
+        let heard = |frame: u64| {
+            let mut bits = frame.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+            bits ^= bits >> 29;
+            bits = bits.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            bits ^= bits >> 32;
+            (bits >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+        };
+        // Its buffers are stamped up to two milliseconds late, as buffers
+        // are, and the engine is asked for its own up to a third of one.
+        let late = |buffer: u64, most_ns: u64| buffer.wrapping_mul(2_654_435_761) % 1000 * most_ns / 1000;
+        let mut out = Vec::new();
+        for buffer in 0..3000u64 {
+            let first = buffer * 480;
+            sink.push(ns(first) + late(buffer, 2_000_000), 480, |index, _| heard(first + index as u64));
+            reader.begin(ns(first + 480) + late(buffer + 7, 300_000), 480);
+            reader.take(480);
+            out.extend_from_slice(&reader.channel(0)[..480]);
+        }
+        // Once the place is put, half a minute of it: frame n of the
+        // engine is frame n - K of the input, for one K, and not a bit of
+        // it is other than the device gave.
+        let from = 48_000usize;
+        let lag = (0..4000u64)
+            .find(|lag| out[from].to_bits() == heard(from as u64 - lag).to_bits())
+            .expect("a frame of the engine is a frame of the input");
+        let other = (from..out.len()).find(|made| out[*made].to_bits() != heard(*made as u64 - lag).to_bits());
+        assert_eq!(other, None, "the first frame that is not what the input gave, {lag} frames before");
+        // And K is what the delay says, to what the least late of the
+        // first stamps were out by.
+        assert!((lag as i64 - (2000 - 480)).abs() <= 8, "read {lag} frames late");
+        let health = health(&link, &reader.counts());
+        assert_eq!((health.lost, health.late), (0, 0), "{health:?}");
+        assert!(!parted(&reader.counts()), "and they go on being taken for one clock");
     }
 
     #[test]

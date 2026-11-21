@@ -43,6 +43,13 @@ fn studio() -> (Harness, Stage, TrackId, tempfile::TempDir) {
     (harness, stage, voice.unwrap(), folder)
 }
 
+/// Lets an input that was just opened find its place: the place it is read
+/// at is put for good a quarter of a second after it opens, and a take
+/// that is asked for before then waits for it, and the song with it.
+fn settle(harness: &mut Harness, stage: &Stage) {
+    stage.run(harness, 19_200);
+}
+
 /// Advances the device by `frames` while a take is recorded, no further
 /// ahead of the thread that writes it than that thread can make up.
 fn roll(harness: &mut Harness, stage: &Stage, frames: usize) {
@@ -105,7 +112,7 @@ fn a_track_is_given_an_input_from_its_menu_and_arming_it_opens_the_input() {
     harness.idle(2);
     assert!(harness.hint().starts_with("Arm: opens the audio input"), "{}", harness.hint());
     harness.click_label("Arm Voice");
-    stage.run(&mut harness, 4_800);
+    settle(&mut harness, &stage);
     harness.idle(2);
     assert!(stage.host.capturing().is_some());
     assert!(harness.is_on_screen("Input live \u{00B7} Microphone"), "{:?}", harness.labels);
@@ -142,7 +149,7 @@ fn a_track_is_given_an_input_from_its_menu_and_arming_it_opens_the_input() {
     // Disarmed, a track that is always heard still needs the input; told
     // to record a keyboard again, nothing does, and it closes.
     harness.click_label("Arm Voice");
-    stage.run(&mut harness, 4_800);
+    settle(&mut harness, &stage);
     harness.idle(2);
     assert!(harness.is_on_screen("Input live"), "it is heard through the track");
     harness.right_click(harness.header(0, 60.0, 12.0));
@@ -160,7 +167,7 @@ fn the_stage_says_that_an_input_is_live_too() {
     harness.session.lock().edit(|project| project.set_track_input(voice, Some(TrackInput::mono(1)))).unwrap();
     harness.idle(2);
     harness.click_label("Arm Voice");
-    stage.run(&mut harness, 4_800);
+    settle(&mut harness, &stage);
     harness.idle(2);
     assert!(harness.is_on_screen("Input live \u{00B7} Microphone"));
     // The stage takes the status bar away, and not the words.
@@ -189,7 +196,7 @@ fn a_take_grows_on_its_track_and_its_passes_unfold_as_lanes_to_choose_from() {
         .unwrap();
     harness.idle(2);
     harness.click_label("Arm Voice");
-    stage.run(&mut harness, 4_800);
+    settle(&mut harness, &stage);
     let before = harness.undo_depth();
 
     // Record: the take grows with what the writer has seen of it.
@@ -292,7 +299,7 @@ fn punched_in_a_take_records_only_inside_the_loops_stretch() {
         .unwrap();
     harness.idle(2);
     harness.click_label("Arm Voice");
-    stage.run(&mut harness, 4_800);
+    settle(&mut harness, &stage);
 
     // The switch at the transport, and its key.
     harness.click_label("Punch in");
@@ -426,7 +433,7 @@ fn unused_recordings_are_listed_and_go_only_when_asked_twice_and_never_out_of_ex
     harness.session.lock().edit(|project| project.set_track_input(voice, Some(TrackInput::mono(1)))).unwrap();
     harness.idle(2);
     harness.click_label("Arm Voice");
-    stage.run(&mut harness, 4_800);
+    settle(&mut harness, &stage);
     harness.key(Modifiers::NONE, Key::F9);
     roll(&mut harness, &stage, 2 * BEAT);
     harness.key(Modifiers::NONE, Key::Space);

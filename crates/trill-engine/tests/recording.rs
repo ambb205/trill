@@ -18,7 +18,7 @@ use std::sync::Arc;
 use trill_core::project::AudioContent;
 use trill_core::{ChainRef, ClipId, Monitoring, TrackId, TrackInput};
 use trill_engine::host::AudioConfig;
-use trill_engine::host::scripted::{Hears, ScriptedHost, ScriptedInput};
+use trill_engine::host::scripted::{Hears, ScriptedHost, ScriptedInput, Stamped};
 use trill_engine::{Correction, Measurement, RecordState, Session, SessionError};
 
 /// A host with `Speakers` and one input, `Microphone`, as `input` has it.
@@ -50,6 +50,13 @@ fn armed_track(rig: &mut Rig, name: &str, input: TrackInput) -> TrackId {
     rig.session.housekeeping();
     assert!(rig.session.input_status().open.is_some(), "{:?}", rig.session.input_status());
     track
+}
+
+/// Runs until the place an input that was just opened is read at has been
+/// put for good, which takes a quarter of a second of its time stamps: a
+/// take that is asked for before then waits for it, and the song with it.
+fn settle(rig: &mut Rig) {
+    rig.run_until(rig.now() + 0.3 * SR);
 }
 
 /// Short bumps at moments of the host's clock, which a test adds to as it
@@ -202,6 +209,7 @@ fn a_click_heard_with_a_frame_of_the_song_lands_on_that_frame_at_any_buffer_size
         rig.host.hear(bumps.heard(|_| 0.0));
         let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
         rig.run(40);
+        settle(&mut rig);
 
         // The song's first frame is the first frame of the next buffer:
         // it is heard the output's latency later.
@@ -715,7 +723,7 @@ fn an_input_that_goes_away_ends_the_take_whole_up_to_there_and_the_song_plays_on
     rig.session.housekeeping();
     assert!(rig.session.input_status().open.is_some(), "{:?}", rig.session.input_status());
     rig.session.seek(0.0);
-    rig.run(4);
+    settle(&mut rig);
     let began = rig.now() + LATENCY;
     bumps.at((began + 12_000.0) / SR);
     rig.session.record().unwrap();
@@ -1484,17 +1492,27 @@ fn believed_to_share_a_clock(ppm: f64) -> (Option<f64>, f64, f64) {
     let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
     assert_eq!(rig.session.input_status().clock, Some(InputClock::Shared), "as it was opened");
     rig.run(40);
+    rig.session.record().unwrap();
+    // The take begins when the place the input is read at has been put
+    // for good. An input that is read frame for frame takes a second over
+    // that, and one whose clock runs away from under it never comes to
+    // it: the take then begins when it has waited as long as a take does.
+    let mut waited = 0;
+    while rig.session.transport().position_beats == 0.0 {
+        rig.run(1);
+        waited += 1;
+        assert!(waited < 400, "{ppm} ppm: the take never began");
+    }
+    let began = rig.now() - rig.session.transport().position_beats * FRAMES_PER_BEAT;
     // The song's frame 24,000 is heard at this moment of the host's
     // clock, and every second after it another.
-    let first = (rig.now() + LATENCY + 24_000.0) / SR;
+    let first = (began + LATENCY + 24_000.0) / SR;
     rig.host.hear(Hears::Sound(Arc::new(move |_, seconds| {
         let since = seconds - first;
         let nearest = since.round().max(0.0);
         let away = (since - nearest) * SR / 3.0;
         if away.abs() < 20.0 { (0.8 * (-away * away).exp()) as f32 } else { 0.0 }
     })));
-    rig.session.record().unwrap();
-    let began = rig.now();
     let jumps = rig.session.input_health().unwrap().jumps;
     let mut found = None;
     for second in 1..=SECONDS {
@@ -1519,9 +1537,11 @@ fn believed_to_share_a_clock(ppm: f64) -> (Option<f64>, f64, f64) {
         let near = frames_of(path, 1, in_file.round() as u64 - 256, 512);
         let off_ms = (in_file.round() - 256.0 + top_of(&near) - in_file) / SR * 1000.0;
         // From one second to the next a bump moves by a little: the
-        // place is steered to where it belongs, and never put there.
+        // place is steered to where it belongs over a few seconds, and
+        // never put there. (At the most it is half a millisecond out
+        // when it is found out, and comes in by less than that a second.)
         if let Some(last) = last {
-            assert!((off_ms - last).abs() < 0.25, "{ppm} ppm: {:.3} ms in a second, at {bump} s", off_ms - last);
+            assert!((off_ms - last).abs() < 0.4, "{ppm} ppm: {:.3} ms in a second, at {bump} s", off_ms - last);
         }
         last = Some(off_ms);
         match found {
@@ -1778,4 +1798,253 @@ fn a_punched_take_of_notes_alone_plays_through_the_loop_and_holds_what_was_playe
     let position = rig.session.transport().position_beats;
     assert!((4.0..8.0).contains(&position), "it came round: beat {position:.2}");
     rig.session.stop();
+}
+
+// ---- what a device says of a buffer, and what it does not ---------------------
+
+#[test]
+fn a_buffer_that_is_stamped_late_wrongly_or_not_at_all_during_a_take_moves_nothing_and_loses_nothing() {
+    let (mut rig, _folder) = rig_on(studio(microphone()), AudioConfig::default());
+    let bumps = Bumps::default();
+    rig.host.hear(bumps.heard(|_| 0.0));
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    rig.run(40);
+    let began = rig.now() + LATENCY;
+    let song_frames = [12_000.0, 36_000.0, 60_000.0, 84_000.0, 108_000.0];
+    for frame in song_frames {
+        bumps.at((began + frame) / SR);
+    }
+    let before = rig.session.input_health().unwrap();
+    let start = rig.now();
+    rig.session.record().unwrap();
+    // A buffer handed over thirty milliseconds late and stamped then (a
+    // stamp that late was once read as frames that had not come); one the
+    // device says it has no stamp for; one stamped a second before the one
+    // before it; and three in a row stamped late.
+    let odd: [(f64, Vec<Stamped>); 4] = [
+        (24_000.0, vec![Stamped::Late(0.03)]),
+        (48_000.0, vec![Stamped::Not]),
+        (72_000.0, vec![Stamped::Early(1.0)]),
+        (96_000.0, vec![Stamped::Late(0.025), Stamped::Late(0.04), Stamped::Late(0.022)]),
+    ];
+    for (at, stamps) in odd {
+        rig.run_until(start + at);
+        rig.host.stamp_next(stamps);
+    }
+    rig.run_until(start + 120_000.0);
+    rig.session.stop();
+
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!(recorded.silent_frames, 0, "every frame came, and none was taken for missing");
+    let after = rig.session.input_health().unwrap();
+    assert_eq!((after.lost, after.late, after.jumps), (before.lost, before.late, before.jumps), "{after:?}");
+    for frame in song_frames {
+        let off = off_its_place(&rig.session, voice, frame);
+        assert!(off.abs() <= 1.0, "the bump at frame {frame} is {off:.3} frames off");
+    }
+}
+
+#[test]
+fn a_take_asked_for_as_its_input_opens_begins_when_the_inputs_place_is_put_and_has_no_step_in_it() {
+    let (mut rig, _folder) = rig_on(studio(microphone()), AudioConfig::default());
+    let bumps = Bumps::default();
+    rig.host.hear(bumps.heard(|_| 0.0));
+    // The first buffer the input hands over is stamped five milliseconds
+    // late, as a first buffer often is: the place it is read at is put by
+    // that, and put again a quarter of a second on, when the least late of
+    // its stamps have had their say.
+    rig.host.stamp_next([Stamped::Late(0.005)]);
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    let asked = rig.now();
+    // A bump every twentieth of a second from here, for a second and a half.
+    let heard: Vec<f64> = (1..30).map(|n| asked + n as f64 * 2_400.0 + 777.0).collect();
+    for at in &heard {
+        bumps.at(at / SR);
+    }
+    // No count-in, and no moment given to the input: the take is asked
+    // for with the very next thing the session is told.
+    rig.session.record().unwrap();
+    rig.run(4);
+    rig.session.housekeeping();
+    assert_eq!(rig.session.record_status().state, RecordState::CountIn, "it waits, as through a count-in");
+    assert_eq!(rig.session.transport().position_beats, 0.0, "and the song with it");
+    rig.run_until(asked + 1.5 * SR);
+    rig.session.housekeeping();
+    assert_eq!(rig.session.record_status().state, RecordState::Recording);
+    // Where the song's first frame was made, by where the song is now.
+    let rolled = rig.now() - rig.session.transport().position_beats * FRAMES_PER_BEAT;
+    let waited = (rolled - asked) / SR;
+    assert!((0.24..0.33).contains(&waited), "the take began {waited:.3} s after it was asked for");
+    let during = rig.session.input_health().unwrap().jumps;
+    rig.run_until(asked + 2.0 * SR);
+    rig.session.stop();
+
+    // The place was put again once, before the take's first frame: not in it.
+    let health = rig.session.input_health().unwrap();
+    assert_eq!((during, health.jumps), (1, 1), "{health:?}");
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!((recorded.takes.len(), recorded.silent_frames), (1, 0));
+    // Every bump the take holds is where it was heard, the first of them
+    // a few hundredths of a second into it.
+    let mut held = 0;
+    for at in &heard {
+        let song_frame = at - LATENCY - rolled;
+        if song_frame < 100.0 {
+            continue;
+        }
+        held += 1;
+        let off = off_its_place(&rig.session, voice, song_frame);
+        assert!(off.abs() <= 1.0, "the bump {:.3} s into the take is {off:.3} frames off", song_frame / SR);
+    }
+    assert!(held >= 20, "{held} bumps were in the take");
+}
+
+// ---- nobody waits with the session held, and nothing is open for nothing ---------
+
+#[test]
+fn stopping_a_take_does_not_wait_for_its_last_sound_where_the_audio_thread_runs_by_itself() {
+    let (mut rig, _folder) = rig_on(studio(microphone()), AudioConfig::default());
+    let bumps = Bumps::default();
+    rig.host.hear(bumps.heard(|_| 0.0));
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    rig.run(40);
+    let began = rig.now() + LATENCY;
+    // Sung a hundred frames before the song stops: it is heard after the
+    // stop was asked for, and comes in later still.
+    bumps.at((began + 47_900.0) / SR);
+    rig.session.record().unwrap();
+    rig.run_until(rig.now() + 48_000.0);
+
+    // From here the host is one whose audio thread runs by itself, as a
+    // device's does, and this test is that thread: waiting for it makes
+    // nothing happen.
+    rig.host.set_watched(true);
+    rig.host.set_pump(false);
+    let asked = std::time::Instant::now();
+    rig.session.stop();
+    let took = asked.elapsed();
+    assert!(took < std::time::Duration::from_millis(100), "stop took {took:?} with the session held");
+    assert!(rig.session.is_recording(), "the take is not over: its last sound is still coming in");
+    rig.session.housekeeping();
+    assert!(rig.session.is_recording() && rig.session.last_recording().is_none());
+
+    // The audio thread goes on, and a round of housekeeping sees the take in.
+    rig.run(30);
+    rig.session.housekeeping();
+    assert!(!rig.session.is_recording(), "the take is over once its last sound is in");
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!((recorded.takes.len(), recorded.silent_frames), (1, 0));
+    assert!((recorded.takes[0].length_beats - 2.0).abs() < 0.03, "{:?}", recorded.takes[0]);
+    let off = off_its_place(&rig.session, voice, 47_900.0);
+    assert!(off.abs() <= 1.0, "what was sung to the last of it is there, {off:.3} frames from its place");
+
+    // An audio thread that never says where the take ended is not waited
+    // for for ever: the take ends where the song was last known to be,
+    // with what there is of it.
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    rig.run_until(rig.now() + 48_000.0);
+    rig.session.stop();
+    assert!(rig.session.is_recording());
+    wait_until(|| {
+        rig.session.housekeeping();
+        !rig.session.is_recording()
+    });
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!(recorded.takes.len(), 1, "{recorded:?}");
+    assert!(recorded.takes[0].seconds > 0.9, "whole up to where it was last heard of: {:?}", recorded.takes[0]);
+    rig.host.set_watched(false);
+    rig.host.set_pump(true);
+}
+
+#[test]
+fn an_input_opened_for_an_audio_thread_that_is_away_is_closed_again_and_opened_when_it_is_back() {
+    let (mut rig, _folder) = rig_on(studio(microphone()), AudioConfig::default());
+    let voice = rig.session.edit(|project| Ok(project.add_track("Voice"))).unwrap();
+    rig.session.edit(|project| project.set_track_input(voice, Some(TrackInput::mono(1)))).unwrap();
+    rig.run(2);
+
+    // The audio thread goes away, and more is asked of it than its queue
+    // holds: what is said to it from here on is lost.
+    rig.host.set_pump(false);
+    for step in 0..1_200 {
+        rig.session.set_metronome(step % 2 == 0);
+    }
+    // The track is armed: the input is needed, and is opened. The audio
+    // thread cannot be told of it, so nothing would read what it hears.
+    rig.session.set_armed(voice, true).unwrap();
+    rig.session.housekeeping();
+    assert!(rig.host.capturing().is_none(), "a microphone is not left open for nothing");
+    let status = rig.session.input_status();
+    assert!(status.open.is_none(), "{status:?}");
+    let problem = status.problem.expect("and it is said");
+    assert!(problem.contains("is not answering") && problem.contains("'Microphone' was closed again"), "{problem}");
+    assert!(!problem.contains("Choose the device"), "nothing is wrong with the choice of device: {problem}");
+    // A take is refused the same way, and leaves no file.
+    let refused = rig.session.record().unwrap_err();
+    assert!(matches!(&refused, SessionError::Recording(why) if why.contains("is not answering")), "{refused}");
+    assert!(rig.host.capturing().is_none() && !rig.session.is_recording());
+
+    // It is back: it is told again what it missed, and the input is opened.
+    rig.host.set_pump(true);
+    rig.run(4);
+    rig.session.housekeeping();
+    rig.run(2);
+    rig.session.housekeeping();
+    assert!(rig.host.capturing().is_some(), "{:?}", rig.session.input_status());
+    assert!(rig.session.input_status().problem.is_none());
+    settle(&mut rig);
+    rig.session.record().unwrap();
+    rig.run_until(rig.now() + 24_000.0);
+    rig.session.stop();
+    assert_eq!(rig.session.last_recording().unwrap().takes.len(), 1);
+}
+
+// ---- one clock, one rate: a frame for a frame ------------------------------------
+
+#[test]
+fn an_input_on_the_outputs_clock_at_its_rate_is_recorded_as_the_device_gave_it_to_the_bit() {
+    // What the input hears is noise by the frame of the host's clock:
+    // every frame another value, so that one that is not the frame it
+    // should be, or is anything but itself, shows.
+    let heard = |frame: u64| {
+        let mut bits = frame.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+        bits ^= bits >> 29;
+        bits = bits.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        bits ^= bits >> 32;
+        ((bits >> 40) as f32 / (1u64 << 23) as f32 - 1.0) * 0.5
+    };
+    for exclusive in [false, true] {
+        let host = studio(ScriptedInput { shares_clock: true, ..microphone() });
+        let config = AudioConfig { exclusive, buffer_size: exclusive.then_some(256), ..AudioConfig::default() };
+        let (mut rig, _folder) = rig_on(host, config);
+        rig.host.hear(Hears::Sound(Arc::new(move |_, seconds| heard((seconds * SR).round() as u64))));
+        let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+        assert_eq!(rig.session.input_status().clock, Some(trill_engine::InputClock::Shared));
+        settle(&mut rig);
+        let before = rig.session.input_health().unwrap();
+        rig.session.record().unwrap();
+        let until = rig.now() + 3.0 * SR;
+        run_taking(&mut rig, until);
+        rig.session.stop();
+
+        let recorded = rig.session.last_recording().unwrap().clone();
+        assert_eq!((recorded.takes.len(), recorded.silent_frames), (1, 0));
+        let after = rig.session.input_health().unwrap();
+        assert_eq!((after.jumps, after.lost, after.late), (before.jumps, 0, 0), "{after:?}");
+        assert_eq!(rig.session.input_status().clock, Some(trill_engine::InputClock::Shared), "still one clock");
+        // Frame n of the file is frame n + K of what the device heard, for
+        // one K, and not a bit of it is other than the device gave: no
+        // filter and no place between frames lies in between.
+        let (_, _, _, audio) = clip_at(&rig.session, voice, 1.0);
+        let file = frames_of(Path::new(&audio.path), 1, 0, 3 * 48_000);
+        assert!(file.len() >= 2 * 48_000, "{} frames", file.len());
+        let from = 1000usize;
+        let ahead = (0..400_000u64)
+            .find(|ahead| (0..8).all(|n| file[from + n].to_bits() == heard(from as u64 + n as u64 + ahead).to_bits()))
+            .expect("the file holds frames of what the device heard, as they were");
+        let other = (0..file.len()).find(|n| file[*n].to_bits() != heard(*n as u64 + ahead).to_bits());
+        assert_eq!(other, None, "exclusive: {exclusive}; the first frame that is not what the device gave");
+    }
 }

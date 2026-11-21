@@ -17,7 +17,7 @@ use super::{
     AudioDevice, AudioDevices, AudioHost, FailureCallback, InputFormat, InputRequest, OpenError, OpenInput, OpenStream,
     Renderer, StreamFailure, StreamFormat, StreamRequest, Timing,
 };
-use crate::capture::Sink;
+use crate::capture::{Missing, Said, Sink};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -100,6 +100,23 @@ struct Capturing {
     /// many buffers it has handed over or lost since.
     opened: f64,
     handed: u64,
+    /// How many of them it lost since the last it handed over: it says
+    /// so with the next, as a device does that counts its frames.
+    lost: u64,
+}
+
+/// How an input stamps a buffer it hands over: see
+/// [`ScriptedHost::stamp_next`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Stamped {
+    /// When it heard the buffer's first frame, as its latency has it.
+    Right,
+    /// So many seconds after that: handed over late, and stamped then.
+    Late(f64),
+    /// So many seconds before that: a stamp that cannot be.
+    Early(f64),
+    /// Not at all: the device says its stamp is wrong.
+    Not,
 }
 
 /// A device of a [`ScriptedHost`].
@@ -165,6 +182,9 @@ struct State {
     /// While set, the open input hands nothing over: what it would have
     /// is lost.
     input_stalled: bool,
+    /// How the buffers an input hands over next are stamped, in turn;
+    /// then as they should be.
+    stamps: VecDeque<Stamped>,
     /// What the output has played since it was opened, for an input that
     /// hears it: the last seconds of it, the frame the first of them is,
     /// and how many were played in all; when it was opened; and how many
@@ -265,6 +285,13 @@ impl ScriptedHost {
     /// device is kept from its work.
     pub fn stall_input(&self, stalled: bool) {
         self.state.lock().input_stalled = stalled;
+    }
+
+    /// Has the buffers an input hands over next stamped as `stamps` say,
+    /// one after the other: the input that is open, or the one opened
+    /// next. Its frames are what they would have been.
+    pub fn stamp_next(&self, stamps: impl IntoIterator<Item = Stamped>) {
+        self.state.lock().stamps.extend(stamps);
     }
 
     /// Says how many frames more lie between the output's buffers and its
@@ -428,7 +455,7 @@ impl State {
     fn hand_over(&mut self) {
         let now = self.now;
         let stalled = self.input_stalled;
-        let State { capturing, hears, played, played_from, running, output_opened, output_unsaid, .. } = self;
+        let State { capturing, hears, played, played_from, running, output_opened, output_unsaid, stamps, .. } = self;
         let Some(capturing) = capturing else { return };
         let device = &capturing.device;
         let rate = device.sample_rate as f64 * (1.0 + device.ppm / 1e6);
@@ -477,15 +504,29 @@ impl State {
             }
             capturing.handed += 1;
             if stalled {
+                capturing.lost += 1;
                 continue;
             }
             // It says its frames are as old as it says its latency is: a
             // frame is stamped later than it was heard by what it leaves
             // unsaid.
             let stamp = capturing.opened + (first as f64 + device.unsaid as f64) / rate * 1e9;
+            let stamp = match stamps.pop_front().unwrap_or(Stamped::Right) {
+                Stamped::Right => Some(stamp),
+                Stamped::Late(seconds) => Some(stamp + seconds * 1e9),
+                Stamped::Early(seconds) => Some((stamp - seconds * 1e9).max(1.0)),
+                Stamped::Not => None,
+            };
+            // What it lost it says with the first buffer after, by its
+            // own count of the frames it heard.
+            let missing = match std::mem::take(&mut capturing.lost) {
+                0 => Missing::Nothing,
+                lost => Missing::Frames(lost * buffer),
+            };
+            let said = Said { heard_ns: stamp.map(|stamp| stamp.round() as u64), missing };
             let opened = capturing.opened;
             let heard_ns = |frame: usize| opened + (first + frame as u64) as f64 / rate * 1e9;
-            capturing.sink.push(stamp.round() as u64, buffer as usize, |frame, channel| match &*hears {
+            capturing.sink.push_said(said, buffer as usize, |frame, channel| match &*hears {
                 Hears::Nothing => 0.0,
                 Hears::Sound(sound) => sound(channel, heard_ns(frame) / 1e9),
                 Hears::Output { gain } => speaker(channel, heard_ns(frame)) * gain,
@@ -562,7 +603,7 @@ impl AudioHost for ScriptedHost {
         let serial = state.serial;
         let opened = state.now;
         state.capturing =
-            Some(Capturing { sink, on_failure, format: format.clone(), device, serial, opened, handed: 0 });
+            Some(Capturing { sink, on_failure, format: format.clone(), device, serial, opened, handed: 0, lost: 0 });
         Ok(OpenInput { format, handle: Box::new(InputHandle { state: self.state.clone(), serial }), link })
     }
 

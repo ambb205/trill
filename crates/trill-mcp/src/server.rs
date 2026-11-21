@@ -43,6 +43,10 @@ use trill_engine::{Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
 use trill_runtime::{Runtime, SoundClip, SoundError};
 
+/// How long the reply to a stop waits for the take it ended to be in the
+/// project: longer than the session itself waits for an audio thread that
+/// never says where the take ended.
+const TAKE_IS_IN_WITHIN: Duration = Duration::from_millis(2500);
 const SAMPLER_URI: &str = "builtin:sampler";
 const DRUM_RACK_URI: &str = "builtin:drumrack";
 /// Search results returned when the caller does not say how many, and the
@@ -2645,6 +2649,18 @@ impl TrillServer {
                 TransportAction::Stop => {
                     let recording = session.is_recording();
                     session.stop();
+                    // A take is over when the last of what was sung has
+                    // come in, which is as long as sound takes to go
+                    // round. That is waited for here, since this reply
+                    // says what was recorded, and with the session let go
+                    // of meanwhile: the window is not kept from it.
+                    let deadline = std::time::Instant::now() + TAKE_IS_IN_WITHIN;
+                    while recording && session.is_recording() && std::time::Instant::now() < deadline {
+                        parking_lot::MutexGuard::unlocked(&mut session, || {
+                            std::thread::sleep(Duration::from_millis(5))
+                        });
+                        session.housekeeping();
+                    }
                     let mut out = commanded(false, current.position_beats);
                     if recording {
                         // The take is in the project by now.

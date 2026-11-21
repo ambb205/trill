@@ -10,10 +10,10 @@ use super::{
     AudioDevice, AudioDevices, AudioHost, COMMON_SAMPLE_RATES, FailureCallback, InputFormat, InputRequest, OpenError,
     OpenInput, OpenStream, Renderer, StreamFailure, StreamFormat, StreamRequest, Timing, now_ns, number_duplicates,
 };
-use crate::capture::Sink;
+use crate::capture::{Missing, Said, Sink};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long cpal may take to bring a stream up.
@@ -253,12 +253,14 @@ fn open_shared_input(found: &Named, on_failure: FailureCallback) -> Result<OpenI
     let config: cpal::StreamConfig = supported.config();
     let (sink, link) = crate::capture::link(rate as f64, channels);
     let measured = Arc::new(Measured::default());
+    let broke = Arc::new(AtomicBool::new(false));
     let state = Taking {
         sink,
         channels: channels.max(1),
         frames_per_second: rate as f64,
         age: None,
         measured: measured.clone(),
+        broke: broke.clone(),
     };
     let lost = on_failure.clone();
     let on_error = move |error: cpal::Error| match error.kind() {
@@ -266,9 +268,12 @@ fn open_shared_input(found: &Named, on_failure: FailureCallback) -> Result<OpenI
             log::warn!("audio input lost: {error}");
             lost(StreamFailure::DeviceLost);
         }
-        // These leave the stream running: what did not arrive is silence
-        // where it would have been, by the time stamps.
-        cpal::ErrorKind::Xrun => log::debug!("audio input drop-out: {error}"),
+        // This leaves the stream running. It is the device's own word
+        // that the buffer it hands over next does not follow the one
+        // before, said on its thread just before that buffer: the frames
+        // that are missing are silence where they would have been. (It
+        // does not say how many: as many as that buffer's stamp says.)
+        cpal::ErrorKind::Xrun => broke.store(true, Ordering::Relaxed),
         cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged => log::warn!("audio input: {error}"),
         _ => {
             log::error!("audio input error: {error}");
@@ -326,7 +331,16 @@ struct Taking {
     /// How old a buffer's first frame is when it is handed over, smoothed.
     age: Option<f64>,
     measured: Arc<Measured>,
+    /// Set when the device has said that the buffer it hands over next
+    /// does not follow the one before.
+    broke: Arc<AtomicBool>,
 }
+
+/// A buffer whose first frame is said to be older than this, in seconds,
+/// when it is handed over has no stamp: a device does not keep that much,
+/// and the zero of the system's counter (which a driver without a stamp
+/// gives) is the day the machine was started.
+const OLDEST_STAMP: f64 = 2.0;
 
 impl Taking {
     /// The data callback for a stream of `T` samples.
@@ -348,11 +362,19 @@ impl Taking {
         let channels = self.channels;
         let frames = data.len() / channels;
         // When the device heard the buffer's first frame, by its own
-        // account: so long before this call.
+        // account: so long before this call. A stamp that has it heard
+        // after this call, or longer ago than any buffer is old, is none.
         let stamp = info.timestamp();
-        let age = stamp.callback.duration_since(stamp.capture).as_secs_f64();
-        let heard_ns = now_ns().saturating_sub((age * 1e9) as u64);
-        self.sink.push(heard_ns, frames, |frame, channel| data[frame * channels + channel].to_sample::<f32>());
+        let age = stamp.callback.checked_duration_since(stamp.capture).map(|age| age.as_secs_f64());
+        let age = age.filter(|age| *age < OLDEST_STAMP);
+        let heard_ns = age.map(|age| now_ns().saturating_sub((age * 1e9) as u64));
+        let missing = match self.broke.swap(false, Ordering::Relaxed) {
+            true => Missing::Uncounted,
+            false => Missing::Nothing,
+        };
+        let said = Said { heard_ns, missing };
+        self.sink.push_said(said, frames, |frame, channel| data[frame * channels + channel].to_sample::<f32>());
+        let Some(age) = age else { return };
 
         // What lies between the microphone and a buffer beyond the
         // buffer's own length is the device's latency.

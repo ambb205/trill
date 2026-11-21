@@ -13,7 +13,10 @@
 //! seconds on end) is not shifted onto the next one that does: the audio
 //! thread says where the room ran out and for how long ([`Gap`]), and the
 //! file gets silence of that length there. It is counted
-//! ([`Growing::dropped`]).
+//! ([`Growing::dropped`]). A take that ends while its ring has no room has
+//! nothing left to say that with: the file is then made as long as what
+//! was offered to it ([`Growing::offered`]), in silence, and that is
+//! counted the same.
 
 use crate::capture::Reader;
 use crate::graph::MAX_BLOCK;
@@ -59,26 +62,32 @@ struct Feed {
     /// the stretch without room began that is going on.
     offered: u64,
     without_room: Option<u64>,
+    /// The file, which is told how many frames it was offered: a stretch
+    /// without room that is still going on when the take ends is never
+    /// said as a [`Gap`], and the file is made as long as the take by this.
+    /// (Let go of with the feeds, off the audio thread.)
+    growing: Arc<Growing>,
 }
 
 impl Feed {
     /// Offers `frames` frames, every one's channels side by side in
     /// `samples`.
     fn offer(&mut self, samples: &[f32], frames: usize) {
+        self.offered += frames as u64;
+        self.growing.offered.store(self.offered, Ordering::Release);
+        let before = self.offered - frames as u64;
         if let Some(from) = self.without_room {
             // The stretch is said before anything follows it, or it goes on.
             let said = self.samples.slots() >= samples.len()
-                && self.gaps.push(Gap { at: from, frames: self.offered - from }).is_ok();
+                && self.gaps.push(Gap { at: from, frames: before - from }).is_ok();
             if !said {
-                self.offered += frames as u64;
                 return;
             }
             self.without_room = None;
         }
         if self.samples.push_entire_slice(samples).is_err() {
-            self.without_room = Some(self.offered);
+            self.without_room = Some(before);
         }
-        self.offered += frames as u64;
     }
 }
 
@@ -139,6 +148,9 @@ pub struct Growing {
     sample_rate: f64,
     frames: AtomicU64,
     dropped: AtomicU64,
+    /// How many frames the audio thread has offered it, whether or not
+    /// they found room on the way.
+    offered: AtomicU64,
     /// The highest level so far, as the bits of an `f32`.
     peak: AtomicU32,
     /// The lowest and the highest sample of every [`COLUMN_FRAMES`] frames.
@@ -172,6 +184,12 @@ impl Growing {
     /// way: the disk did not keep up.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// How many frames it was offered: how long the take is, by the
+    /// thread that made it.
+    pub fn offered(&self) -> u64 {
+        self.offered.load(Ordering::Acquire)
     }
 
     /// The highest level so far: 1 is full scale.
@@ -314,6 +332,15 @@ impl Written {
     }
 
     fn finish(mut self) {
+        // Frames that found no room to the very end of the take were never
+        // said, there being nothing after them to say it before: they are
+        // silence like the others, so that the file is as long as the take.
+        // (What was handed over since the rings were last emptied first.)
+        self.drain();
+        let offered = self.growing.offered();
+        if offered > self.done {
+            self.silence(offered - self.done);
+        }
         // The column that was being filled is part of the picture.
         if self.column.1 > 0 {
             self.growing.columns.lock().push(self.column.0);
@@ -372,11 +399,21 @@ impl TakeWriter {
                 sample_rate,
                 frames: AtomicU64::new(0),
                 dropped: AtomicU64::new(0),
+                offered: AtomicU64::new(0),
                 peak: AtomicU32::new(0),
                 columns: Mutex::new(Vec::new()),
                 failed: Mutex::new(None),
             });
-            feeds.push(Feed { left, right, samples: samples_in, gaps: gaps_in, offered: 0, without_room: None });
+            let offered_to = growing.clone();
+            feeds.push(Feed {
+                left,
+                right,
+                samples: samples_in,
+                gaps: gaps_in,
+                offered: 0,
+                without_room: None,
+                growing: offered_to,
+            });
             written.push(Written {
                 growing,
                 file: Some(file),
@@ -468,12 +505,20 @@ mod tests {
             sample_rate: 48_000.0,
             frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            offered: AtomicU64::new(0),
             peak: AtomicU32::new(0),
             columns: Mutex::new(Vec::new()),
             failed: Mutex::new(None),
         });
-        let mut feed =
-            Feed { left: 0, right: None, samples: samples_in, gaps: gaps_in, offered: 0, without_room: None };
+        let mut feed = Feed {
+            left: 0,
+            right: None,
+            samples: samples_in,
+            gaps: gaps_in,
+            offered: 0,
+            without_room: None,
+            growing: growing.clone(),
+        };
         let mut written = Written {
             growing: growing.clone(),
             file: Some(GrowingWav::create(&path, 48_000.0, 1).unwrap()),
@@ -495,17 +540,24 @@ mod tests {
             feed.offer(&block(from), 100);
             written.drain();
         }
+        // And the take ends as the ring fills once more: frames 4000 to
+        // 4699 find no room, and nothing follows them to say so before.
+        for from in (3000..4700).step_by(100) {
+            feed.offer(&block(from), 100);
+        }
+        written.drain();
         written.finish();
         let audio = read(&path);
-        assert_eq!(audio.len(), 3000);
-        assert_eq!(growing.dropped(), 500);
-        for frame in [0usize, 999, 1500, 2999] {
+        assert_eq!(audio.len(), 4700, "the file is as long as the take");
+        assert_eq!(growing.dropped(), 500 + 700);
+        for frame in [0usize, 999, 1500, 2999, 3999] {
             assert_eq!(audio[frame], frame as f32 / 10_000.0, "frame {frame}");
         }
         assert!(audio[1000..1500].iter().all(|sample| *sample == 0.0), "silence of the right length");
-        assert_eq!(growing.frames(), 3000);
-        assert_eq!(growing.columns(0).len(), 12, "eleven whole columns and what was left");
-        assert!((growing.peak() - 0.2999).abs() < 1e-6);
+        assert!(audio[4000..].iter().all(|sample| *sample == 0.0), "and to the end of the take");
+        assert_eq!((growing.frames(), growing.offered()), (4700, 4700));
+        assert_eq!(growing.columns(0).len(), 19, "eighteen whole columns and what was left");
+        assert!((growing.peak() - 0.3999).abs() < 1e-6);
     }
 
     #[test]

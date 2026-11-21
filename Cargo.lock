@@ -4790,6 +4790,7 @@ dependencies = [
  "anyhow",
  "axum",
  "log",
+ "parking_lot",
  "rmcp",
  "serde",
  "serde_json",

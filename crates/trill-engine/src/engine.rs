@@ -263,6 +263,17 @@ fn frames_to_ms(frames: u32, sample_rate: f64) -> f64 {
     if sample_rate > 0.0 { frames as f64 * 1000.0 / sample_rate } else { 0.0 }
 }
 
+/// Why an input is not open after it was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NoInput {
+    /// No device could be opened: why, fit to show.
+    Refused(String),
+    /// The device of this name was opened and closed again: the audio
+    /// thread was not taking messages and could not be told of it, so
+    /// nothing would have read what it heard.
+    Away(String),
+}
+
 /// The input that is open: what is recorded from, as it turned out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputInfo {
@@ -880,6 +891,10 @@ pub struct Engine {
     retire: Option<Box<dyn Fn(Box<Graph>) + Send>>,
     /// Set when a message could not be sent; see [`Engine::send`].
     messages_lost: bool,
+    /// Whether an input is taken to count time by the output's clock
+    /// whatever the system says of the two: see
+    /// [`Engine::say_one_clock`].
+    one_clock_said: bool,
     host: Arc<dyn AudioHost>,
     /// What plays when no device will: nothing, at real-time pace.
     null: Arc<NullHost>,
@@ -985,6 +1000,7 @@ impl Engine {
             swaps_in_flight: 0,
             retire: None,
             messages_lost: false,
+            one_clock_said: false,
             host: setup.host,
             null: Arc::new(NullHost::new(FALLBACK_SAMPLE_RATE)),
             config: setup.config,
@@ -1215,8 +1231,8 @@ impl Engine {
     /// thread has a frame of it for every frame it makes. An input is
     /// open only while something needs it, which is the session's to say.
     ///
-    /// Why it could not be opened is a sentence fit to show the user.
-    pub(crate) fn open_input(&mut self) -> Result<(), String> {
+    /// Why it is not open is something fit to show the user.
+    pub(crate) fn open_input(&mut self) -> Result<(), NoInput> {
         if self.input.is_some() {
             return Ok(());
         }
@@ -1259,7 +1275,10 @@ impl Engine {
                 engine_rate,
                 self.info.buffer_frames,
             );
-            let reader = Reader::new(open.link.clone(), engine_rate, delay, format.shares_clock);
+            // One clock by the system's word, or by the word of whoever
+            // knows the two ends: a belief either way.
+            let shares_clock = format.shares_clock || self.one_clock_said;
+            let reader = Reader::new(open.link.clone(), engine_rate, delay, shares_clock);
             let counts = reader.counts();
             let warning = refusals.first().map(|refusal| {
                 format!(
@@ -1275,16 +1294,39 @@ impl Engine {
                 latency_frames: format.latency_frames,
                 exclusive: format.exclusive,
                 delay_frames: delay,
-                shares_clock: format.shares_clock,
+                shares_clock,
                 warning,
             };
+            if !self.send(Message::Input(Some(Box::new(reader)))) {
+                // The audio thread is not taking messages, and was not
+                // told: nothing would read what the device hears. An input
+                // that is open for nothing is closed again.
+                let stream = open.handle;
+                self.driver.call(self.patience.device, move || drop(stream));
+                log::warn!("{} was opened and closed again: the audio thread could not be told of it", info.device);
+                return Err(NoInput::Away(info.device));
+            }
             log::info!("recording from {} ({} Hz, {} channels)", info.device, info.sample_rate, info.channels);
-            self.send(Message::Input(Some(Box::new(reader))));
             let opened_ns = self.host.now_ns();
             self.input = Some(Input { stream: open.handle, link: open.link, counts, info, opened_ns });
             return Ok(());
         }
-        Err(refusals.join("; "))
+        Err(NoInput::Refused(refusals.join("; ")))
+    }
+
+    /// Has the inputs that are opened from now on taken to count time by
+    /// the output's clock, whatever the system says of the two. For a
+    /// test through a cable whose two ends are known to be one device and
+    /// of which the system says nothing. It is a belief like the system's
+    /// own: the input's time stamps may overturn it.
+    pub(crate) fn say_one_clock(&mut self, said: bool) {
+        self.one_clock_said = said;
+    }
+
+    /// Whether the audio thread runs by itself: not one that is driven by
+    /// hand, which makes a buffer only when it is told to.
+    pub(crate) fn runs_by_itself(&self) -> bool {
+        self.host.runs_by_itself()
     }
 
     /// Closes the input: nothing needs it any more, or it has failed.

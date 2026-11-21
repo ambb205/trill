@@ -58,6 +58,16 @@ and what to do about it in a terminal. Conversations are kept per project beside
 the next time the project is open. The assistant comes in by a door of its own on the MCP server (`/assistant`),
 through which files are written only into the project's folder or `Documents/Trill`.
 
+**The assistant cannot open a microphone.** Its tools include research on the web and its panel cannot ask, so
+an input is opened for a track only by the user's own hand at the window: arming a track that records an input,
+giving an armed track its input, or switching its monitoring on. That is held in the session and not in each
+tool: nothing that comes in by the assistant's door opens the input, by any route (arming, a track's input or
+monitoring, an undo or a redo, opening or recovering a song, a duplicate, a paste, a sound, the measurement,
+`audio_inputs` with `listen`), and what comes to want the input that way is held or disarmed, with a sentence.
+Once the user has armed a track it may record. It cannot change the device that is recorded from while an input
+is live, and it cannot remove recordings. A client the user connected themselves is the user's own hand and is
+not limited.
+
 ![The assistant after a turn that added a bass line, with the Undo for it](images/assistant-answered.png)
 
 ## MCP tools
@@ -87,7 +97,7 @@ through which files are written only into the project's folder or `Documents/Tri
 | Film | `film_plan` (what a film would be, take by take, before any of it is made; costs nothing), `film` (makes it: the song or a stretch of it with its own sound, or how it was made, as an .mp4) |
 | Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map; on a MIDI `channel` where one is asked for), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file; with `stems`, every track, group and return in files of their own from the same pass) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency, and the device that is recorded from) |
-| Recording | `track_input` (what a track records: a keyboard, or a channel or a pair of the audio device's input, and how that is heard meanwhile), `audio_inputs` (the input devices, whether one is open, and with `listen` what is arriving on each channel), `transport` with `record` and `stop` (either kind of track; `punch` records only inside the loop's stretch; the reply says what was recorded: its takes, files, lengths, peaks, what was silent, and whether the round trip that was taken off was measured), `takes` (list them; `use` a whole one or a stretch of one on its track; `hear` one in place; `rename`, `remove`, `measure` one), `recording_latency` (how long sound takes to go round and where each figure is from; `measure` it, `use` what was found, `adjust` by hand, `forget`), `unused_recordings` (the recordings nothing plays and undo cannot reach, with sizes; `delete` them by name) |
+| Recording | `track_input` (what a track records: a keyboard, or a channel or a pair of the audio device's input, and how that is heard meanwhile), `audio_inputs` (the input devices, whether one is open, and with `listen` what is arriving on each channel), `transport` with `record` and `stop` (either kind of track; `punch` records only inside the loop's stretch; the reply to `stop` waits, without keeping the window from the song, until the last of what was sung has come in, and says what was recorded: its takes, files, lengths, peaks, what was silent, and whether the round trip that was taken off was measured), `takes` (list them; `use` a whole one or a stretch of one on its track; `hear` one in place; `rename`, `remove`, `measure` one), `recording_latency` (how long sound takes to go round and where each figure is from; `measure` it, `use` what was found, `adjust` by hand, `forget`), `unused_recordings` (the recordings nothing plays: not the open song or what undo can reach, not another song Trill knows of, not unsaved work that can be recovered, with sizes, and apart from them the ones another song plays; `delete` removes the ones named to the system's Recycle Bin or a `removed` folder beside the takes, never out of existence, and says where they went) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
 compactly as `[pitch, start, length, velocity]`. `set_automation` takes a track's volume or pan, the master's

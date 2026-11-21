@@ -91,9 +91,14 @@ fn listeners(_name: &str) -> Vec<u32> {
 }
 
 /// A session that plays into the cable and records from its other end, or
-/// nothing where that is not to be done.
-fn session_on_the_cable(exclusive: bool) -> Option<(Session, tempfile::TempDir, f64)> {
+/// nothing where that is not to be done. With `one_clock` the two ends are
+/// said to count time by one clock, which a cable's do and the system does
+/// not say of them.
+fn session_on_the_cable(exclusive: bool, one_clock: bool) -> Option<(Session, tempfile::TempDir, f64)> {
     let (output, input) = ends()?;
+    // Whoever runs this named the cable's other end to it: this thread is
+    // their hand, for as long as the test runs. (It opens nothing else.)
+    std::mem::forget(trill_engine::hand::by_hand());
     let others = listeners(&input);
     if !others.is_empty() {
         println!("another program is recording from '{input}' (process {others:?}): nothing is played into it");
@@ -111,6 +116,7 @@ fn session_on_the_cable(exclusive: bool) -> Option<(Session, tempfile::TempDir, 
     let folder = folder();
     session.keep_unsaved_recordings_in(folder.path().join("takes"));
     session.set_count_in(0);
+    session.say_input_shares_the_outputs_clock(one_clock);
     let limiter = session.project().master.devices[0].id;
     session.edit(|project| project.remove_device(limiter).map(|_| ())).unwrap();
     let rate = session.audio_info().sample_rate;
@@ -191,12 +197,21 @@ fn take(session: &mut Session, recorded: TrackId, seconds: f64, rate: f64) -> (S
     session.seek(0.0);
     pass(session, 0.3);
     session.record().unwrap();
+    // A take that is not counted in begins when the place its input is
+    // read at has been put for good.
+    let asked = Instant::now();
+    while session.transport().position_beats == 0.0 && asked.elapsed() < Duration::from_secs(4) {
+        pass(session, 0.02);
+    }
+    let waited = asked.elapsed().as_secs_f64();
     pass(session, seconds);
-    session.stop();
+    // (The test has the session to itself: it waits for the take's last
+    // sound here, which a front end does not.)
+    session.stop_and_wait();
     let said = session.last_recording().expect("the take has ended").clone();
     assert!(said.ended_early.is_none(), "{said:?}");
     println!(
-        "  the take: {:.2} s, {} frames silent, {:.1} ms taken off",
+        "  the take: {:.2} s, begun {waited:.2} s after it was asked for, {} frames silent, {:.1} ms taken off",
         said.takes[0].seconds, said.silent_frames, said.taken_off_ms
     );
     let track = session.project().track(recorded).unwrap();
@@ -224,8 +239,8 @@ fn off(path: &str, first: f64, song_frame: f64, rate: f64) -> f64 {
     from as f64 + top as f64 + between - in_file
 }
 
-fn through_the_cable(exclusive: bool) {
-    let Some((mut session, folder, rate)) = session_on_the_cable(exclusive) else { return };
+fn through_the_cable(exclusive: bool, one_clock: bool) {
+    let Some((mut session, folder, rate)) = session_on_the_cable(exclusive, one_clock) else { return };
     let song_frames: Vec<f64> = (1..=8).map(|second| second as f64 * rate * 0.5).collect();
     let recorded = played_and_recorded(&mut session, &folder, rate, &bumps(&song_frames, (rate * 5.0) as usize));
     let said = session.recording_latency().unwrap();
@@ -271,26 +286,10 @@ fn through_the_cable(exclusive: bool) {
     assert!(worst < rate * 0.002, "within two milliseconds of its place: {worst:.2} frames");
 
     // A null: what was recorded of four seconds of noise against what was
-    // played, each at its own level, where the two lie on one another best.
-    let mut seed = 77u64;
-    let noise: Vec<f32> = (0..(rate * 4.0) as usize)
-        .map(|index| {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let edge = (index.min((rate * 4.0) as usize - index) as f32 / 2000.0).min(1.0);
-            ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.1 * edge
-        })
-        .collect();
-    // Slowly changing, so that half a frame's offset does not show as a
-    // difference: three passes of a mean over nine frames.
-    let mut smooth = noise;
-    for _ in 0..3 {
-        smooth = (0..smooth.len())
-            .map(|n| smooth[n.saturating_sub(4)..(n + 5).min(smooth.len())].iter().sum::<f32>() / 9.0)
-            .collect();
-    }
-    let level = smooth.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    let smooth: Vec<f32> = smooth.iter().map(|sample| sample * 0.1 / level).collect();
-    let path_played = write_wav(&file(&folder, "noise.wav"), rate, &smooth);
+    // played, laid where the two lie on one another best to a fraction of
+    // a frame, at the level that fits.
+    let noise = quiet_noise(rate, 4.0);
+    let path_played = write_wav(&file(&folder, "noise.wav"), rate, &noise);
     let played = session.project().tracks[0].id;
     let clip = session.project().tracks[0].clips[0].id;
     session.edit(|project| project.remove_clip(clip).map(|_| ())).unwrap();
@@ -298,49 +297,273 @@ fn through_the_cable(exclusive: bool) {
         .edit(|project| project.add_audio_clip(played, "Noise", 0.0, 8.0, AudioContent::new(path_played)).map(|_| ()))
         .unwrap();
     let (path, first) = take(&mut session, recorded, 4.5, rate);
-    let heard = frames_of(Path::new(&path), first.round() as u64, smooth.len());
-    let mut best = (f64::MAX, 0i64);
-    for shift in -24i64..=24 {
-        let pairs = (2000..smooth.len() - 2000).map(|n| (smooth[n] as f64, heard[(n as i64 + shift) as usize] as f64));
-        let (mut both, mut own) = (0.0, 0.0);
-        for (played, heard) in pairs.clone() {
-            both += played * heard;
-            own += heard * heard;
+    let heard = frames_of(Path::new(&path), first.round() as u64, noise.len());
+    let null = Null::of(&noise, &heard, rate);
+    null.say("what was recorded through Trill");
+    println!(
+        "  the input is read {}",
+        match session.input_status().clock {
+            Some(clock) => format!("on {}", clock.said()),
+            None => "by nobody".to_string(),
         }
-        let gain = both / own.max(1e-30);
-        let (mut left, mut all) = (0.0, 0.0);
-        for (played, heard) in pairs {
-            left += (played - gain * heard).powi(2);
-            all += played * played;
+    );
+    // How many frames of what was recorded are what was played, to the
+    // bit, a whole number of frames later.
+    let lag = null.delay.round() as i64;
+    let same = (4000..noise.len() - 4000)
+        .filter(|n| heard.get((*n as i64 + lag) as usize).is_some_and(|heard| heard.to_bits() == noise[*n].to_bits()))
+        .count();
+    println!("  {same} of {} frames are what was played, to the bit", noise.len() - 8000);
+    // Read between frames by time stamps, the place wanders by a frame or
+    // two, and noise this wide shows a hundredth of a frame: what is left
+    // is then the wander. Frame for frame, it is the cable's own floor.
+    let held = if one_clock { -55.0 } else { -10.0 };
+    assert!(null.halves.iter().all(|(_, db)| *db < held), "what came back is what was played");
+}
+
+/// `seconds` of noise a tenth of full scale high, with nothing in it above
+/// a quarter of the rate (12 kHz at 48 kHz, and 90 dB down a little above
+/// that). What is read between two frames is exact only of a sound that
+/// leaves the top of the band alone, here and in whatever lies between
+/// the ends of a cable: this noise asks nothing of anybody's filter there.
+fn quiet_noise(rate: f64, seconds: f64) -> Vec<f32> {
+    let length = (rate * seconds) as usize;
+    let mut seed = 77u64;
+    let white: Vec<f64> = (0..length)
+        .map(|index| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let edge = (index.min(length - index) as f64 / 2000.0).min(1.0);
+            ((seed >> 40) as f64 / (1u64 << 24) as f64 - 0.5) * edge
+        })
+        .collect();
+    // A sinc that passes half the band, under a window: 255 frames of it.
+    let reach = 127i64;
+    let weights: Vec<f64> = (-reach..=reach)
+        .map(|tap| {
+            let sinc = match tap {
+                0 => 0.5,
+                tap => (std::f64::consts::PI * tap as f64 / 2.0).sin() / (std::f64::consts::PI * tap as f64),
+            };
+            let turn = std::f64::consts::TAU * (tap + reach) as f64 / (2 * reach) as f64;
+            sinc * (0.35875 - 0.48829 * turn.cos() + 0.14128 * (2.0 * turn).cos() - 0.01168 * (3.0 * turn).cos())
+        })
+        .collect();
+    let noise: Vec<f64> = (0..length as i64)
+        .map(|n| {
+            let taps = weights.iter().enumerate();
+            taps.map(|(tap, weight)| white.get((n + tap as i64 - reach) as usize).map_or(0.0, |sample| sample * weight))
+                .sum()
+        })
+        .collect();
+    let level = noise.iter().fold(0.0f64, |peak, sample| peak.max(sample.abs()));
+    // On the steps of sixteen bits, which is what a file of sixteen bits
+    // holds and what the cable carries: a path that is a wire hands this
+    // back as it is.
+    noise.iter().map(|sample| ((sample * 0.1 / level * 32_768.0).round() / 32_768.0) as f32).collect()
+}
+
+/// How many frames either side of a place a sound is read from when it is
+/// read between two frames, and at how many places between two.
+const REACH: usize = 32;
+const PLACES: usize = 1024;
+
+/// The weights that read a sound between its frames: a sinc under a
+/// window, at [`PLACES`] places between two frames.
+struct Between(Vec<f64>);
+
+impl Between {
+    fn new() -> Self {
+        let taps = 2 * REACH;
+        let mut rows = vec![0.0; (PLACES + 1) * taps];
+        for place in 0..=PLACES {
+            let fraction = place as f64 / PLACES as f64;
+            for tap in 0..taps {
+                // How far the tap's frame is from the place.
+                let away = tap as f64 - (REACH as f64 - 1.0) - fraction;
+                let sinc = match away.abs() < 1e-12 {
+                    true => 1.0,
+                    false => (std::f64::consts::PI * away).sin() / (std::f64::consts::PI * away),
+                };
+                let turn = std::f64::consts::TAU * (away + REACH as f64) / (2.0 * REACH as f64);
+                let window =
+                    0.35875 - 0.48829 * turn.cos() + 0.14128 * (2.0 * turn).cos() - 0.01168 * (3.0 * turn).cos();
+                rows[place * taps + tap] = sinc * window.max(0.0);
+            }
         }
-        let db = 10.0 * (left / all).log10();
-        if db < best.0 {
-            best = (db, shift);
+        Self(rows)
+    }
+
+    /// `sound` at `place`, which may lie between two frames; nothing where
+    /// the frames around it are not all there.
+    fn at(&self, sound: &[f32], place: f64) -> f64 {
+        let taps = 2 * REACH;
+        let whole = place.floor();
+        let between = (place - whole) * PLACES as f64;
+        let (row, mix) = (between.floor() as usize, between - between.floor());
+        let first = whole as i64 - (REACH as i64 - 1);
+        if first < 0 || first as usize + taps > sound.len() {
+            return 0.0;
+        }
+        let (here, next) = (&self.0[row * taps..][..taps], &self.0[(row + 1) * taps..][..taps]);
+        let frames = &sound[first as usize..][..taps];
+        (0..taps).map(|tap| f64::from(frames[tap]) * (here[tap] + (next[tap] - here[tap]) * mix)).sum()
+    }
+}
+
+/// How much of `heard` is not `played`, in decibels under it, over
+/// `frames` of it: with `played` laid `delay` frames later at the middle
+/// of them and `drift` frames later for every frame after that, at the
+/// level that fits best.
+fn left_over(
+    between: &Between,
+    played: &[f32],
+    heard: &[f32],
+    frames: std::ops::Range<usize>,
+    delay: f64,
+    drift: f64,
+) -> f64 {
+    let middle = (frames.start + frames.end) as f64 / 2.0;
+    let (mut both, mut own, mut all) = (0.0, 0.0, 0.0);
+    for frame in frames {
+        let was = between.at(played, frame as f64 - delay - drift * (frame as f64 - middle));
+        let is = f64::from(heard[frame]);
+        (both, own, all) = (both + was * is, own + was * was, all + is * is);
+    }
+    10.0 * ((all - both * both / own.max(1e-300)).max(1e-300) / all.max(1e-300)).log10()
+}
+
+/// Where `of` is least between `low` and `high`, to a ten-thousandth of
+/// the way: `of` has one hollow there.
+fn least(mut low: f64, mut high: f64, of: impl Fn(f64) -> f64) -> f64 {
+    let golden = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut a, mut b) = (high - golden * (high - low), low + golden * (high - low));
+    let (mut at_a, mut at_b) = (of(a), of(b));
+    for _ in 0..22 {
+        if at_a < at_b {
+            (high, b, at_b) = (b, a, at_a);
+            a = high - golden * (high - low);
+            at_a = of(a);
+        } else {
+            (low, a, at_a) = (a, b, at_b);
+            b = low + golden * (high - low);
+            at_b = of(b);
         }
     }
-    println!(
-        "null of what was recorded against what was played: {:.1} dB, {} frames from where it was put",
-        best.0, best.1
-    );
-    assert!(best.0 < -20.0, "what came back is what was played");
+    (low + high) / 2.0
+}
+
+/// What is left of a sound that was played when what was heard of it is
+/// taken away: see [`Null::of`].
+struct Null {
+    /// With one delay for all of it: decibels under what was heard, and
+    /// the delay, in frames from where the sound was put.
+    one: f64,
+    delay: f64,
+    /// With a delay that moves evenly: decibels, and how fast it moves,
+    /// in parts a million.
+    even: f64,
+    drift_ppm: f64,
+    /// Every half second by itself, with a delay of its own: that delay,
+    /// and decibels.
+    halves: Vec<(f64, f64)>,
+}
+
+impl Null {
+    /// Lays `played` on `heard`, which is taken to begin about where
+    /// `played` does (within a hundred frames), and takes it away.
+    fn of(played: &[f32], heard: &[f32], rate: f64) -> Self {
+        let between = Between::new();
+        let length = played.len().min(heard.len());
+        let frames = 4000..length - 4000;
+        // To the frame first, by a second of it.
+        let second = 8000..(8000 + rate as usize).min(length - 4000);
+        let alike = |shift: i64| -> f64 {
+            second.clone().map(|n| f64::from(played[(n as i64 - shift) as usize]) * f64::from(heard[n])).sum()
+        };
+        let coarse = (-100i64..=100).max_by(|a, b| alike(*a).total_cmp(&alike(*b))).unwrap() as f64;
+        let over = |delay: f64, drift: f64| left_over(&between, played, heard, frames.clone(), delay, drift);
+        let delay = least(coarse - 1.5, coarse + 1.5, |delay| over(delay, 0.0));
+        let one = over(delay, 0.0);
+        // Then let the delay move evenly, and fit the two in turn.
+        let (mut moving, mut drift) = (delay, 0.0);
+        for reach in [40e-6, 10e-6, 2e-6] {
+            drift = least(drift - reach, drift + reach, |drift| over(moving, drift));
+            moving = least(moving - 0.5, moving + 0.5, |delay| over(delay, drift));
+        }
+        let even = over(moving, drift);
+        // And every half second by itself.
+        let half = (rate / 2.0) as usize;
+        let halves = (0..(length - 8000) / half)
+            .map(|index| {
+                let part = 4000 + index * half..4000 + (index + 1) * half;
+                let middle = (part.start + part.end) as f64 / 2.0 - length as f64 / 2.0;
+                let about = moving + drift * middle;
+                let own = least(about - 1.0, about + 1.0, |delay| {
+                    left_over(&between, played, heard, part.clone(), delay, 0.0)
+                });
+                (own, left_over(&between, played, heard, part, own, 0.0))
+            })
+            .collect();
+        Self { one, delay, even, drift_ppm: drift * 1e6, halves }
+    }
+
+    fn say(&self, what: &str) {
+        let delays = self.halves.iter().map(|(delay, _)| *delay);
+        let (first, last) = (delays.clone().fold(f64::MAX, f64::min), delays.fold(f64::MIN, f64::max));
+        let (best, worst) =
+            self.halves.iter().fold((f64::MAX, f64::MIN), |(best, worst), (_, db)| (best.min(*db), worst.max(*db)));
+        println!("null of {what} against what was played, laid on it to a fraction of a frame and at its level:");
+        println!(
+            "  with one delay for the four seconds: {:.1} dB, {:.3} frames from where it was put",
+            self.one, self.delay
+        );
+        println!(
+            "  with a delay that moves evenly: {:.1} dB, moving by {:.2} parts in a million",
+            self.even, self.drift_ppm
+        );
+        println!(
+            "  each half second with a delay of its own: {best:.1} dB at the best, {worst:.1} dB at the worst; \
+             their delays lie through {:.3} frames ({first:.3} to {last:.3})",
+            last - first
+        );
+        println!(
+            "  half second by half second: {}",
+            self.halves.iter().map(|(delay, db)| format!("{delay:.3} fr {db:.1} dB")).collect::<Vec<_>>().join(", ")
+        );
+    }
 }
 
 #[test]
 #[ignore = "plays into a cable from an output to an input of this machine, and records from its other end"]
 fn a_take_through_the_cable_is_placed_by_what_a_measurement_finds_and_nulls_against_what_was_played() {
-    through_the_cable(false);
+    through_the_cable(false, false);
+}
+
+#[test]
+#[ignore = "plays into a cable from an output to an input of this machine, and records from its other end"]
+fn the_same_with_the_two_ends_said_to_be_one_clock() {
+    through_the_cable(false, true);
 }
 
 #[test]
 #[ignore = "takes both ends of the cable for this program alone"]
 fn the_same_with_both_ends_of_the_cable_taken_exclusively() {
-    through_the_cable(true);
+    through_the_cable(true, false);
 }
 
 #[test]
+#[ignore = "takes both ends of the cable for this program alone"]
+fn the_same_exclusively_with_the_two_ends_said_to_be_one_clock() {
+    through_the_cable(true, true);
+}
+
+/// As the system has the cable, which is by its time stamps; with
+/// `TRILL_CABLE_ONE_CLOCK` set, with its two ends said to be one clock.
+#[test]
 #[ignore = "ten minutes of the machine's time, through the cable"]
 fn the_first_click_of_a_ten_minute_take_and_the_last_are_both_in_their_place() {
-    let Some((mut session, folder, rate)) = session_on_the_cable(false) else { return };
+    let one_clock = std::env::var_os("TRILL_CABLE_ONE_CLOCK").is_some();
+    let Some((mut session, folder, rate)) = session_on_the_cable(false, one_clock) else { return };
     // A click every ten seconds for ten minutes.
     let song_frames: Vec<f64> = (0..60).map(|click| (0.5 + click as f64 * 10.0) * rate).collect();
     let recorded = played_and_recorded(&mut session, &folder, rate, &bumps(&song_frames, (rate * 600.0) as usize));
@@ -444,4 +667,95 @@ fn how_far_the_cable_itself_wanders() {
         (most - least) / rate * 1000.0
     );
     println!("  each bump against where a wire would have it, in frames: {:.1?}", &wander[..wander.len().min(80)]);
+}
+
+/// What the cable and the system's own mixing leave of noise, with nothing
+/// of Trill between the two ends: the same noise the takes above are
+/// nulled with, played into the output as the system has it and taken
+/// from the input as the system has it. What a take through Trill nulls
+/// to is to be held beside this. It also says what steps the cable's
+/// samples lie on: its word length.
+#[test]
+#[ignore = "plays noise into the cable and records it through the system's audio alone"]
+fn what_the_cable_alone_leaves_of_noise() {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use std::sync::Mutex;
+    let Some((output, input)) = ends() else { return };
+    if !listeners(&input).is_empty() {
+        println!("another program is recording from '{input}': nothing is played into it");
+        return;
+    }
+    let host = cpal::default_host();
+    let named = |name: &str, device: &cpal::Device| device.description().is_ok_and(|said| said.name() == name);
+    let speaker = host.output_devices().unwrap().find(|device| named(&output, device)).unwrap();
+    let microphone = host.input_devices().unwrap().find(|device| named(&input, device)).unwrap();
+    let (out_config, in_config) =
+        (speaker.default_output_config().unwrap(), microphone.default_input_config().unwrap());
+    assert_eq!(out_config.sample_format(), cpal::SampleFormat::F32);
+    assert_eq!(in_config.sample_format(), cpal::SampleFormat::F32);
+    let rate = out_config.sample_rate() as f64;
+    println!("the cable as the system has it: {rate} Hz out, {} Hz in", in_config.sample_rate());
+    let (out_channels, in_channels) = (out_config.channels() as usize, in_config.channels() as usize);
+    // Half a second of nothing, the noise, and a second of nothing.
+    let noise = quiet_noise(rate, 4.0);
+    let lead = (rate / 2.0) as usize;
+    let sound = noise.clone();
+    let mut played = 0usize;
+    let heard: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let keep = heard.clone();
+    let failed = |error: cpal::Error| println!("the cable's stream said: {error}");
+    let taking = microphone
+        .build_input_stream(
+            in_config.config(),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                keep.lock().unwrap().extend(data.chunks(in_channels).map(|frame| frame[0]));
+            },
+            failed,
+            None,
+        )
+        .unwrap();
+    taking.play().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let playing = speaker
+        .build_output_stream(
+            out_config.config(),
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                for frame in data.chunks_mut(out_channels) {
+                    frame.fill(played.checked_sub(lead).and_then(|at| sound.get(at)).copied().unwrap_or(0.0));
+                    played += 1;
+                }
+            },
+            failed,
+            None,
+        )
+        .unwrap();
+    playing.play().unwrap();
+    std::thread::sleep(Duration::from_secs_f64(6.0));
+    drop(playing);
+    drop(taking);
+    let heard = heard.lock().unwrap().clone();
+
+    // The steps its samples lie on, of those that are not nothing.
+    let sounding: Vec<f32> = heard.iter().copied().filter(|sample| sample.abs() > 1e-4).collect();
+    for (bits, steps) in [(16, 32_768.0f64), (24, 8_388_608.0)] {
+        let on = sounding.iter().filter(|sample| {
+            let scaled = f64::from(**sample) * steps;
+            (scaled - scaled.round()).abs() < 1e-3
+        });
+        let share = on.count() as f64 / sounding.len().max(1) as f64;
+        println!("  {:.1} % of what it hands over lies on the steps of {bits} bits", share * 100.0);
+    }
+    // Where the noise begins in what was heard: by its first half second,
+    // looked for through the first three seconds.
+    let template = &noise[4000..4000 + (rate / 2.0) as usize];
+    let alike = |at: usize| -> f64 {
+        template.iter().step_by(4).zip(heard[at..].iter().step_by(4)).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum()
+    };
+    let last = (rate * 3.0) as usize;
+    let begins = (0..last.min(heard.len().saturating_sub(noise.len())))
+        .max_by(|a, b| alike(*a).total_cmp(&alike(*b)))
+        .expect("the noise came back");
+    let begins = begins.saturating_sub(4000);
+    let null = Null::of(&noise, &heard[begins..(begins + noise.len()).min(heard.len())], rate);
+    null.say("what came through the cable alone");
 }

@@ -107,6 +107,15 @@ arrives is drawn beside the track's own level, a thin bar under its name and a m
 mixer, with a lamp that stays lit once the input was at full scale until it is clicked: turn the input down at
 the device and record again. `Shift+F9` arms the selected track.
 
+*An input is opened by your own hand, at this window, in this song.* Three things open it for a track: arming
+the track as it then records an input, giving an armed track its input, and switching its monitoring on. Nothing
+else does. Not the assistant, and not an undo or a redo made for it; not a song that is opened, begun or
+recovered; not a track that is duplicated or pasted. Arming does not carry into another song, and a track that
+comes to be armed with an input in any other way is disarmed, with a line that says so. A song that says a track
+is *always* heard does not open the microphone by being opened either, your own songs included: the switch
+shows it as **held**, and one click lets it go. The assistant may record once you have armed the track yourself,
+and cannot change the device that is recorded from while an input is live.
+
 *Hearing yourself.* The monitor switch has the input heard through the track's own devices, fader and sends,
 where its clips come in: off as it comes, on while the track is armed, or always (from the input's menu). Lit, the
 switch says how many milliseconds late the input is heard, which is the whole way from the microphone to the
@@ -119,9 +128,16 @@ not heard meanwhile. It is put **where it was heard**: the time the sound took t
 and the time the song takes to reach the speaker are both taken off, from the first frame (see
 [the engine's page](engine.md) for how, and *Audio and MIDI settings* below for measuring it). A count-in is
 recorded too, ahead of the clip, so a breath before the first bar is there when the clip's start is dragged out.
-If the device is pulled out, the disk fills, or the file reaches the size a WAV file can have, the take ends
-whole up to there, a sentence says why, and the song plays on. Samples that did not arrive are silence of their
-length, never a shift, and are said.
+If the device is pulled out, the disk fills, the file reaches the size a WAV file can have, or the audio device
+is changed under it, the take ends whole up to there, a sentence says why, and the song plays on. Samples that
+did not arrive are silence of their length, never a shift, and are said. A take without a count-in that is
+asked for in the first quarter of a second after its input was opened begins when the input has found its
+place, a moment later, as after a short count-in: a take never has that step in it.
+
+Where the song went during a take is where the take lands. Sent elsewhere in the middle of it (a click in the
+ruler), the take ends its stretch there and begins another where the song now is, each a take of its own where
+it was sung. With the loop switched off in the middle, it goes on as one stretch past the loop's end. Nothing
+that was sung while the song rolled is left without a take.
 
 *Takes.* Every recording of a track is kept as a take, beside its clips and never among them. With the loop on,
 each pass is a take of its own, and the track then plays the last whole pass; recording over a part keeps what
@@ -160,7 +176,10 @@ not open a microphone by being looked at*: `Show level` opens the input and show
 with a lamp a channel, and the input closes with the panel unless a track needs it. An input is one device with
 all its channels; it is opened as the output is (shared, or exclusively where the output is and the device
 allows), and the page says whether it runs on the output's clock or on one of its own, which is the ordinary
-case of a microphone on one device and headphones on another.
+case of a microphone on one device and headphones on another. That an input shares the output's clock is what
+the system says of the two, and Trill holds it against the input's own time stamps: where they say otherwise
+for a few seconds, the input is read as having a clock of its own from then on, without a step, and the page
+says that the system has it as part of the output's device and that its time stamps say otherwise.
 
 *The round trip* is how long sound takes from the microphone back to the speaker: what the input says of
 itself, what handing the sound across to the engine's clock takes, and what the output says. A take is put where
@@ -172,9 +191,13 @@ nothing until it is taken; taken, it stands in place of what the output says, an
 devices as they were opened (shared or exclusive, rate, buffer). `Earlier` and `Later` move takes half a
 millisecond at a time by hand, for putting right by ear what cannot be measured; `No nudge` and `Forget` go back.
 
-**`File`, `Unused recordings`** lists the recordings that nothing in the song plays any more and that undo
-cannot bring back, with their sizes. Trill never deletes a recording by itself: `Delete` asks first, and only a
-second yes deletes.
+**`File`, `Unused recordings`** lists the recordings that nothing plays any more: not the open song or any
+state undo can bring back, not a sampler or a drum rack of it, not another song Trill knows of (one that was
+saved under another name goes on playing the files of the song it was saved from), not unsaved work that can
+still be recovered. The ones another song plays are listed apart, with the song's name, and stay. Trill never
+removes a recording by itself: `Remove` asks first and says where they go, and only a second yes sends them to
+the system's Recycle Bin, from where they can be had back. (Where a system has no bin, and in a run on a
+profile folder, they go into a `removed` folder beside the takes.) Nothing is ever deleted outright.
 
 ## Playback load
 

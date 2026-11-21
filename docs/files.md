@@ -31,14 +31,28 @@ is then the song without those files and not a quieter mix), and looks for the f
 for a pair, one file for each track of each take with every pass of the loop in it (the takes are stretches of
 it). A saved song's recordings are in `<song> files\takes` beside it. An unsaved song's are in a folder of
 Trill's own (`recordings` beside the settings, a folder a run and a song) and **come beside the song when it is
-first saved**: they are copied there, the song and every state undo can reach name them where they are now, and
-only then are the first copies removed, so that a crash in the middle loses no audio and leaves nothing behind.
-A take's file is written as it is recorded and its header is brought up to date every second: a program that is
-killed in the middle of a take leaves a WAV file that reads, holding all but the last second or two, and the
-safety copy of the song plays it. Undoing a take leaves its file; letting go of a take leaves its file. **Trill
-never deletes a recording by itself.** `File`, `Unused recordings` (the `unused_recordings` tool) lists the ones
-nothing in the song plays and no undo or redo can bring back, with their sizes, and deletes them when that is
-asked for, in the window only after a second yes. A take's recording is one of the song's files like any other:
+first saved**, wherever the song names them: in a clip, a take, a sampler or a drum rack, in the song and in
+every state undo can reach. On the same disk that costs nothing and no time: each file is given a second name
+beside the song, the song is written naming it there, and the first name is taken away. Across disks the song
+is saved at once, naming each recording where it is, and the recordings are copied afterwards, away from the
+window; the status bar says how far that is, and when a copy is whole the song and its file name it beside the
+song and the first copy goes. A crash at any moment of either loses no audio. A take that is still being
+recorded when the song is first saved comes beside it when the take ends, and the recordings of unsaved work
+that was recovered come beside it when that song is first saved.
+
+**Saving under another name leaves the takes where they are**: `Song v2` goes on naming the files in
+`Song v1 files\takes`. So the two songs share them, and a recording is "unused" only when neither plays it.
+
+A take's file is written as it is recorded, and every second what there is of it is put through to the disk and
+then the header brought up to date: a program that is killed in the middle of a take, or a machine that loses
+its power, leaves a WAV file that reads, holding all but the last second or two, and the safety copy of the
+song plays it. Undoing a take leaves its file; letting go of a take leaves its file. **Trill never deletes a
+recording.** `File`, `Unused recordings` (the `unused_recordings` tool) lists the ones nothing plays: not the
+open song or any state undo or redo can bring back, not another song Trill knows of (the ones it saved or
+opened lately), not unsaved work that can be recovered. One that another song plays is listed with that song's
+name and refused. The others are removed when that is asked for, in the window only after a second yes, and
+removed means sent to the system's Recycle Bin, or into a `removed` folder beside the takes where there is no
+bin; the question and the tool's reply say which. A take's recording is one of the song's files like any other:
 listed when it is missing, looked for, and relinked.
 
 **When a song opens with files missing**, the clips and pads that lost their file are marked, the status bar
