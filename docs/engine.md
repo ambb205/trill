@@ -537,9 +537,9 @@ it is read at has been leaving where they have it for three seconds running, the
 is followed from where the place is, without a step, and the Input page and the tools say so. While it holds
 and the two run at one rate, a frame of the input is a frame of the engine: the place is on a whole frame,
 nothing is read between frames, and what reaches a take's file is what the device gave, to the bit. While
-nobody reads the input (no track hears it, no take is asked for, nothing measures) that place is put again
-wherever the stamps come to have it a frame from where it is, which nobody hears; from the moment something
-reads it, it stays.
+nothing is kept of the input (no take is asked for, nothing measures) that place is put again wherever the
+stamps come to have it a frame from where it is, which is a frame's step in what a track lets through in the
+first seconds an input is open and in nothing that is kept; from the moment a take is asked for, it stays.
 
 *No step in a take.* The place an input is read at is put by the first stamps of the two devices, each of
 which may be as late as any, and put again a quarter of a second on by the least late of them: a step. A take
@@ -638,7 +638,7 @@ by a pair that has only one; it is not the filter, which the engine's own tests 
 A take of ten minutes, shared, with the round trip measured first, on a machine that other work kept busy,
 sixty clicks ten seconds apart. With the two ends said to be one clock: 598.03 s recorded with no frame silent,
 and every click one frame from its place, the first, the last and the worst alike (the place was put a frame
-on after the measurement, while nothing read the input, and did not move again). As the system has the cable,
+on after the measurement, while nothing was kept of the input, and did not move again). As the system has the cable,
 read by its time stamps: 598.05 s with no frame silent; the first click 9.4 frames from its place, the last
 25.7, the worst of the sixty 28.9 (0.6 ms); the two ends read 0.9 parts in a million apart. On a busy machine
 the stamps are that much worse than a clock: the first build of this took the cable's ends for one clock on the

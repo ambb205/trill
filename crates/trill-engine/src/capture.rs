@@ -643,8 +643,9 @@ const PARTED_BY: f64 = 0.00015;
 const PARTED_FOR: f64 = 3.0;
 const PARTED_LOOKS_BACK: f64 = 1.0;
 /// A place that is on a whole frame and stays there ([`Reader::whole`])
-/// is put again, while nobody reads the input, wherever the time stamps
-/// have it this many frames or more from where it is; and it counts as
+/// is put again, while nothing is kept of the input, wherever the time
+/// stamps have it this many frames or more from where it is; and it
+/// counts as
 /// well put, for what may be concluded from its being off later, once
 /// the stamps have agreed with it for this many seconds. (The stamps an
 /// input opens with can all be late together, on a machine that is busy
@@ -705,8 +706,10 @@ pub(crate) struct Reader {
     /// is. See [`Reader::begin`].
     whole: bool,
     /// For how long the time stamps have agreed with where such a place
-    /// is, while nobody read the input: see [`WELL_PUT_AFTER`].
+    /// is, while nothing was kept of the input: see [`WELL_PUT_AFTER`].
     agreed_for: f64,
+    /// Whether something keeps what is read: see [`Reader::keep`].
+    kept: bool,
     /// What the place was off by a moment ago, and for how long it has
     /// been leaving where the time stamps have it: see [`Reader::parts`].
     off_before: f64,
@@ -751,6 +754,7 @@ impl Reader {
             one_clock,
             whole: one_clock && (link.rate - engine_rate).abs() < 1e-9,
             agreed_for: 0.0,
+            kept: false,
             off_before: 0.0,
             leaving_for: 0.0,
             placed_for: 0.0,
@@ -794,6 +798,17 @@ impl Reader {
             && self.line_number == self.link.restarts.load(Ordering::Relaxed)
     }
 
+    /// Says whether something keeps what is read from here on: a take
+    /// writes it down, a measurement is made by it. While something does,
+    /// a place that is on a whole frame stays where it is, so that what
+    /// is kept has no step in it. (What is only heard, through a track
+    /// that lets its input through, is not kept: a frame's step in it in
+    /// the first seconds an input is open buys a place that is right for
+    /// every take after.)
+    pub fn keep(&mut self, kept: bool) {
+        self.kept = kept;
+    }
+
     /// Says which channels are read from here on, a bit each: the others
     /// cost nothing and are silence.
     pub fn want(&mut self, channels: u32) {
@@ -806,11 +821,11 @@ impl Reader {
     /// An input that counts time by the engine's own clock, at the
     /// engine's rate, is not read between its frames at all: its place is
     /// put on a whole frame, and a frame of the engine is a frame of the
-    /// input as the device gave it, to the bit. While nobody reads the
-    /// input (no track hears it, no take is asked for, nothing measures)
-    /// the place is put again wherever the time stamps come to have it a
-    /// frame from where it is, which nobody hears and which makes it the
-    /// better for every stamp since. From the moment something reads it,
+    /// input as the device gave it, to the bit. While nothing is kept of
+    /// the input (no take is asked for, nothing measures: see
+    /// [`Reader::keep`]) the place is put again wherever the time stamps
+    /// come to have it a frame from where it is, which makes it the
+    /// better for every stamp since. From the moment something is kept,
     /// it stays: the stamps then say nothing more but whether the two are
     /// one clock at all ([`Reader::parts`]), and no filter and no creeping
     /// place lies between a microphone and its file.
@@ -848,9 +863,9 @@ impl Reader {
             if self.whole {
                 (self.place, self.ratio, self.agreed_for) = (meant.round(), 1.0, 0.0);
             }
-        } else if self.whole && self.wanted == 0 {
-            // Nobody reads it: the place is put where the stamps have it
-            // by now, if that is somewhere else.
+        } else if self.whole && !self.kept {
+            // Nothing is kept of it: the place is put where the stamps
+            // have it by now, if that is somewhere else.
             let seconds = frames as f64 / self.engine_rate;
             self.placed_for += seconds;
             self.ratio = 1.0;
@@ -920,9 +935,9 @@ impl Reader {
         // Where nothing draws the place (one rate, a frame for a frame),
         // what it is off by is what the two clocks have run apart by and
         // nothing else: twice as far out as may be doubted is not doubted.
-        // (Of a place the stamps had agreed with before anything read it.
-        // One that was read from the first may simply be out, and is
-        // doubted only as any other is.)
+        // (Of a place the stamps had agreed with before anything was kept
+        // of it. One that was kept from the first may simply be out, and
+        // is doubted only as any other is.)
         let well_put = self.whole && self.agreed_for >= WELL_PUT_AFTER;
         let far = well_put && off.abs() > 2.0 * PARTED_BY * self.link.rate;
         if self.leaving_for < PARTED_FOR && !far {
@@ -1507,12 +1522,14 @@ mod tests {
         let mut out = Vec::new();
         for buffer in 0..3000u64 {
             let first = buffer * 480;
+            // A take is asked for a second after the input was opened.
+            reader.keep(buffer >= 100);
             sink.push(ns(first) + late(buffer, 2_000_000), 480, |index, _| heard(first + index as u64));
             reader.begin(ns(first + 480) + late(buffer + 7, 300_000), 480);
             reader.take(480);
             out.extend_from_slice(&reader.channel(0)[..480]);
         }
-        // Once the place is put, half a minute of it: frame n of the
+        // From the take's first frame, half a minute of it: frame n of the
         // engine is frame n - K of the input, for one K, and not a bit of
         // it is other than the device gave.
         let from = 48_000usize;

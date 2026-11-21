@@ -389,8 +389,9 @@ on the samples.
   buffer (`Sink::push_said`). That an input shares the output's clock (`InputFormat::shares_clock`) is a belief
   the stamps may overturn (`Reader::parts`), and no evidence at all where the system knows no container for
   either end; while it holds and the rates are one, a frame of the input is a frame of the engine, handed
-  across to the bit (`Reader::whole`: its place is on a whole frame, put again while nobody reads the input
-  and kept from the moment something does; what an exclusive output writes to a device is rounded to the
+  across to the bit (`Reader::whole`: its place is on a whole frame, put again while nothing is kept of the
+  input and kept from the moment a take is asked for or a measurement runs, `Reader::keep`; what an exclusive
+  output writes to a device is rounded to the
   device's steps, so that the way out is as exact as the way in). The place an input is read at is put again a
   quarter of a second after it opens: a take that is not counted in waits for that (`Processor::record`,
   `Reader::settled`), so that no take has the step in it.

@@ -437,6 +437,9 @@ impl Processor {
         let wanted = self.graph.inputs | recorded | measured;
         if let Some(input) = &mut self.input {
             input.want(wanted);
+            // What is written down or measured by has no step put in it
+            // for the sake of a better place; what is only heard may.
+            input.keep(recorded != 0 || measured != 0);
         }
     }
 
