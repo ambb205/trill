@@ -11,10 +11,17 @@
 //! render loop at the system's "Pro Audio" priority, and closes the device
 //! when the stream is dropped. Nothing of the stream is ever touched from
 //! another thread.
+//!
+//! An input is taken the same way ([`open_exclusive_input`]): where the
+//! output plays this program's buffers directly, the input should hand
+//! its own over as directly, or what is saved on the way out is spent on
+//! the way in.
 
 use super::{
-    FailureCallback, OpenError, OpenStream, Renderer, StreamFailure, StreamFormat, StreamRequest, Timing, now_ns,
+    FailureCallback, InputFormat, InputRequest, OpenError, OpenInput, OpenStream, Renderer, StreamFailure,
+    StreamFormat, StreamRequest, Timing, now_ns,
 };
+use crate::capture::Sink;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -22,16 +29,18 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_DEVICE_INVALIDATED,
-    AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_EXCLUSIVE,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, IAudioClient, IAudioClock, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_IN_USE,
+    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_UNSUPPORTED_FORMAT,
+    AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, IAudioCaptureClient, IAudioClient, IAudioClock,
+    IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    WAVEFORMATEXTENSIBLE_0,
 };
 use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::HSTRING;
 
@@ -107,6 +116,30 @@ impl Layout {
                     out.copy_from_nonoverlapping(value.to_le_bytes().as_ptr(), 3);
                 }
                 Layout::Int16 => out.cast::<i16>().write_unaligned((sample * 32_767.0) as i16),
+            }
+        }
+    }
+
+    /// Reads one sample at `at`, as a device that records hands it over.
+    ///
+    /// # Safety
+    ///
+    /// `at` must be valid for reading the layout's container size.
+    #[inline]
+    unsafe fn read(self, at: *const u8) -> f32 {
+        unsafe {
+            match self {
+                Layout::Float32 => at.cast::<f32>().read_unaligned(),
+                Layout::Int32 => (at.cast::<i32>().read_unaligned() as f64 / 2_147_483_648.0) as f32,
+                Layout::Int24In32 => (at.cast::<i32>().read_unaligned() >> 8) as f32 / 8_388_608.0,
+                Layout::Int24 => {
+                    let mut bytes = [0u8; 4];
+                    // Into the top three bytes, so that the sign comes down
+                    // with the shift.
+                    at.copy_to_nonoverlapping(bytes.as_mut_ptr().add(1), 3);
+                    (i32::from_le_bytes(bytes) >> 8) as f32 / 8_388_608.0
+                }
+                Layout::Int16 => f32::from(at.cast::<i16>().read_unaligned()) / 32_768.0,
             }
         }
     }
@@ -442,9 +475,309 @@ impl Drop for Stream {
     }
 }
 
+/// Whether the endpoints with the ids `one` and `other` are of one piece
+/// of hardware: the system keeps, with every endpoint, which device it
+/// belongs to. Two that cannot be asked are taken to be two devices.
+pub(super) fn same_hardware(one: &str, other: &str) -> bool {
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::STGM_READ;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+    use windows::Win32::System::Variant::VT_CLSID;
+    // The device an endpoint belongs to, by the system's name for it.
+    const CONTAINER: PROPERTYKEY =
+        PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0x8c7ed206_3f8a_4827_b3ab_ae9e1faefc6c), pid: 2 };
+    let _com = Com::new();
+    let container = |endpoint: &str| -> Option<u128> {
+        // SAFETY: plain COM calls on objects this closure creates and
+        // owns; the value read is copied out before it is cleared.
+        unsafe {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            let device: IMMDevice = enumerator.GetDevice(&HSTRING::from(endpoint)).ok()?;
+            let store = device.OpenPropertyStore(STGM_READ).ok()?;
+            let mut value = store.GetValue(&CONTAINER).ok()?;
+            let inner = &value.Anonymous.Anonymous;
+            let found =
+                (inner.vt == VT_CLSID && !inner.Anonymous.puuid.is_null()).then(|| (*inner.Anonymous.puuid).to_u128());
+            let _ = PropVariantClear(&mut value);
+            found
+        }
+    };
+    matches!((container(one), container(other)), (Some(one), Some(other)) if one == other)
+}
+
+/// An open input device, ready to start.
+struct Capture {
+    client: IAudioClient,
+    capture: IAudioCaptureClient,
+    event: HANDLE,
+    layout: Layout,
+    channels: usize,
+    block: usize,
+    sample_rate: u32,
+    buffer_frames: u32,
+    stream_latency_frames: f64,
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        // SAFETY: the client and the event are this struct's own, live
+        // until here.
+        unsafe {
+            let _ = self.client.Stop();
+            let _ = CloseHandle(self.event);
+        }
+    }
+}
+
+/// Opens the input endpoint `endpoint` exclusively, with all the channels
+/// it has: at the rate asked for if it takes that, at its own otherwise
+/// (what comes in is brought to the engine's rate whatever it is). Runs on
+/// the stream's thread.
+fn open_capture(endpoint: &str, name: &str, request: &InputRequest) -> Result<Capture, OpenError> {
+    let failed = |error: windows::core::Error| refused(name, &error);
+    // SAFETY: plain COM calls on objects this function creates and owns;
+    // every pointer handed over points to a live local.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(failed)?;
+        let device: IMMDevice =
+            enumerator.GetDevice(&HSTRING::from(endpoint)).map_err(|_| OpenError::NotFound(name.to_string()))?;
+        let activate = || device.Activate::<IAudioClient>(CLSCTX_ALL, None).map_err(failed);
+        let mut client = activate()?;
+
+        let mix = client.GetMixFormat().map_err(failed)?;
+        let (mix_rate, mix_channels) = ((*mix).nSamplesPerSec, (*mix).nChannels);
+        let mix_mask = if (*mix).wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 && (*mix).cbSize >= 22 {
+            (*mix.cast::<WAVEFORMATEXTENSIBLE>()).dwChannelMask
+        } else {
+            0
+        };
+        CoTaskMemFree(Some(mix as *const _));
+
+        // Every channel the device has, as it lays them out; and failing
+        // that two, or one.
+        let all = if mix_mask != 0 { mix_mask } else { (1u32 << mix_channels.clamp(1, 31)) - 1 };
+        let mut shapes = vec![(mix_channels.max(1), all)];
+        for shape in [(2u16, 3u32), (1, 4)] {
+            if !shapes.iter().any(|(channels, _)| *channels == shape.0) {
+                shapes.push(shape);
+            }
+        }
+        let mut rates = vec![request.sample_rate.unwrap_or(mix_rate)];
+        if !rates.contains(&mix_rate) {
+            rates.push(mix_rate);
+        }
+        let tries = rates.iter().flat_map(|&rate| {
+            shapes.iter().flat_map(move |&(channels, mask)| {
+                Layout::ALL.into_iter().map(move |layout| (rate, layout, channels, mask))
+            })
+        });
+        let accepted = tries.into_iter().find(|&(rate, layout, channels, mask)| {
+            let format = layout.describe(rate, channels, mask);
+            client.IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &format.Format, None) == S_OK
+        });
+        let Some((sample_rate, layout, channels, mask)) = accepted else {
+            return Err(OpenError::Refused(format!(
+                "'{name}' gives no format Trill reads when it is opened exclusively"
+            )));
+        };
+        let format = layout.describe(sample_rate, channels, mask);
+
+        let (mut default_period, mut minimum_period) = (0i64, 0i64);
+        client.GetDevicePeriod(Some(&mut default_period), Some(&mut minimum_period)).map_err(failed)?;
+        let wanted = match request.buffer_size {
+            // As long as the output's buffer lasts, in this device's frames.
+            Some(frames) => frames as f64 * sample_rate as f64 / request.sample_rate.unwrap_or(sample_rate) as f64,
+            None => (DEFAULT_BUFFER_SECONDS * sample_rate as f64).max(1.0).log2().ceil().exp2(),
+        };
+        let mut period = ((wanted * 1e7 / sample_rate as f64).round() as i64).max(minimum_period);
+        let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        let mut opened = client.Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, flags, period, period, &format.Format, None);
+        if let Err(error) = &opened
+            && error.code() == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED
+        {
+            let aligned = client.GetBufferSize().map_err(failed)?;
+            period = (1e7 * aligned as f64 / sample_rate as f64 + 0.5) as i64;
+            client = activate()?;
+            opened = client.Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, flags, period, period, &format.Format, None);
+        }
+        opened.map_err(failed)?;
+
+        let event = CreateEventW(None, false, false, None).map_err(failed)?;
+        // From here the event is closed by `Capture`'s drop on every path.
+        let capture = match client.SetEventHandle(event).and_then(|()| client.GetService::<IAudioCaptureClient>()) {
+            Ok(capture) => capture,
+            Err(error) => {
+                let _ = CloseHandle(event);
+                return Err(refused(name, &error));
+            }
+        };
+        let mut device = Capture {
+            client,
+            capture,
+            event,
+            layout,
+            channels: channels as usize,
+            block: format.Format.nBlockAlign as usize,
+            sample_rate,
+            buffer_frames: 0,
+            stream_latency_frames: 0.0,
+        };
+        device.buffer_frames = device.client.GetBufferSize().map_err(failed)?;
+        let latency = device.client.GetStreamLatency().unwrap_or(0).max(0);
+        device.stream_latency_frames = latency as f64 * sample_rate as f64 / 1e7;
+        Ok(device)
+    }
+}
+
+/// Hands the device's buffers to `sink` until told to stop or the device
+/// fails.
+fn run_capture(device: &Capture, mut sink: Sink, on_failure: &FailureCallback, quit: &AtomicBool) {
+    let (layout, channels, block) = (device.layout, device.channels.min(sink.channels()), device.block);
+    let container = layout.bits().0 as usize / 8;
+    let latency_ns = (device.stream_latency_frames * 1e9 / device.sample_rate as f64) as u64;
+    let fail = |error: windows::core::Error| {
+        let lost = error.code() == AUDCLNT_E_DEVICE_INVALIDATED;
+        log::warn!("exclusive audio input ended: {error}");
+        on_failure(if lost { StreamFailure::DeviceLost } else { StreamFailure::Failed });
+    };
+    // SAFETY: the device's objects are live for the whole call and used on
+    // this thread only. `GetBuffer` yields `frames * block` bytes that stay
+    // valid until `ReleaseBuffer`, and nothing is read past them.
+    unsafe {
+        let mut frequency = 0i64;
+        let _ = QueryPerformanceFrequency(&mut frequency);
+        if let Err(error) = device.client.Start() {
+            return fail(error);
+        }
+        while !quit.load(Ordering::Relaxed) {
+            match WaitForSingleObject(device.event, STALL_MS) {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => {
+                    log::warn!("the exclusive audio input has stopped handing over audio");
+                    on_failure(StreamFailure::Stalled);
+                    return;
+                }
+                _ => {
+                    on_failure(StreamFailure::Failed);
+                    return;
+                }
+            }
+            if quit.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let (mut frames, mut flags, mut stamp) = (0u32, 0u32, 0u64);
+            if let Err(error) = device.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, Some(&mut stamp)) {
+                return fail(error);
+            }
+            if frames == 0 || data.is_null() {
+                continue;
+            }
+            // The buffer's first frame was heard when the counter stood
+            // at `stamp` (in ten-millionths of a second), less what the
+            // device says lies before that: so long before now.
+            let mut counter = 0i64;
+            let _ = QueryPerformanceCounter(&mut counter);
+            let now = counter.max(0) as u128 * 10_000_000 / frequency.max(1) as u128;
+            let age_ns = now.saturating_sub(stamp as u128) as u64 * 100 + latency_ns;
+            let heard_ns = now_ns().saturating_sub(age_ns);
+            let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
+            sink.push(heard_ns, frames as usize, |frame, channel| {
+                if silent || channel >= channels {
+                    return 0.0;
+                }
+                layout.read(data.add(frame * block + channel * container))
+            });
+            if let Err(error) = device.capture.ReleaseBuffer(frames) {
+                return fail(error);
+            }
+        }
+    }
+}
+
+/// Opens the input with the endpoint id `endpoint` for this program alone
+/// and starts taking what it hears. `name` is what the device is listed
+/// as.
+pub(super) fn open_exclusive_input(
+    endpoint: &str,
+    name: &str,
+    request: &InputRequest,
+    on_failure: FailureCallback,
+) -> Result<OpenInput, OpenError> {
+    let quit = Arc::new(AtomicBool::new(false));
+    let (opened, result) = mpsc::channel();
+    let (endpoint, device_name, request, stop) =
+        (endpoint.to_string(), name.to_string(), request.clone(), quit.clone());
+    let thread = std::thread::Builder::new()
+        .name("audio-input-exclusive".into())
+        .spawn(move || {
+            let _com = Com::new();
+            let device = match open_capture(&endpoint, &device_name, &request) {
+                Ok(device) => device,
+                Err(error) => {
+                    let _ = opened.send(Err(error));
+                    return;
+                }
+            };
+            let format = InputFormat {
+                device: device_name,
+                sample_rate: device.sample_rate,
+                channels: device.channels as u16,
+                buffer_frames: device.buffer_frames,
+                latency_frames: device.stream_latency_frames.round() as u32,
+                exclusive: true,
+                shares_clock: false,
+            };
+            let (sink, link) = crate::capture::link(device.sample_rate as f64, device.channels);
+            if opened.send(Ok((format, link))).is_err() {
+                return;
+            }
+            if !super::priority::AudioPriority::raise_for_good() {
+                log::warn!("the input's thread was not given audio priority; expect drop-outs under load");
+            }
+            run_capture(&device, sink, &on_failure, &stop);
+        })
+        .map_err(|error| OpenError::Failed(format!("cannot start a thread: {error}")))?;
+
+    match result.recv_timeout(OPEN_TIMEOUT) {
+        Ok(Ok((format, link))) => {
+            Ok(OpenInput { format, handle: Box::new(Stream { quit, thread: Some(thread) }), link })
+        }
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => Err(OpenError::Failed(format!("'{name}' did not answer"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_back(layout: Layout, sample: f32) -> f32 {
+        let mut bytes = [0u8; 4];
+        // SAFETY: four bytes hold any container.
+        unsafe {
+            layout.write(bytes.as_mut_ptr(), sample);
+            layout.read(bytes.as_ptr())
+        }
+    }
+
+    #[test]
+    fn samples_are_read_in_each_layout_a_device_may_hand_over() {
+        for layout in Layout::ALL {
+            for sample in [0.0f32, 0.5, -0.5, 0.25, -1.0, 0.999] {
+                let back = read_back(layout, sample);
+                let step = match layout.bits().1 {
+                    16 => 2.0 / 32_768.0,
+                    _ => 1e-6,
+                };
+                assert!((back - sample).abs() <= step, "{layout:?}: {sample} came back as {back}");
+            }
+        }
+    }
 
     fn written(layout: Layout, sample: f32) -> Vec<u8> {
         let mut bytes = [0u8; 4];

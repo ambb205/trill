@@ -30,6 +30,14 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     # How much memory the process holds: plugins that load samples show in it.
     "Win32_System_ProcessStatus",
+    # The counter a capture buffer is stamped with, to say how old it is.
+    "Win32_System_Performance",
+    # Which piece of hardware an endpoint belongs to: an input and an
+    # output of one device count time by one clock.
+    "Win32_Devices_Properties",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Threading",
     # How much of its processor a thread has had, for telling a block that
     # took long to compute from a thread the system held up.

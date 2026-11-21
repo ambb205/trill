@@ -282,6 +282,10 @@ pub struct InputInfo {
     /// the input heard it: the device's own latency and what handing the
     /// sound across takes, which is constant for as long as it is open.
     pub delay_frames: u32,
+    /// Whether it counts time by the clock the output counts by: an input
+    /// of the device that is played through. Then nothing drifts, and
+    /// nothing has to be told apart.
+    pub shares_clock: bool,
     /// Set when the input is not open as it was asked for: it could not
     /// be taken exclusively. In words fit to show the user.
     pub warning: Option<String>,
@@ -293,6 +297,8 @@ struct Input {
     link: Arc<capture::Link>,
     counts: Arc<capture::Counts>,
     info: InputInfo,
+    /// When it was opened, on the host's clock.
+    opened_ns: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -390,8 +396,10 @@ struct Shared {
     /// How many buffers have been rendered: a stream that stops asking is
     /// found out by this standing still.
     callbacks: AtomicU64,
-    /// The output latency the host last reported, in frames.
+    /// The output latency the host last reported, in frames; and what it
+    /// has reported of late, as the bits of an `f32`.
     latency_frames: AtomicU32,
+    steady_latency: AtomicU32,
     /// A [`StreamFailure`] code, or 0; and the same for the input.
     failure: AtomicU8,
     input_failure: AtomicU8,
@@ -637,6 +645,7 @@ impl Realtime {
         shared.position.store(self.processor.position().to_bits(), Ordering::Relaxed);
         shared.recording.store(self.processor.record_phase() as u8, Ordering::Relaxed);
         shared.latency_frames.store(timing.latency_frames, Ordering::Relaxed);
+        shared.steady_latency.store((self.processor.steady_output_latency() as f32).to_bits(), Ordering::Relaxed);
         shared.callbacks.fetch_add(1, Ordering::Relaxed);
         shared.wants_threads.store(self.processor.wants_threads(), Ordering::Relaxed);
         shared.threads.store(self.processor.threads() as u32, Ordering::Relaxed);
@@ -1155,6 +1164,13 @@ impl Engine {
         self.shared.latency_frames.load(Ordering::Relaxed)
     }
 
+    /// [`Engine::output_latency`] as it has been of late, in frames: what
+    /// the device says with each buffer flutters, and this does not. A
+    /// take's audio is placed by it.
+    pub fn steady_output_latency(&self) -> f64 {
+        f64::from(f32::from_bits(self.shared.steady_latency.load(Ordering::Relaxed)))
+    }
+
     /// How many times live input arrived faster than the engine could take
     /// it and some was lost; every sounding note was let go of each time.
     /// Never, in ordinary playing.
@@ -1215,6 +1231,7 @@ impl Engine {
             exclusive: self.info.exclusive,
             sample_rate: Some(engine_rate.round() as u32),
             buffer_size: Some(self.info.buffer_frames).filter(|frames| *frames > 0),
+            output: self.info.device.clone(),
         };
         let mut tries = vec![wish.clone()];
         if wish.exclusive {
@@ -1242,7 +1259,7 @@ impl Engine {
                 engine_rate,
                 self.info.buffer_frames,
             );
-            let reader = Reader::new(open.link.clone(), engine_rate, delay);
+            let reader = Reader::new(open.link.clone(), engine_rate, delay, format.shares_clock);
             let counts = reader.counts();
             let warning = refusals.first().map(|refusal| {
                 format!(
@@ -1258,11 +1275,13 @@ impl Engine {
                 latency_frames: format.latency_frames,
                 exclusive: format.exclusive,
                 delay_frames: delay,
+                shares_clock: format.shares_clock,
                 warning,
             };
             log::info!("recording from {} ({} Hz, {} channels)", info.device, info.sample_rate, info.channels);
             self.send(Message::Input(Some(Box::new(reader))));
-            self.input = Some(Input { stream: open.handle, link: open.link, counts, info });
+            let opened_ns = self.host.now_ns();
+            self.input = Some(Input { stream: open.handle, link: open.link, counts, info, opened_ns });
             return Ok(());
         }
         Err(refusals.join("; "))
@@ -1275,6 +1294,13 @@ impl Engine {
         let stream = input.stream;
         self.driver.call(self.patience.device, move || drop(stream));
         log::info!("the input {} is closed", input.info.device);
+    }
+
+    /// How long the input has been open, in seconds of the host's clock:
+    /// how long its clock and the output's have been told apart for.
+    pub(crate) fn input_open_for(&self) -> Option<f64> {
+        let input = self.input.as_ref()?;
+        Some(self.host.now_ns().saturating_sub(input.opened_ns) as f64 / 1e9)
     }
 
     /// What went wrong with the input since this was last asked, if
@@ -1667,6 +1693,7 @@ impl Engine {
             latency_frames: format.latency_frames,
         };
         self.shared.latency_frames.store(format.latency_frames, Ordering::Relaxed);
+        self.shared.steady_latency.store((format.latency_frames as f32).to_bits(), Ordering::Relaxed);
         self.shared.failure.store(0, Ordering::Relaxed);
         let now = Instant::now();
         self.watched = real && self.host.runs_by_itself();

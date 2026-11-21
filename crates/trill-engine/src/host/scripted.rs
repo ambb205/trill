@@ -46,6 +46,9 @@ pub struct ScriptedInput {
     /// How fast its clock runs against the host's, in parts a million.
     pub ppm: f64,
     pub exclusive: bool,
+    /// Whether it says it counts time by the output's clock: the input of
+    /// the device that is played through. (Its `ppm` is then nothing.)
+    pub shares_clock: bool,
 }
 
 impl ScriptedInput {
@@ -62,6 +65,7 @@ impl ScriptedInput {
             unsaid: 0,
             ppm: 0.0,
             exclusive: true,
+            shares_clock: false,
         }
     }
 }
@@ -549,6 +553,7 @@ impl AudioHost for ScriptedHost {
             },
             latency_frames: device.latency,
             exclusive: request.exclusive,
+            shares_clock: device.shares_clock && request.output.is_some(),
         };
         let (sink, link) = crate::capture::link(device.sample_rate as f64, device.channels as usize);
         state.serial += 1;

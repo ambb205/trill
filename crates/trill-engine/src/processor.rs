@@ -293,8 +293,10 @@ pub struct Processor {
     declick: u32,
     /// The audition voice and the metronome, heard but never rendered.
     monitor: Monitor,
-    /// Frames between rendering a frame and hearing it.
+    /// Frames between rendering a frame and hearing it, as the device last
+    /// said and as it has said of late (negative before it said anything).
     output_latency: f64,
+    steady_latency: f64,
     recording: Option<Recording>,
     /// Where what is recorded goes; `None` when rendering offline.
     capture: Option<rtrb::Producer<Captured>>,
@@ -358,6 +360,7 @@ impl Processor {
             declick: (DECLICK_SECONDS * sample_rate).round().max(1.0) as u32,
             monitor: Monitor::new(sample_rate),
             output_latency: 0.0,
+            steady_latency: -1.0,
             recording: None,
             capture: None,
             continuity: 0,
@@ -450,7 +453,7 @@ impl Processor {
         let (at, more) = (feeds.handed, u64::from(feeds.tail));
         let delay = self.input.as_ref().map_or(0, |input| u64::from(input.delay()));
         self.report(Captured::Audio { at, mark: AudioMark::Stopped { beat: self.position() } });
-        self.trailing = Some((delay + self.output_latency as u64 + more).max(1));
+        self.trailing = Some((delay + self.steady_output_latency().ceil() as u64 + more).max(1));
     }
 
     /// Nothing more of the take's audio is handed over.
@@ -596,7 +599,8 @@ impl Processor {
         if let (true, Some(feeds)) = (self.feeding, &self.feeds) {
             let at = feeds.handed;
             let delay = self.input.as_ref().map_or(0, |input| input.delay());
-            let mark = AudioMark::Rolling { beat: self.position(), latency: self.output_latency as u32, delay };
+            let latency = self.steady_output_latency().round() as u32;
+            let mark = AudioMark::Rolling { beat: self.position(), latency, delay };
             self.report(Captured::Audio { at, mark });
         }
     }
@@ -743,6 +747,21 @@ impl Processor {
     /// behind where the engine is.
     pub fn set_output_latency(&mut self, frames: u32) {
         self.output_latency = frames as f64;
+        // What a device says of it with every buffer flutters by a
+        // fraction of a millisecond with the moment it is asked; what
+        // lies between the engine and the speaker does not. A take's
+        // audio is placed by a figure that moves over seconds, so that
+        // two takes, and a measurement, are placed by the same one.
+        let steady = self.steady_latency;
+        let far = (self.output_latency - steady).abs() > 0.02 * self.sample_rate;
+        self.steady_latency =
+            if steady < 0.0 || far { self.output_latency } else { steady + (self.output_latency - steady) * 0.004 };
+    }
+
+    /// [`Processor::set_output_latency`] as it has been of late: what a
+    /// take's audio is placed by.
+    pub(crate) fn steady_output_latency(&self) -> f64 {
+        self.steady_latency.max(0.0)
     }
 
     /// Where a take's events are reported. Returns where they went before.

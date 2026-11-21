@@ -120,6 +120,10 @@ pub struct InputRequest {
     pub exclusive: bool,
     pub sample_rate: Option<u32>,
     pub buffer_size: Option<u32>,
+    /// The device the engine plays through, by name, if it plays through
+    /// one: a host says whether the input counts time by the same clock
+    /// ([`InputFormat::shares_clock`]).
+    pub output: Option<String>,
 }
 
 /// What an input turned out to be.
@@ -139,6 +143,12 @@ pub struct InputFormat {
     /// measuring ([`Session::measure_latency`](crate::Session::measure_latency)).
     pub latency_frames: u32,
     pub exclusive: bool,
+    /// Whether the input counts time by the clock the output counts by:
+    /// the two are one piece of hardware. Then a frame of the one is a
+    /// frame of the other for as long as both run, and nothing has to be
+    /// found out from time stamps but where the two began. Two devices
+    /// have two clocks, whatever rate each says it runs at.
+    pub shares_clock: bool,
 }
 
 /// An input a host has opened. Dropping `handle` closes it; the host's

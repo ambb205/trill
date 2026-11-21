@@ -101,9 +101,14 @@ pub struct RecordingLatency {
     /// Handing the input across to the engine's clock: Trill's own, and
     /// exact.
     pub handover_ms: f64,
-    /// What is added to those because the devices do not say all there
-    /// is, and where that figure is from.
-    pub correction_ms: f64,
+    /// What lies between the engine and the microphone on the way round
+    /// beside the hand-over, where that was measured: it then stands in
+    /// place of what the output says, and of what the input leaves
+    /// unsaid. A measurement finds it ([`Measured::beyond_ms`]).
+    pub measured_ms: Option<f64>,
+    /// What was added by hand, on top of either.
+    pub adjust_ms: f64,
+    /// Where the round trip is from, in a word.
     pub correction: Correction,
     /// All of it: from the microphone to the speaker.
     pub round_trip_ms: f64,
@@ -118,9 +123,15 @@ pub struct RecordingLatency {
 pub struct Measured {
     /// How long the signal took to come back, in milliseconds.
     pub round_trip_ms: f64,
-    /// How much longer that is than the devices say: the correction it
-    /// offers. Negative where they say too much.
-    pub correction_ms: f64,
+    /// That, less what handing the input across takes: what lies between
+    /// the engine and the speaker, and between the microphone and its
+    /// buffers, as it is and not as the devices say. This is what the
+    /// measurement offers ([`Session::set_measured_latency`]); it does
+    /// not move with what a device says from one moment to the next.
+    pub beyond_ms: f64,
+    /// How much longer the round trip is than the devices said as it was
+    /// measured. Negative where they say too much.
+    pub more_than_said_ms: f64,
     /// How alike what came back and what was played are, 0 to 1: a
     /// cable gives nearly 1, a microphone at a speaker less.
     pub likeness: f64,
@@ -210,21 +221,30 @@ pub(super) struct AudioTake {
     /// The loop the take goes round, or the stretch it is punched in over.
     loop_region: Option<(f64, f64)>,
     punch: Option<(f64, f64)>,
-    /// What is added to what the devices say, in frames, as the take
+    /// What stands in place of what the output says, where the round trip
+    /// was measured, and what was added by hand: in frames, as the take
     /// began.
-    correction: i64,
-    source: Correction,
+    measured: Option<i64>,
+    adjust: i64,
     health: Health,
     ended_early: Option<String>,
 }
 
+/// How long an input has to have been open before a measurement plays
+/// its signal, in seconds: until the two devices' clocks have been told
+/// apart well enough that a second of noise comes back as itself.
+const SETTLE_SECONDS: f64 = 4.0;
+
 /// A measurement between its beginning and its result.
 struct Measuring {
     signal: Arc<[f32]>,
+    /// What is still to be handed to the audio thread: the input has not
+    /// been open long enough yet.
+    waiting: Option<Box<Measure>>,
     began: Instant,
     /// What the devices said as it began: from the engine to the speaker,
     /// and from the microphone to the engine, in frames.
-    latency: u32,
+    latency: f64,
     delay: u32,
     channel: u16,
 }
@@ -236,8 +256,8 @@ pub(super) struct Audio {
     unsaved: Option<PathBuf>,
     take: Option<AudioTake>,
     last: Option<Recorded>,
-    correction_ms: f64,
-    source: Correction,
+    measured_ms: Option<f64>,
+    adjust_ms: f64,
     /// How many are looking at the input's level.
     watchers: u32,
     problem: Option<String>,
@@ -475,8 +495,14 @@ impl Session {
             let path = free_name(&folder, name, &mut names);
             files.push(FileOf { track: *track, path, left, right });
         }
-        let correction = (self.recording.correction_ms * rate / 1000.0).round() as i64;
-        let tail = correction.max(0) as u32 + (HANDLE_SECONDS * rate) as u32;
+        let frames = |ms: f64| (ms * rate / 1000.0).round() as i64;
+        let (measured, adjust) = (self.recording.measured_ms.map(frames), frames(self.recording.adjust_ms));
+        // What is handed over after the song has stopped beyond what the
+        // devices account for: what the measurement found more than they
+        // say, what was added by hand, and something to fade with.
+        let said = self.engine.steady_output_latency().round() as i64;
+        let more = measured.map_or(0, |measured| measured - said).max(0) + adjust.max(0);
+        let tail = more as u32 + (HANDLE_SECONDS * rate) as u32;
         let (writer, feeds) = match TakeWriter::start(files, rate, tail) {
             Ok(started) => started,
             Err(why) => return refuse(format!("the take cannot be written: {why}")),
@@ -494,8 +520,8 @@ impl Session {
             ended: false,
             loop_region,
             punch,
-            correction,
-            source: self.recording.source,
+            measured,
+            adjust,
             health: self.engine.input_health().unwrap_or_default(),
             ended_early: None,
         });
@@ -531,7 +557,7 @@ impl Session {
         let Some(audio) = &self.recording.take else { return Vec::new() };
         let Some(writer) = &audio.writer else { return Vec::new() };
         let pass = audio.rolled.map(|rolled| {
-            let shift = (i64::from(rolled.delay) + i64::from(rolled.latency) + audio.correction).max(0) as u64;
+            let shift = shift_of(audio, rolled);
             match (audio.punch, audio.wraps.last(), audio.loop_region) {
                 (Some((from, _)), ..) => {
                     (audio.punched.0.map(|_| from.max(rolled.beat)), audio.punched.0.unwrap_or(0) + shift)
@@ -607,7 +633,7 @@ impl Session {
             silent_frames: silent,
             ended_early,
             taken_off_ms: 0.0,
-            correction: audio.source,
+            correction: correction_of(audio.measured.is_some(), audio.adjust != 0),
         };
         let Some(rolled) = audio.rolled else {
             // The song never rolled: there is nothing of it to put
@@ -615,7 +641,7 @@ impl Session {
             self.recording.last = Some(recorded);
             return;
         };
-        let shift = (i64::from(rolled.delay) + i64::from(rolled.latency) + audio.correction).max(0) as u64;
+        let shift = shift_of(&audio, rolled);
         recorded.taken_off_ms = shift as f64 * 1000.0 / rate;
         let stopped = audio.stopped.unwrap_or_else(|| {
             // The audio thread never said: where the song is, and what was
@@ -649,7 +675,7 @@ impl Session {
         let audio = self.recording.take.as_ref()?;
         let (rolled, writer) = (audio.rolled?, audio.writer.as_ref()?);
         let rate = self.engine.sample_rate();
-        let shift = (i64::from(rolled.delay) + i64::from(rolled.latency) + audio.correction).max(0) as u64;
+        let shift = shift_of(audio, rolled);
         let paths: Vec<PathBuf> = writer.files().iter().map(|file| file.path().to_path_buf()).collect();
         // How far the song had got when what is written was sung: by the
         // frames of the pass that is under way, from where it began.
@@ -712,37 +738,43 @@ impl Session {
         let input = self.engine.input()?;
         let rate = self.engine.sample_rate();
         let ms = |frames: f64| frames * 1000.0 / rate;
-        let output = f64::from(self.engine.output_latency());
+        let output = self.engine.steady_output_latency();
         let said = f64::from(input.latency_frames) * rate / f64::from(input.sample_rate);
         let delay = f64::from(input.delay_frames);
         Some(RecordingLatency {
             output_ms: ms(output),
             input_ms: ms(said),
             handover_ms: ms(delay - said),
-            correction_ms: self.recording.correction_ms,
-            correction: self.recording.source,
-            round_trip_ms: (ms(delay + output) + self.recording.correction_ms).max(0.0),
+            measured_ms: self.recording.measured_ms,
+            adjust_ms: self.recording.adjust_ms,
+            correction: correction_of(self.recording.measured_ms.is_some(), self.recording.adjust_ms != 0.0),
+            round_trip_ms: (ms(delay) + self.recording.measured_ms.unwrap_or(ms(output)) + self.recording.adjust_ms)
+                .max(0.0),
             drift_ppm: self.engine.input_drift_ppm().unwrap_or(0.0),
         })
     }
 
-    /// What is added to what the devices say, in milliseconds, and where
-    /// it is from.
-    pub fn latency_correction(&self) -> (f64, Correction) {
-        (self.recording.correction_ms, self.recording.source)
+    /// What stands in place of what the devices say, where the round trip
+    /// was measured, and what was added by hand: both in milliseconds.
+    pub fn latency_correction(&self) -> (Option<f64>, f64) {
+        (self.recording.measured_ms, self.recording.adjust_ms)
     }
 
-    /// Sets what is added to what the devices say of how long sound takes
-    /// to go round: what a measurement found, or a figure set by hand.
-    /// `Correction::None` takes it away. It counts from the next take on,
-    /// and for these devices as they are open: whoever keeps settings
-    /// keeps it for them.
-    pub fn set_latency_correction(&mut self, milliseconds: f64, source: Correction) {
-        let milliseconds = if milliseconds.is_finite() { milliseconds.clamp(-500.0, 2000.0) } else { 0.0 };
-        (self.recording.correction_ms, self.recording.source) = match source {
-            Correction::None => (0.0, Correction::None),
-            source => (milliseconds, source),
-        };
+    /// Takes what a measurement found ([`Measured::beyond_ms`]) in place
+    /// of what the devices say of how long sound takes to go round, or
+    /// with `None` goes back to what they say. It counts from the next
+    /// take on, and for these devices as they are open: whoever keeps
+    /// settings keeps it for them.
+    pub fn set_measured_latency(&mut self, milliseconds: Option<f64>) {
+        self.recording.measured_ms = milliseconds.filter(|ms| ms.is_finite()).map(|ms| ms.clamp(0.0, 2000.0));
+        self.playing_audio_changed();
+    }
+
+    /// Adds `milliseconds` by hand to how long sound is taken to go round,
+    /// measured or said: more puts a take earlier. For putting right by
+    /// ear what a measurement cannot be made of.
+    pub fn set_latency_adjustment(&mut self, milliseconds: f64) {
+        self.recording.adjust_ms = if milliseconds.is_finite() { milliseconds.clamp(-500.0, 500.0) } else { 0.0 };
         self.playing_audio_changed();
     }
 
@@ -778,12 +810,13 @@ impl Session {
         self.recording.measured = None;
         self.recording.measuring = Some(Measuring {
             signal,
+            waiting: Some(Box::new(measure)),
             began: Instant::now(),
-            latency: self.engine.output_latency(),
+            latency: self.engine.steady_output_latency(),
             delay: input.delay_frames,
             channel,
         });
-        self.engine.send(Message::Measure(Box::new(measure)));
+        self.tend_measurement();
         Ok(())
     }
 
@@ -800,7 +833,24 @@ impl Session {
 
     /// Takes in a measurement that has ended.
     fn tend_measurement(&mut self) {
-        let Some(measuring) = &self.recording.measuring else { return };
+        let open_for = self.engine.input_open_for();
+        let Some(measuring) = &mut self.recording.measuring else { return };
+        if measuring.waiting.is_some() {
+            // The signal is played once the clocks have been told apart.
+            match open_for {
+                Some(seconds) if seconds >= SETTLE_SECONDS => {
+                    measuring.latency = self.engine.steady_output_latency();
+                    let measure = measuring.waiting.take().expect("it is waiting");
+                    self.engine.send(Message::Measure(measure));
+                }
+                Some(_) => {}
+                None => {
+                    self.recording.measuring = None;
+                    self.recording.measured = Some(Err("the input was closed before the measurement began".into()));
+                }
+            }
+            return;
+        }
         let Some(measure) = self.engine.take_measured() else {
             if measuring.began.elapsed() > Duration::from_secs(20) {
                 self.recording.measuring = None;
@@ -820,10 +870,11 @@ impl Session {
                 measuring.channel
             ))
         } else {
-            let said = f64::from(measuring.delay) + f64::from(measuring.latency);
+            let said = f64::from(measuring.delay) + measuring.latency.round();
             Ok(Measured {
                 round_trip_ms: lag * 1000.0 / rate,
-                correction_ms: (lag - said) * 1000.0 / rate,
+                beyond_ms: (lag - f64::from(measuring.delay)) * 1000.0 / rate,
+                more_than_said_ms: (lag - said) * 1000.0 / rate,
                 likeness,
                 heard_db: db,
             })
@@ -1046,6 +1097,25 @@ fn put_takes(
         }
     }
     Ok(landed)
+}
+
+/// Where a round trip is from, in a word.
+fn correction_of(measured: bool, adjusted: bool) -> Correction {
+    match (measured, adjusted) {
+        (true, _) => Correction::Measured,
+        (false, true) => Correction::ByHand,
+        (false, false) => Correction::None,
+    }
+}
+
+/// How many frames after the frame that had been handed over as the song
+/// began to roll what was sung to the song's first frame lies: the
+/// hand-over, then what lies between the engine and the microphone on the
+/// way round (as it was measured, or as the output said), then what was
+/// added by hand.
+fn shift_of(audio: &AudioTake, rolled: Rolled) -> u64 {
+    let beyond = audio.measured.unwrap_or(i64::from(rolled.latency));
+    (i64::from(rolled.delay) + beyond + audio.adjust).max(0) as u64
 }
 
 /// The folder beside `song` that holds what was recorded for it.

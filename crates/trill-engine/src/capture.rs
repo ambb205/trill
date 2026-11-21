@@ -44,14 +44,41 @@ pub const MAX_INPUT_CHANNELS: usize = 32;
 /// at, so that an engine which was kept from its work for a moment finds
 /// what it missed.
 const RING_SECONDS: f64 = 2.0;
-/// How quickly the lines follow the clocks they are of, in radians a
-/// second: slow enough that a time stamp which is a little early or late
-/// moves nothing that can be heard, quick enough that a clock which is off
-/// is found within a few seconds.
-const CLOCK_FOLLOWS: f64 = 2.0;
+/// How long a clock's time stamps count for when its line is drawn, in
+/// seconds: each counts for less the older it is, and one this old for a
+/// third of a new one. Long, because a real device's stamps are each half
+/// a millisecond out one way or the other, and only many of them say how
+/// its clock runs to the parts in a million that a pitch is steady by;
+/// and short against how slowly a crystal drifts as it warms.
+const MEMORY_SECONDS: f64 = 20.0;
+/// How much a device's rate is trusted to be what it says before its time
+/// stamps have had their say: what a clock five parts in ten thousand off
+/// would come to against stamps that are a tenth of a millisecond out.
+/// With a stamp or two the rate is what the device says; with a second's
+/// worth it is what they say.
+const TRUSTED: f64 = 0.05;
+/// A time stamp is late or it is right, and never early: the engine's
+/// own clock is read off the moments its device asks for a buffer, and a
+/// thread is woken late by whatever else the machine is doing; an input's
+/// buffers are stamped by a driver that may say when it handed one over
+/// where it should say when it heard it. So of the stamps of each stretch
+/// this long, in seconds, only the least late is shown to the line.
+/// (Measured on a virtual cable under a machine at full load: its
+/// capture stamps were up to nine milliseconds late and the callbacks up
+/// to two; the least late of every quarter second lay on a line to within
+/// a frame or two.)
+const LEAST_LATE_OF: f64 = 0.25;
+/// A time stamp that is this far from where the line has its frame, in
+/// seconds, counts as no further: one buffer that was handed over late
+/// does not turn the line. But a line that this many stamps in a row lie
+/// that far to one side of is not their line: it is begun anew from them.
+/// (The first buffer a device hands over is often stamped as if it did
+/// not belong to the rest.)
+const OUT_AT_MOST: f64 = 0.003;
+const OUT_IN_A_ROW: i32 = 8;
 /// How quickly the place that is read is brought back to where it is meant
-/// to be.
-const PLACE_FOLLOWS: f64 = 1.5;
+/// to be, in radians a second: slowly, because the ratio moves for it.
+const PLACE_FOLLOWS: f64 = 0.3;
 /// How far a device's clock is taken to be from what it says it runs at,
 /// at the most: five parts in a thousand, which no device is near.
 const CLOCK_RANGE: f64 = 0.005;
@@ -85,32 +112,102 @@ struct Line {
 }
 
 impl Line {
-    /// The line after it has been shown that the stream was at `frame` at
-    /// `ns`: moved towards that, a little of the way, so that what it says
-    /// is steadier than what it is shown. `nominal` is the rate the stream
-    /// says it runs at.
-    fn shown(self, frame: f64, ns: u64, nominal: f64) -> Self {
-        let seconds = ns.saturating_sub(self.ns) as f64 / 1e9;
-        if seconds <= 0.0 {
-            return self;
-        }
-        // A critically damped follower: how far it trusts what it is shown
-        // depends on how long it has been since it was last shown anything.
-        let kept = (-CLOCK_FOLLOWS * seconds).exp();
-        let expected = self.frame + self.rate * seconds;
-        let off = frame - expected;
-        let rate = self.rate + (1.0 - kept) * (1.0 - kept) * off / seconds;
-        Self {
-            frame: expected + (1.0 - kept * kept) * off,
-            ns,
-            rate: rate.clamp(nominal * (1.0 - CLOCK_RANGE), nominal * (1.0 + CLOCK_RANGE)),
-        }
-    }
-
     /// Where the stream is at `ns`, which may be before the line's own
     /// moment.
     fn at(&self, ns: f64) -> f64 {
         self.frame + self.rate * (ns - self.ns as f64) / 1e9
+    }
+}
+
+/// The line that fits a stream's time stamps best: every stamp it has
+/// been shown, the newer the weightier ([`MEMORY_SECONDS`]), by least
+/// squares. A clock that runs at a rate of its own is a line, so nothing
+/// lags behind it however far its rate is from what it says; and what one
+/// stamp is out by is spread over all of them.
+///
+/// It is kept as sums about the latest stamp, of how far each stamp's
+/// frame is from where the rate the device says would have it: small
+/// numbers, whatever the clock reads.
+#[derive(Copy, Clone, Debug)]
+struct Fit {
+    nominal: f64,
+    /// The latest stamp's moment, and the frame the device's own rate has
+    /// there, counted on from the first stamp.
+    ns: u64,
+    base: f64,
+    /// The stamps' weights; and, weighted, their times in seconds before
+    /// `ns`, how far their frames are from `base`'s line, the squares of
+    /// the times, and the times with the distances.
+    weight: f64,
+    time: f64,
+    off: f64,
+    time_time: f64,
+    time_off: f64,
+    /// How many stamps in a row have lain further from the line than a
+    /// stamp may: counted up for those ahead of it and down for those
+    /// behind.
+    out: i32,
+}
+
+impl Fit {
+    /// The fit of one stamp: the stream was at `frame` at `ns`, and runs
+    /// at `nominal` frames a second for all anyone knows.
+    fn begun(frame: f64, ns: u64, nominal: f64) -> Self {
+        Self { nominal, ns, base: frame, weight: 1.0, time: 0.0, off: 0.0, time_time: 0.0, time_off: 0.0, out: 0 }
+    }
+
+    /// How far the stream is from `base`'s line at the latest stamp, and
+    /// how much faster than `nominal` it runs, in frames a second.
+    fn solve(&self) -> (f64, f64) {
+        let (mean_time, mean_off) = (self.time / self.weight, self.off / self.weight);
+        let spread = self.time_time - self.time * mean_time;
+        let together = self.time_off - self.time * mean_off;
+        let faster = (together / (spread + TRUSTED)).clamp(-CLOCK_RANGE * self.nominal, CLOCK_RANGE * self.nominal);
+        (mean_off - faster * mean_time, faster)
+    }
+
+    /// The line as it is fitted now.
+    fn line(&self) -> Line {
+        let (off, faster) = self.solve();
+        Line { frame: self.base + off, ns: self.ns, rate: self.nominal + faster }
+    }
+
+    /// The fit after it has been shown one more stamp, and whether it was
+    /// begun anew with it: the stamps had left the line.
+    fn shown(self, frame: f64, ns: u64) -> (Self, bool) {
+        let seconds = ns.saturating_sub(self.ns) as f64 / 1e9;
+        if seconds <= 0.0 {
+            return (self, false);
+        }
+        // Every stamp is that much older, and counts for that much less.
+        let kept = (-seconds / MEMORY_SECONDS).exp();
+        let (weight, time, off) = (self.weight * kept, self.time * kept, self.off * kept);
+        let (time_time, time_off) = (self.time_time * kept, self.time_off * kept);
+        let moved = Self {
+            nominal: self.nominal,
+            ns,
+            base: self.base + self.nominal * seconds,
+            weight,
+            time: time - seconds * weight,
+            off,
+            time_time: time_time - 2.0 * seconds * time + seconds * seconds * weight,
+            time_off: time_off - seconds * off,
+            out: self.out,
+        };
+        // The new stamp, no further from the line than a stamp may be.
+        let (expected, _) = moved.solve();
+        let reach = OUT_AT_MOST * self.nominal;
+        let away = frame - moved.base - expected;
+        let out = match away {
+            away if away > reach => self.out.max(0) + 1,
+            away if away < -reach => self.out.min(0) - 1,
+            _ => 0,
+        };
+        if out.abs() >= OUT_IN_A_ROW {
+            return (Self::begun(frame, ns, self.nominal), true);
+        }
+        let seen = expected + away.clamp(-reach, reach);
+        (Self { weight: moved.weight + 1.0, off: moved.off + seen, out, ..moved }, false)
     }
 }
 
@@ -217,8 +314,52 @@ impl Link {
 pub struct Sink {
     link: Arc<Link>,
     /// The line through what it has been handed so far.
-    line: Option<Line>,
+    fit: Option<Fit>,
     written: u64,
+    /// Which stamps the line is shown.
+    least_late: LeastLate,
+}
+
+/// Picks, of the stamps of each stretch of [`LEAST_LATE_OF`] seconds, the
+/// one that is least late by the line as it stands, and shows the line
+/// that one alone.
+#[derive(Copy, Clone, Debug, Default)]
+struct LeastLate {
+    /// The least late so far in the stretch that is going by: how far its
+    /// frame is ahead of where the line has its moment, its frame and its
+    /// moment.
+    best: Option<(f64, f64, u64)>,
+    /// When the stretch began, and whether any has ended yet.
+    since: u64,
+    chosen_once: bool,
+}
+
+impl LeastLate {
+    /// Takes the stamp "the stream was at `frame` at `ns`" and returns the
+    /// line as it is from here on, and whether it was begun anew. Until
+    /// the first stretch has gone by the line is through the first stamp,
+    /// which may be as late as any; then it is begun again from the least
+    /// late of that stretch, and shown one of each stretch after.
+    fn shown(&mut self, fit: Option<Fit>, frame: f64, ns: u64, nominal: f64) -> (Fit, bool) {
+        let Some(fit) = fit else {
+            *self = Self { best: None, since: ns, chosen_once: false };
+            return (Fit::begun(frame, ns, nominal), true);
+        };
+        let ahead = frame - fit.line().at(ns as f64);
+        if self.best.is_none_or(|(most, ..)| ahead > most) {
+            self.best = Some((ahead, frame, ns));
+        }
+        match self.best {
+            Some((_, frame, at)) if ns.saturating_sub(self.since) as f64 >= LEAST_LATE_OF * 1e9 => {
+                (self.best, self.since) = (None, ns);
+                match std::mem::replace(&mut self.chosen_once, true) {
+                    true => fit.shown(frame, at),
+                    false => (Fit::begun(frame, at, nominal), true),
+                }
+            }
+            _ => (fit, false),
+        }
+    }
 }
 
 /// Opens the way in for an input device that runs at `rate` with
@@ -226,7 +367,7 @@ pub struct Sink {
 /// reads.
 pub(crate) fn link(rate: f64, channels: usize) -> (Sink, Arc<Link>) {
     let link = Arc::new(Link::new(rate, channels));
-    (Sink { link: link.clone(), line: None, written: 0 }, link)
+    (Sink { link: link.clone(), fit: None, written: 0, least_late: LeastLate::default() }, link)
 }
 
 impl Sink {
@@ -241,9 +382,9 @@ impl Sink {
     pub fn push(&mut self, heard_ns: u64, frames: usize, mut sample: impl FnMut(usize, usize) -> f32) {
         let link = &*self.link;
         let (rate, channels, mask) = (link.rate, link.channels, link.capacity - 1);
-        if let Some(line) = self.line {
+        if let Some(fit) = self.fit {
             // Where the clock has the device against how far it has got.
-            let ahead = line.at(heard_ns as f64) - self.written as f64;
+            let ahead = fit.line().at(heard_ns as f64) - self.written as f64;
             let gap = (GAP_SECONDS * rate).max(2.0 * frames as f64);
             if ahead > gap {
                 // Frames that never came: silence of their length, so that
@@ -263,7 +404,7 @@ impl Sink {
             } else if ahead < -gap {
                 // The device's clock is nowhere near where it was: it is
                 // followed from here.
-                self.line = None;
+                self.fit = None;
                 link.restarts.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -281,14 +422,15 @@ impl Sink {
                 }
             }
         }
-        let line = match self.line {
-            Some(line) => line.shown(self.written as f64, heard_ns, rate),
-            None => Line { frame: self.written as f64, ns: heard_ns, rate },
-        };
-        self.line = Some(line);
+        let (fit, anew) = self.least_late.shown(self.fit, self.written as f64, heard_ns, rate);
+        if anew {
+            // Whoever reads by the line reads by another one now.
+            link.restarts.fetch_add(1, Ordering::Relaxed);
+        }
+        self.fit = Some(fit);
         self.written += frames as u64;
         link.written.store(self.written, Ordering::Release);
-        link.publish(line);
+        link.publish(fit.line());
     }
 }
 
@@ -410,7 +552,7 @@ pub(crate) struct Reader {
     delay_ns: u64,
     /// The engine's own frames on the host's clock, by the buffers it has
     /// been asked for.
-    engine: Option<Line>,
+    engine: Option<Fit>,
     /// Frames made so far.
     made: u64,
     /// Where in the input's frames the next frame of the engine is read,
@@ -420,6 +562,16 @@ pub(crate) struct Reader {
     ratio: f64,
     trim: f64,
     placed: bool,
+    /// How often the input's line had been begun anew when the place was
+    /// last put by it.
+    line_number: u32,
+    /// Which of the moments its buffers were asked for the engine's line
+    /// is shown.
+    least_late: LeastLate,
+    /// Whether the input and the engine count time by one clock, and for
+    /// how many seconds the place has been where it was last put.
+    one_clock: bool,
+    placed_for: f64,
     /// Which channels are read: a bit each.
     wanted: u32,
     /// Room for the frames of the input a block is read from, a channel
@@ -433,8 +585,11 @@ pub(crate) struct Reader {
 
 impl Reader {
     /// A reader of `link` for an engine at `engine_rate`, which reads what
-    /// the input heard `delay_frames` of its own frames before.
-    pub fn new(link: Arc<Link>, engine_rate: f64, delay_frames: u32) -> Self {
+    /// the input heard `delay_frames` of its own frames before. With
+    /// `one_clock` the input counts time by the clock the engine's device
+    /// counts by: the ratio is then what the two rates say and never
+    /// moves for long, and the time stamps only say where the two began.
+    pub fn new(link: Arc<Link>, engine_rate: f64, delay_frames: u32, one_clock: bool) -> Self {
         let kernel = Kernel::new(link.rate, engine_rate);
         let channels = link.channels;
         let span_frames =
@@ -451,6 +606,10 @@ impl Reader {
             place: 0.0,
             trim: 0.0,
             placed: false,
+            line_number: 0,
+            least_late: LeastLate::default(),
+            one_clock,
+            placed_for: 0.0,
             wanted: 0,
             span: vec![0.0; span_frames * channels],
             span_frames,
@@ -488,39 +647,61 @@ impl Reader {
     /// ratio the input is read at is set for them.
     pub fn begin(&mut self, now_ns: u64, frames: usize) {
         let made = self.made as f64;
-        let engine = match self.engine {
-            // An engine that was kept from making frames for a while (its
-            // device did not ask) goes on counting from where it is: the
-            // time it lost is not made up for a little at a time.
-            Some(line) if (line.at(now_ns as f64) - made).abs() > GAP_SECONDS * self.engine_rate => {
-                Line { frame: made, ns: now_ns, rate: line.rate }
-            }
-            Some(line) => line.shown(made, now_ns, self.engine_rate),
-            None => Line { frame: made, ns: now_ns, rate: self.engine_rate },
-        };
-        self.engine = Some(engine);
+        // An engine that was kept from making frames for a while (its
+        // device did not ask) goes on counting from where it is: the time
+        // it lost is not made up for a little at a time.
+        let away = |fit: &Fit| (fit.line().at(now_ns as f64) - made).abs() > GAP_SECONDS * self.engine_rate;
+        let known = self.engine.filter(|fit| !away(fit));
+        let (fit, mut anew) = self.least_late.shown(known, made, now_ns, self.engine_rate);
+        self.engine = Some(fit);
+        let engine = fit.line();
         let Some(input) = self.link.line() else { return };
+        // A line that was begun anew, on either side, is another line: the
+        // place is put by it at once, not steered there with the pitch.
+        let line_number = self.link.restarts.load(Ordering::Relaxed);
+        anew |= std::mem::replace(&mut self.line_number, line_number) != line_number;
         // When this buffer was due by the engine's own steady count, which
-        // is a little before or after the moment it was asked for.
-        let due = now_ns as f64 + (made - engine.frame) / engine.rate * 1e9;
+        // is a little before the moment it was asked for: where the line
+        // has its first frame.
+        let due = engine.ns as f64 + (made - engine.frame) / engine.rate * 1e9;
         let meant = input.at(due - self.delay_ns as f64);
         let off = meant - self.place;
-        if !self.placed || off.abs() > JUMP_SECONDS * self.link.rate {
-            if self.placed {
+        if !self.placed || anew || off.abs() > JUMP_SECONDS * self.link.rate {
+            if self.placed && off.abs() > 0.5 {
                 self.counts.jumps.fetch_add(1, Ordering::Relaxed);
             }
-            (self.place, self.trim, self.placed) = (meant, 0.0, true);
-            self.ratio = input.rate / engine.rate;
+            (self.place, self.trim, self.placed, self.placed_for) = (meant, 0.0, true, 0.0);
+            self.ratio = match self.one_clock {
+                true => self.link.rate / self.engine_rate,
+                false => input.rate / engine.rate,
+            };
+        } else if self.one_clock {
+            // One clock: a frame of the one is a frame of the other, and
+            // the place never drifts. Where the time stamps have it is
+            // right on the whole and a little out each time, so the place
+            // is drawn towards it by less the longer it has been there:
+            // towards what they all say, not what the last one said.
+            self.placed_for += frames as f64 / self.engine_rate;
+            let patience = self.placed_for.clamp(2.0, 300.0);
+            let nominal = self.link.rate / self.engine_rate;
+            self.ratio = (nominal + off / patience / self.engine_rate).clamp(nominal * 0.9995, nominal * 1.0005);
         } else {
             let seconds = frames as f64 / self.engine_rate;
-            self.trim += PLACE_FOLLOWS * PLACE_FOLLOWS * off * seconds;
-            let speed = input.rate + 2.0 * PLACE_FOLLOWS * off + self.trim;
+            // Quickly while the clocks are first being told apart, when
+            // what the place is off by is real; slowly from then on, when
+            // it is what one stamp or another was out by.
+            self.placed_for += seconds;
+            let follows = PLACE_FOLLOWS + 1.7 * (-self.placed_for / 2.0).exp();
+            self.trim += follows * follows * off * seconds;
+            let speed = input.rate + 2.0 * follows * off + self.trim;
             let nominal = self.link.rate / self.engine_rate;
             self.ratio =
                 (speed / engine.rate).clamp(nominal * (1.0 - 2.0 * CLOCK_RANGE), nominal * (1.0 + 2.0 * CLOCK_RANGE));
         }
+        // What the two clocks differ by, as their lines have them.
         let nominal = self.link.rate / self.engine_rate;
-        self.counts.off_ppm.store(((self.ratio / nominal - 1.0) * 1e6).to_bits(), Ordering::Relaxed);
+        let apart = (input.rate / engine.rate / nominal - 1.0) * 1e6;
+        self.counts.off_ppm.store(apart.to_bits(), Ordering::Relaxed);
     }
 
     /// Reads the next `frames` frames (a block's worth at the most) of
@@ -623,7 +804,7 @@ pub(crate) fn health(link: &Link, counts: &Counts) -> Health {
     Health {
         lost: link.lost.load(Ordering::Relaxed),
         late: counts.late.load(Ordering::Relaxed),
-        jumps: counts.jumps.load(Ordering::Relaxed) + link.restarts.load(Ordering::Relaxed),
+        jumps: counts.jumps.load(Ordering::Relaxed),
     }
 }
 
@@ -676,7 +857,7 @@ mod tests {
             let (nominal, ppm, engine_buffer) = engine;
             let (sink, link) = link(nominal_in, channels);
             let delay = delay_frames(nominal_in, input_buffer as u32, 0, nominal, engine_buffer as u32);
-            let mut reader = Reader::new(link, nominal, delay);
+            let mut reader = Reader::new(link, nominal, delay, false);
             reader.want(u32::MAX);
             Self {
                 sink,
@@ -876,7 +1057,7 @@ mod tests {
     #[test]
     fn frames_a_device_never_hands_over_are_silence_of_their_length() {
         let (mut sink, link) = link(48_000.0, 1);
-        let mut reader = Reader::new(link.clone(), 48_000.0, 2000);
+        let mut reader = Reader::new(link.clone(), 48_000.0, 2000, false);
         reader.want(1);
         let ns = |frame: u64| (frame as f64 / 48_000.0 * 1e9).round() as u64;
         // A ramp that says which frame of the host's time it is. For ten
@@ -891,7 +1072,13 @@ mod tests {
             reader.take(480);
             out.extend_from_slice(&reader.channel(0)[..480]);
         }
-        assert_eq!(health(&link, &reader.counts()).lost, 4800);
+        // Counted once each: by the engine where it came to read them
+        // before anyone knew they were not coming, by the device's end
+        // for the rest. (A few more for the frames whose filter reached
+        // into them.)
+        let health = health(&link, &reader.counts());
+        assert!(health.lost > 0 && health.late > 0, "{health:?}");
+        assert!((4800..4900).contains(&(health.lost + health.late)), "{health:?}");
         // After the gap the ramp is where it would have been: frame n of
         // the engine reads frame n - 2000 + 480 of the device's count.
         let reads = |made: usize| ((made as i64 + 480 - 2000).rem_euclid(1000)) as f32 / 1000.0;
@@ -907,7 +1094,7 @@ mod tests {
     fn what_has_not_arrived_is_silence_and_is_counted() {
         let (mut sink, link) = link(48_000.0, 2);
         // Read with no delay at all: nothing can be there in time.
-        let mut reader = Reader::new(link.clone(), 48_000.0, 0);
+        let mut reader = Reader::new(link.clone(), 48_000.0, 0, false);
         reader.want(0b11);
         sink.push(0, 480, |_, _| 0.5);
         reader.begin(10_000_000, 480);

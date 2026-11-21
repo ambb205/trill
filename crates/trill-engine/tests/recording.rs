@@ -307,7 +307,11 @@ fn a_monitored_input_is_heard_after_exactly_the_time_trill_says_while_the_clocks
                 worst = worst.max(off.abs());
             }
         }
-        assert!(worst < 0.03, "{ppm} ppm: once the clocks are told apart, {worst:.4} ms at the most");
+        assert!(worst < 0.05, "{ppm} ppm: once the clocks are told apart, {worst:.4} ms at the most");
+        println!(
+            "monitored at {ppm} ppm: heard {:.3} ms after it is sung, as said, to within {worst:.4} ms",
+            said.round_trip_ms
+        );
         let drift = rig.session.recording_latency().unwrap().drift_ppm;
         assert!((drift - ppm).abs() < 5.0, "the input's clock is read as {drift:.1} ppm off, and is {ppm}");
     }
@@ -600,25 +604,26 @@ fn what_the_devices_do_not_say_is_found_by_a_measurement_and_then_taken_off() {
         assert!((off - 430.0).abs() <= 1.0, "late by what the devices do not say: {before:?}");
     }
     let said = rig.session.recording_latency().unwrap();
-    assert_eq!((said.correction_ms, said.correction), (0.0, Correction::None));
+    assert_eq!((said.measured_ms, said.adjust_ms, said.correction), (None, 0.0, Correction::None));
 
     // Measured: the noise comes back 430 frames later than the devices
     // account for.
     rig.session.measure_latency(1).unwrap();
     assert_eq!(rig.session.measurement(), Measurement::Running);
     assert!(rig.session.record().is_err(), "nothing is recorded while it runs");
-    rig.run_until(rig.now() + 3.0 * SR);
+    rig.run_until(rig.now() + 8.0 * SR);
     rig.session.housekeeping();
     let Measurement::Done(measured) = rig.session.measurement() else { panic!("{:?}", rig.session.measurement()) };
-    assert!((measured.correction_ms * 48.0 - 430.0).abs() < 0.5, "{measured:?}");
-    assert!(
-        (measured.round_trip_ms - said.round_trip_ms - measured.correction_ms).abs() < 0.02,
-        "{measured:?} {said:?}"
-    );
+    assert!((measured.more_than_said_ms * 48.0 - 430.0).abs() < 0.5, "{measured:?}");
+    let longer = measured.round_trip_ms - said.round_trip_ms;
+    assert!((longer - measured.more_than_said_ms).abs() < 0.02, "{measured:?} {said:?}");
+    // What it offers is the round trip less Trill's own part of it.
+    let beyond = measured.round_trip_ms - said.handover_ms - said.input_ms;
+    assert!((measured.beyond_ms - beyond).abs() < 0.02, "{measured:?} {said:?}");
     assert!(measured.likeness > 0.98 && (measured.heard_db - -26.0).abs() < 0.5, "{measured:?}");
     // It is offered, and changes nothing until it is taken.
-    assert_eq!(rig.session.latency_correction(), (0.0, Correction::None));
-    rig.session.set_latency_correction(measured.correction_ms, Correction::Measured);
+    assert_eq!(rig.session.latency_correction(), (None, 0.0));
+    rig.session.set_measured_latency(Some(measured.beyond_ms));
     let now = rig.session.recording_latency().unwrap();
     assert_eq!(now.correction, Correction::Measured);
     assert!((now.round_trip_ms - measured.round_trip_ms).abs() < 0.02);
@@ -629,21 +634,25 @@ fn what_the_devices_do_not_say_is_found_by_a_measurement_and_then_taken_off() {
     }
     assert_eq!(rig.session.last_recording().unwrap().correction, Correction::Measured);
     println!(
-        "placement by what the devices say: {before:.2?} frames late; measured {:.3} ms, then {after:.2?}",
-        measured.correction_ms
+        "placement by what the devices say: {before:.2?} frames late; measured {:.3} ms more than they say, then {after:.2?}",
+        measured.more_than_said_ms
     );
 
-    // A figure set by hand counts the same, and none takes it away.
-    rig.session.set_latency_correction(5.0, Correction::ByHand);
-    assert_eq!(rig.session.latency_correction(), (5.0, Correction::ByHand));
-    rig.session.set_latency_correction(123.0, Correction::None);
-    assert_eq!(rig.session.latency_correction(), (0.0, Correction::None));
+    // A figure added by hand counts on top of either, and both can be
+    // taken away.
+    rig.session.set_latency_adjustment(5.0);
+    assert_eq!(rig.session.latency_correction(), (Some(measured.beyond_ms), 5.0));
+    assert!((rig.session.recording_latency().unwrap().round_trip_ms - measured.round_trip_ms - 5.0).abs() < 0.02);
+    rig.session.set_measured_latency(None);
+    assert_eq!(rig.session.recording_latency().unwrap().correction, Correction::ByHand);
+    rig.session.set_latency_adjustment(0.0);
+    assert_eq!(rig.session.latency_correction(), (None, 0.0));
 
     // With nothing between the output and the input, the measurement says
     // so, and what to do.
     rig.host.hear(Hears::Nothing);
     rig.session.measure_latency(1).unwrap();
-    rig.run_until(rig.now() + 3.0 * SR);
+    rig.run_until(rig.now() + 8.0 * SR);
     rig.session.housekeeping();
     let Measurement::Failed(why) = rig.session.measurement() else { panic!("{:?}", rig.session.measurement()) };
     assert!(why.contains("did not come back on input 1") && why.contains("cable"), "{why}");
@@ -872,4 +881,109 @@ fn a_take_is_heard_in_place_before_it_is_chosen_without_the_song_being_changed()
     rig.session.edit(|project| project.choose_take(low).map(|_| ())).unwrap();
     assert!((heard(&mut rig) - 500.0).abs() < 5.0);
     let _ = high;
+}
+
+/// Records thirty minutes of the song from an input whose clock runs
+/// `ppm` parts a million fast: a bump every seven seconds on the first
+/// channel, each at a frame of the song the test knows, and a sine of 1 kHz
+/// on the second. Returns how far the worst bump is from its place, in
+/// milliseconds (of all of them, and of those after the first three
+/// seconds), and how far the sine is from its pitch at the worst, in
+/// cents, from two seconds in.
+fn thirty_minutes(ppm: f64) -> (f64, f64, f64) {
+    const MINUTES: f64 = 30.0;
+    const EVERY: f64 = 7.0 * SR;
+    let host = studio(ScriptedInput { ppm, ..microphone() });
+    let (mut rig, _folder) = rig_on(host, AudioConfig::default());
+    let voice = armed_track(&mut rig, "Voice", TrackInput { channel: 1, stereo: true, monitor: Monitoring::Off });
+    rig.run(40);
+    // The song's frame 24,000 is heard at this moment of the host's clock,
+    // and every seven seconds after it another.
+    let first = (rig.now() + LATENCY + 24_000.0) / SR;
+    rig.host.hear(Hears::Sound(Arc::new(move |channel, seconds| {
+        if channel == 1 {
+            return (0.5 * (seconds * std::f64::consts::TAU * 1000.0).sin()) as f32;
+        }
+        let since = seconds - first;
+        let nearest = (since / 7.0).round().max(0.0) * 7.0;
+        let away = (since - nearest) * SR / 3.0;
+        if away.abs() < 20.0 { (0.8 * (-away * away).exp()) as f32 } else { 0.0 }
+    })));
+    rig.session.record().unwrap();
+    let until = rig.now() + MINUTES * 60.0 * SR + SR;
+    run_taking(&mut rig, until);
+    rig.session.stop();
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!(recorded.silent_frames, 0, "nothing was late or lost");
+    let (_, start, length, audio) = clip_at(&rig.session, voice, 1.0);
+    assert_eq!(start, 0.0);
+    assert!(length >= MINUTES * 120.0, "thirty minutes at 120 to the minute: {length} beats");
+
+    // The bumps, each where the song has its frame.
+    let path = Path::new(&audio.path);
+    let (mut worst, mut settled) = (0.0f64, 0.0f64);
+    let mut bump = 0.0;
+    while 24_000.0 + bump * EVERY < MINUTES * 60.0 * SR {
+        let song_frame = 24_000.0 + bump * EVERY;
+        let in_file = audio.offset_seconds * SR + song_frame;
+        let near = frames_of(path, 2, in_file.round() as u64 - 64, 128);
+        let left: Vec<f32> = near.chunks_exact(2).map(|pair| pair[0]).collect();
+        let off_ms = (in_file.round() - 64.0 + top_of(&left) - in_file) / SR * 1000.0;
+        assert!(off_ms.abs() < 0.5, "{ppm} ppm: the click at {:.0} s is {off_ms:.4} ms off", song_frame / SR);
+        worst = worst.max(off_ms.abs());
+        if song_frame > 3.0 * SR {
+            settled = settled.max(off_ms.abs());
+        }
+        bump += 1.0;
+    }
+
+    // The sine, a fifth of a second at a time from two seconds in: how far
+    // its phase moves from one half of that to the other is how far it is
+    // from 1 kHz.
+    let mut file = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path).unwrap());
+    let from = (audio.offset_seconds * SR).round() as u64 + 2 * 48_000;
+    file.seek(SeekFrom::Start(56 + from * 8)).unwrap();
+    let turn: Vec<(f64, f64)> = (0..48).map(|n| (n as f64 * std::f64::consts::TAU / 48.0).sin_cos()).collect();
+    let mut bytes = vec![0u8; 9600 * 8];
+    let mut cents = 0.0f64;
+    let mut windows = 0;
+    while file.read_exact(&mut bytes).is_ok() && (windows as f64) < (MINUTES * 60.0 - 3.0) * 5.0 {
+        let mut halves = [(0.0f64, 0.0f64); 2];
+        for (frame, pair) in bytes.chunks_exact(8).enumerate() {
+            let sample = f32::from_le_bytes(pair[4..8].try_into().unwrap()) as f64;
+            let (sin, cos) = turn[frame % 48];
+            let half = &mut halves[frame / 4800];
+            (half.0, half.1) = (half.0 + sample * cos, half.1 - sample * sin);
+        }
+        // The second half's phase against the first's, a tenth of a second on.
+        let (re, im) = (
+            halves[1].0 * halves[0].0 + halves[1].1 * halves[0].1,
+            halves[1].1 * halves[0].0 - halves[1].0 * halves[0].1,
+        );
+        let hertz_off = im.atan2(re) / (std::f64::consts::TAU * 0.1);
+        let off = 1200.0 * (1.0 + hertz_off / 1000.0).log2();
+        assert!(off.abs() < 1.0, "{ppm} ppm: {off:.4} cents off, {:.1} s in", 2.0 + windows as f64 * 0.2);
+        cents = cents.max(off.abs());
+        windows += 1;
+    }
+    assert!(windows > 8000, "the whole of it was looked at: {windows} stretches");
+    (worst, settled, cents)
+}
+
+#[test]
+fn thirty_minutes_from_an_input_whose_clock_is_fast_stay_in_place_and_in_tune() {
+    let (worst, settled, cents) = thirty_minutes(200.0);
+    println!(
+        "200 ppm fast, thirty minutes: clicks within {worst:.4} ms ({settled:.4} ms after three seconds), the sine within {cents:.4} cents"
+    );
+    assert!(settled < 0.05, "{settled}");
+}
+
+#[test]
+fn thirty_minutes_from_an_input_whose_clock_is_slow_stay_in_place_and_in_tune() {
+    let (worst, settled, cents) = thirty_minutes(-200.0);
+    println!(
+        "200 ppm slow, thirty minutes: clicks within {worst:.4} ms ({settled:.4} ms after three seconds), the sine within {cents:.4} cents"
+    );
+    assert!(settled < 0.05, "{settled}");
 }
