@@ -4,8 +4,8 @@
 //!
 //! Everything here connects outward. Nothing listens.
 
-use crate::key::{Key, Meeting, Ticket};
-use crate::said::{Hello, MAX_WORD, No, NoLine, Word, answer, hear_line, say_line};
+use crate::key::{Door, Key, Meeting, Ticket};
+use crate::said::{Hello, MAX_WORD, No, NoLine, Word, answer, answering, asked, hear_line, say_line};
 use crate::secure::{Broken, Room, Sayer, secure_in};
 use std::io;
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
@@ -96,23 +96,32 @@ fn reach(address: &str) -> Result<TcpStream, Turned> {
     }))
 }
 
-/// Says what this connection came for and hears the answer.
-fn ask(stream: &TcpStream, hello: Hello, within: Duration) -> Result<(), Turned> {
+/// Says a line and hears the line it is answered with, by `end`.
+fn said_and_heard(stream: &TcpStream, line: &str, end: Instant) -> Result<String, Turned> {
     // (A meeting point that is full says so before it is asked anything
     // and hears nothing more: what it said is read whether or not the
     // line could still be said to it.)
-    let said = say_line(stream, &hello.line(), ANSWERING);
-    let heard = match hear_line(stream, Instant::now() + within) {
-        Ok(line) => line,
-        Err(NoLine::Late) => return Err(Turned::NoAnswer("it did not answer in time".to_owned())),
-        Err(NoLine::NoLine) => return Err(Turned::NotOne),
-        Err(NoLine::Gone(error)) => return Err(gone(said.err().unwrap_or(error))),
-    };
-    match answer(&heard) {
+    let said = say_line(stream, line, ANSWERING);
+    match hear_line(stream, end) {
+        Ok(line) => Ok(line),
+        Err(NoLine::Late) => Err(Turned::NoAnswer("it did not answer in time".to_owned())),
+        Err(NoLine::NoLine) => Err(Turned::NotOne),
+        Err(NoLine::Gone(error)) => Err(gone(said.err().unwrap_or(error))),
+    }
+}
+
+/// What a line that is `ok` or a refusal comes to.
+fn taken(heard: &str) -> Result<(), Turned> {
+    match answer(heard) {
         Some(Ok(())) => Ok(()),
         Some(Err(no)) => Err(Turned::No(no)),
         None => Err(Turned::NotOne),
     }
+}
+
+/// Says what this connection came for and hears the answer.
+fn ask(stream: &TcpStream, hello: Hello, within: Duration) -> Result<(), Turned> {
+    taken(&said_and_heard(stream, &hello.line(), Instant::now() + within)?)
 }
 
 /// A connection that is a pipe from here on: read and written with no
@@ -123,13 +132,21 @@ fn piped(stream: TcpStream) -> Result<TcpStream, Turned> {
     Ok(stream)
 }
 
-/// Asks the meeting point at `address` for `meeting`. What comes back is
-/// a connection to whoever holds the meeting, through the meeting point:
-/// nothing has been said over it, and the two prove to each other who
-/// they are as they would on a connection of their own.
-pub fn join(address: &str, meeting: Meeting) -> Result<TcpStream, Turned> {
+/// Asks the meeting point at `address` for `meeting`, and answers the
+/// question it puts with what only someone who has the invitation can
+/// work out (`door`). What comes back is a connection to whoever holds
+/// the meeting, through the meeting point: nothing has been said over
+/// it, and the two prove to each other who they are as they would on a
+/// connection of their own.
+pub fn join(address: &str, meeting: Meeting, door: Door) -> Result<TcpStream, Turned> {
     let stream = reach(address)?;
-    ask(&stream, Hello::Join(meeting), LETTING_IN)?;
+    let end = Instant::now() + LETTING_IN;
+    let question = match asked(&said_and_heard(&stream, &Hello::Join(meeting).line(), end)?) {
+        Some(Ok(question)) => question,
+        Some(Err(no)) => return Err(Turned::No(no)),
+        None => return Err(Turned::NotOne),
+    };
+    taken(&said_and_heard(&stream, &answering(&door.answer(&question)), end)?)?;
     piped(stream)
 }
 
@@ -166,7 +183,7 @@ impl Holding {
     /// keeper gave. The key does not cross the network: which key it is
     /// does, and the rest is proved by a handshake that only someone who
     /// has it can finish.
-    pub fn open(address: &str, key: &Key, meeting: Meeting) -> Result<Holding, Turned> {
+    pub fn open(address: &str, key: &Key, meeting: Meeting, door: Door) -> Result<Holding, Turned> {
         let stream = reach(address)?;
         ask(&stream, Hello::Open(key.id()), ANSWERING)?;
         let (mut say, mut hear) = match secure_in(stream, &key.proof(), true, ANSWERING, Room::SMALL) {
@@ -179,7 +196,7 @@ impl Holding {
         // (Kept to end the connection by: the thread that hears waits
         // on it for as long as there is nothing to hear.)
         let socket = hear.socket();
-        say.say(Word::Open(meeting).text().as_bytes()).map_err(broken)?;
+        say.say(Word::Open(meeting, door).text().as_bytes()).map_err(broken)?;
         hear.wait_at_most(Some(ANSWERING)).map_err(gone)?;
         match hear.hear(MAX_WORD).map(|heard| Word::read(&heard)) {
             Ok(Some(Word::Ok)) => {}

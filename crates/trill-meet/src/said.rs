@@ -9,36 +9,47 @@
 //! trill-meet 1 take TICKET      the holder of a meeting, taking a knock up
 //! ```
 //!
-//! and the meeting point answers with one line, `ok` or `no WORD`
-//! ([`No`]). What follows depends on what was come for:
+//! and the meeting point answers with a line. What follows depends on
+//! what was come for:
 //!
-//! * **open**: after `ok` both sides do the handshake of
+//! * **open**: answered `ok`, and both sides do the handshake of
 //!   [`crate::secure`], keyed with what the key comes to; only someone
 //!   who has the key gets through it. Over the connection that results,
-//!   a few words at a time ([`Word`]): the holder says which meeting
-//!   (`open MEETING`), is answered `ok` or `no WORD`, and from then on
-//!   is told of every knock (`knock TICKET`). It says `ping` now and
-//!   then and is answered `pong`, and `close` when it stops sharing.
-//! * **join**: the meeting point tells the holder that someone knocked
-//!   and waits a few seconds for the holder to take the knock up. Then
-//!   it answers `ok`, and from there on the connection is a pipe to the
-//!   holder: every byte either says is passed to the other, and the
-//!   meeting point knows nothing of what they are.
+//!   a few words at a time ([`Word`]): the holder says which meeting and
+//!   what whoever asks for it has to show (`open MEETING DOOR`), is
+//!   answered `ok` or `no WORD`, and from then on is told of every knock
+//!   (`knock TICKET`). It says `ping` now and then and is answered
+//!   `pong`, and `close` when it stops sharing.
+//! * **join**: answered with a question, `ask NUMBER`, a number by lot.
+//!   Whoever asks says `answer WHAT`, what the number and the meeting's
+//!   door come to ([`Door::answer`](crate::key::Door::answer)), which
+//!   only someone with the invitation can work out. One that cannot is
+//!   told `no unknown`, whether there is such a meeting or not, and the
+//!   holder hears nothing of it: *whoever has not got the invitation
+//!   cannot knock*, not by having heard on the way what the meeting goes
+//!   by, and not by saying again what someone else answered. After the
+//!   right answer the meeting point tells the holder that someone
+//!   knocked and waits a few seconds for the holder to take the knock
+//!   up. Then it answers `ok`, and from there on the connection is a
+//!   pipe to the holder: every byte either says is passed to the other,
+//!   and the meeting point knows nothing of what they are.
 //! * **take**: answered `ok`, and from there on the other end of that
 //!   pipe.
+//!
+//! Where it turns someone away the answer is `no WORD` ([`No`]).
 //!
 //! Through the pipe the two programs do what two programs that are
 //! connected directly do: prove the invitation's secret to each other
 //! and encrypt everything after ([`crate::secure`] again, keyed with the
 //! invitation). The meeting point is not a party to that. It never has
-//! the secret, and what it knows the meeting by cannot be worked back to
-//! it ([`Meeting`]).
+//! the secret, and neither of the two things it has of a meeting can be
+//! worked back to it ([`Meeting`], [`Door`](crate::key::Door)).
 //!
 //! Nothing may follow a line until it has been answered, and a line is
 //! at most [`MAX_LINE`] bytes: no room is made for anything a stranger
 //! says before the meeting point knows what they came for.
 
-use crate::key::{KeyId, Meeting, Ticket};
+use crate::key::{Answer, Door, KeyId, Meeting, Question, Ticket};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -93,8 +104,9 @@ impl Hello {
 /// One of the few words said over a holder's connection, either way.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Word {
-    /// The holder: this is the meeting I hold.
-    Open(Meeting),
+    /// The holder: this is the meeting I hold, and this is what whoever
+    /// asks for it has to show.
+    Open(Meeting, Door),
     /// The holder: I am still here.
     Ping,
     /// The holder: the meeting is over; whoever asks for it is told so.
@@ -109,7 +121,7 @@ pub enum Word {
 impl Word {
     pub fn text(&self) -> String {
         match self {
-            Word::Open(meeting) => format!("open {meeting}"),
+            Word::Open(meeting, door) => format!("open {meeting} {door}"),
             Word::Ping => "ping".to_owned(),
             Word::Close => "close".to_owned(),
             Word::Ok => "ok".to_owned(),
@@ -123,7 +135,10 @@ impl Word {
         let text = std::str::from_utf8(text).ok()?;
         let (what, of) = text.split_once(' ').unwrap_or((text, ""));
         Some(match (what, of) {
-            ("open", of) => Word::Open(Meeting::read(of)?),
+            ("open", of) => {
+                let (meeting, door) = of.split_once(' ')?;
+                Word::Open(Meeting::read(meeting)?, Door::read(door)?)
+            }
             ("ping", "") => Word::Ping,
             ("close", "") => Word::Close,
             ("ok", "") => Word::Ok,
@@ -351,6 +366,31 @@ pub fn say_line(stream: &TcpStream, line: &str, within: Duration) -> io::Result<
     wire.write_all(format!("{line}\n").as_bytes())
 }
 
+/// The question whoever asks for a meeting is put, as a line.
+pub fn ask(question: &Question) -> String {
+    format!("ask {question}")
+}
+
+/// What a first line that asks for a meeting is answered with: the
+/// question, or why not.
+pub fn asked(heard: &str) -> Option<Result<Question, No>> {
+    match heard.split_once(' ') {
+        Some(("ask", question)) => Question::read(question).map(Ok),
+        Some(("no", word)) => No::read(word).map(Err),
+        _ => None,
+    }
+}
+
+/// The answer to the question, as a line.
+pub fn answering(answer: &Answer) -> String {
+    format!("answer {answer}")
+}
+
+/// Reads the answer to the question.
+pub fn answered(heard: &str) -> Option<Answer> {
+    Answer::read(heard.strip_prefix("answer ")?)
+}
+
 /// The answer to a first line: `ok`, or why not.
 pub fn answer(heard: &str) -> Option<Result<(), No>> {
     match heard.split_once(' ') {
@@ -392,14 +432,15 @@ mod tests {
 
     #[test]
     fn the_few_words_of_a_holder_are_read_back_and_every_refusal_has_a_word_and_a_sentence() {
-        let (meeting, ticket) = (Meeting::of(b"secret"), Ticket::new().unwrap());
-        let words = [Word::Open(meeting), Word::Ping, Word::Close, Word::Ok, Word::Pong, Word::Knock(ticket)];
+        let (meeting, door, ticket) = (Meeting::of(b"secret"), Door::of(b"secret"), Ticket::new().unwrap());
+        let words = [Word::Open(meeting, door), Word::Ping, Word::Close, Word::Ok, Word::Pong, Word::Knock(ticket)];
         for word in words.into_iter().chain(No::ALL.map(Word::No)) {
             let text = word.text();
             assert!(text.len() <= MAX_WORD, "{text}");
             assert_eq!(Word::read(text.as_bytes()), Some(word), "{text}");
         }
-        for wrong in ["", "ping pong", "open", "open 00", "no", "no idea", "knock knock", "\u{1}"] {
+        let nameless = format!("open {meeting}");
+        for wrong in ["", "ping pong", "open", "open 00", &nameless, "no", "no idea", "knock knock", "\u{1}"] {
             assert_eq!(Word::read(wrong.as_bytes()), None, "{wrong}");
         }
         assert_eq!(Word::read(&[0xff, 0xfe]), None);
@@ -411,6 +452,16 @@ mod tests {
             let sentence = no.sentence();
             assert!(sentence.len() > 40 && !sentence.ends_with('.'), "{sentence}");
         }
+        // The question and its answer, as lines.
+        let question = Question::new().unwrap();
+        let line = ask(&question);
+        assert!(line.len() <= MAX_LINE && asked(&line) == Some(Ok(question)), "{line}");
+        assert_eq!(asked("no full"), Some(Err(No::Full)));
+        assert!(asked("ask 00").is_none() && asked("ok").is_none() && asked("no idea").is_none());
+        let line = answering(&door.answer(&question));
+        assert!(line.len() <= MAX_LINE, "{line}");
+        assert!(answered(&line).unwrap().is(&door.answer(&question)));
+        assert!(answered("answer 00").is_none() && answered(&line[1..]).is_none() && answered("ok").is_none());
         assert_eq!(answer("ok"), Some(Ok(())));
         assert_eq!(answer("ok then"), None);
         assert_eq!(answer("no"), None);

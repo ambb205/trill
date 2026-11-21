@@ -136,6 +136,129 @@ impl fmt::Debug for Meeting {
     }
 }
 
+/// What whoever asks for a meeting has to show that they have: worked
+/// out one way from the invitation's secret, under a label of its own.
+///
+/// What a meeting goes by ([`Meeting`]) is said in the clear by whoever
+/// asks for it, so someone who listens on the way has it. With that
+/// alone nobody knocks: the meeting point puts a question, a number by
+/// lot ([`Question`]), and lets through only who answers with what that
+/// number and this come to ([`Door::answer`]). The holder hands this to
+/// the meeting point when it opens the meeting, over the connection its
+/// key made, which nobody reads along. Whoever has only this (the
+/// meeting point) can answer the question and no more: neither the
+/// secret nor what the two programs prove to each other can be worked
+/// back from it.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Door([u8; 32]);
+
+impl Door {
+    pub fn of(secret: &[u8]) -> Door {
+        let mut hash = Sha256::new();
+        hash.update(b"trill meeting point, door 1");
+        hash.update(secret);
+        Door(hash.finalize().into())
+    }
+
+    pub fn read(text: &str) -> Option<Door> {
+        unhex(text).map(Door)
+    }
+
+    /// A door nobody has the invitation for: what an answer is held
+    /// against where there is no such meeting, so that being told so
+    /// takes as long as being told so of one that there is.
+    pub fn nobodys() -> std::io::Result<Door> {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(Door(bytes))
+    }
+
+    /// What `question` and this come to: a hash of both, hashed again
+    /// with this, so that neither can be had from the answer and an
+    /// answer says nothing of the answer to another question.
+    pub fn answer(&self, question: &Question) -> Answer {
+        let mut inner = Sha256::new();
+        inner.update(b"trill meeting point, answer 1");
+        inner.update(self.0);
+        inner.update(question.0);
+        let inner: [u8; 32] = inner.finalize().into();
+        let mut outer = Sha256::new();
+        outer.update(b"trill meeting point, answer 1, closed");
+        outer.update(self.0);
+        outer.update(inner);
+        Answer(outer.finalize().into())
+    }
+}
+
+impl fmt::Display for Door {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex(&self.0))
+    }
+}
+
+impl fmt::Debug for Door {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Door")
+    }
+}
+
+/// What whoever asks for a meeting is asked: a number by lot, new for
+/// every connection, so that an answer heard once is no answer again.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Question([u8; 16]);
+
+impl Question {
+    pub fn new() -> std::io::Result<Question> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(Question(bytes))
+    }
+
+    pub fn read(text: &str) -> Option<Question> {
+        unhex(text).map(Question)
+    }
+}
+
+impl fmt::Display for Question {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex(&self.0))
+    }
+}
+
+impl fmt::Debug for Question {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Question")
+    }
+}
+
+/// What a question and a meeting's door come to.
+#[derive(Copy, Clone)]
+pub struct Answer([u8; 32]);
+
+impl Answer {
+    pub fn read(text: &str) -> Option<Answer> {
+        unhex(text).map(Answer)
+    }
+
+    /// Whether this is `other`, found out in the same time whichever
+    /// byte is the first that is not.
+    pub fn is(&self, other: &Answer) -> bool {
+        self.0.iter().zip(other.0).fold(0u8, |differing, (one, other)| differing | (one ^ other)) == 0
+    }
+}
+
+impl fmt::Display for Answer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex(&self.0))
+    }
+}
+
+impl fmt::Debug for Answer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Answer")
+    }
+}
+
 /// What whoever holds a meeting is handed when someone knocks: by lot,
 /// good once and for a few seconds, for the one connection that takes the
 /// knock up.
@@ -205,5 +328,32 @@ mod tests {
         assert_eq!(Ticket::read(&ticket.to_string()), Some(ticket));
         assert_ne!(Ticket::new().unwrap(), ticket);
         assert_eq!(format!("{ticket:?}"), "Ticket");
+    }
+
+    #[test]
+    fn a_question_is_answered_by_who_has_the_door_and_an_answer_is_no_answer_to_another() {
+        let secret = b"a secret of twenty b.";
+        let (door, other) = (Door::of(secret), Door::of(b"a secret of twenty c."));
+        // The door is the secret's, and is neither what the meeting goes by nor read back from.
+        assert_eq!(Door::of(secret), door);
+        assert_ne!(door, other);
+        assert_ne!(door.to_string(), Meeting::of(secret).to_string());
+        assert_eq!(Door::read(&door.to_string()), Some(door));
+        assert_eq!(format!("{door:?}"), "Door");
+        let (first, second) = (Question::new().unwrap(), Question::new().unwrap());
+        assert_ne!(first, second, "a question is by lot");
+        assert_eq!(Question::read(&first.to_string()), Some(first));
+        // Whoever has the door answers; the same question has the same answer.
+        let answer = door.answer(&first);
+        assert!(answer.is(&door.answer(&first)));
+        assert!(Answer::read(&answer.to_string()).unwrap().is(&answer));
+        // An answer is none to another question, and none with another door.
+        assert!(!answer.is(&door.answer(&second)));
+        assert!(!answer.is(&other.answer(&first)));
+        assert!(!Door::nobodys().unwrap().answer(&first).is(&answer));
+        // And it is neither the door nor the question.
+        let shown = answer.to_string();
+        assert!(shown != door.to_string() && !shown.contains(&first.to_string()));
+        assert_eq!((Answer::read("00").is_none(), format!("{answer:?}")), (true, "Answer".to_owned()));
     }
 }

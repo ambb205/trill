@@ -11,8 +11,10 @@
 //! use on a connection of their own ([`secure`]), and everything after is
 //! encrypted under keys only the two of them have. The meeting point
 //! never has an invitation's secret: it knows a meeting by something
-//! worked out one way from it ([`Meeting`]), which is enough to knock and
-//! not enough to get in.
+//! worked out one way from it ([`Meeting`]), and lets through to its
+//! holder only who can answer a question that takes the invitation to
+//! answer ([`Door`]). Whoever has not got the invitation cannot knock,
+//! and whoever knocks is still not in.
 //!
 //! **Only someone its keeper gave a key can open a meeting on it; joining
 //! needs the invitation and nothing else.** A key ([`Key`]) never crosses
@@ -49,7 +51,7 @@ pub mod text;
 pub const PORT: u16 = 8745;
 
 pub use client::{Holding, Turned};
-pub use key::{Key, KeyId, Meeting, Ticket};
+pub use key::{Door, Key, KeyId, Meeting, Ticket};
 pub use keys::Keys;
 pub use limits::Limits;
 pub use said::No;

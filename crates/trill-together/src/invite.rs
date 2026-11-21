@@ -2,8 +2,8 @@
 
 use sha2::{Digest, Sha256};
 use std::fmt;
-use trill_meet::Meeting;
 use trill_meet::text::{Misspelt, spell, unspell};
+use trill_meet::{Door, Meeting};
 
 /// How many bytes of secret an invitation carries: 160 bits by lot.
 const SECRET_BYTES: usize = 20;
@@ -21,7 +21,8 @@ const SECRET_BYTES: usize = 20;
 /// it has it, and everything said afterwards is encrypted under a key
 /// that only the two of them have. A meeting point in between has
 /// neither: it knows the meeting by something worked out one way from
-/// the secret ([`Invitation::meeting`]).
+/// the secret ([`Invitation::meeting`]), and whether someone who asks for
+/// it has the invitation by another ([`Invitation::door`]).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Invitation {
     pub host: String,
@@ -105,6 +106,15 @@ impl Invitation {
         Meeting::of(&self.secret)
     }
 
+    /// What whoever asks a meeting point for this invitation's meeting
+    /// shows that they have it by: worked out one way from the secret,
+    /// under a label of its own. The meeting point has it from whoever
+    /// shares, and asks a question only someone who has it can answer:
+    /// without the invitation nobody knocks.
+    pub fn door(&self) -> Door {
+        Door::of(&self.secret)
+    }
+
     /// `host:port`, as a socket takes it.
     pub fn address(&self) -> String {
         match self.host.contains(':') {
@@ -186,6 +196,8 @@ mod tests {
         // nothing else's, and is neither the secret nor the key.
         let meeting = made.meeting();
         assert_eq!(meeting, direct.meeting());
+        assert!(made.door() == direct.door() && made.door().to_string() != meeting.to_string());
+        assert_ne!(made.door().to_string(), trill_meet::text::hex(&made.key()), "nor is the door the key");
         assert_eq!(meeting, made.at("elsewhere.example.org").meeting());
         assert_ne!(meeting, Invitation::through("meet.example.org", 443).unwrap().meeting());
         let (secret, shown) = (text.rsplit(':').next().unwrap().replace('-', ""), meeting.to_string());

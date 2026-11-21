@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use trill_meet::secure::{Broken, Hearer, Sayer, secure};
-use trill_meet::{Holding, Key, Meeting, Ticket};
+use trill_meet::{Door, Holding, Key, Meeting, Ticket};
 
 /// Which connection.
 pub type LinkId = u64;
@@ -115,6 +115,8 @@ struct Hold {
     address: String,
     key: Key,
     meeting: Meeting,
+    /// What whoever asks for the meeting has to show that they have.
+    door: Door,
     /// What the two programs prove to each other: the invitation's.
     proved_by: [u8; 32],
     stop: Arc<AtomicBool>,
@@ -131,7 +133,7 @@ impl Hold {
     fn run(self) {
         let mut pause = FIRST_PAUSE;
         while !self.stop.load(Ordering::Relaxed) {
-            let turned = match Holding::open(&self.address, &self.key, self.meeting) {
+            let turned = match Holding::open(&self.address, &self.key, self.meeting, self.door) {
                 Ok(mut holding) => {
                     pause = FIRST_PAUSE;
                     let _ = self.happened.send(Event::Held);
@@ -400,6 +402,7 @@ impl Net {
             address: point.address(),
             key: point.key.clone(),
             meeting: invitation.meeting(),
+            door: invitation.door(),
             proved_by: invitation.key(),
             stop: stop.clone(),
             proving: Arc::default(),
@@ -452,8 +455,8 @@ impl Net {
                     // is asked for the meeting, and what comes back is a
                     // connection to the program that shares, over which
                     // the two prove the invitation as they would directly.
-                    let stream =
-                        trill_meet::client::join(&address, invitation.meeting()).map_err(|turned| turned.sentence())?;
+                    let stream = trill_meet::client::join(&address, invitation.meeting(), invitation.door())
+                        .map_err(|turned| turned.sentence())?;
                     let pair = secure(stream, &invitation.key(), true).map_err(|broken| match broken {
                         Broken::Io(_) | Broken::NotTrusted => {
                             "the program that shares the song did not answer through \

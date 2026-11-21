@@ -193,15 +193,24 @@ on the samples.
   them together, and throw at it in `tests/strangers.rs` whatever the limit is for. The meeting point can
   neither read nor join a song: it passes a pipe's bytes and knows a meeting by `Meeting::of`, which is worked
   out one way from the invitation's secret; the two programs prove the invitation to each other through the
-  pipe (`secure`), as they do directly. A key never crosses the network: which key it is does, and the rest is
-  the handshake keyed with `Key::proof`. The log holds the names a keeper gave, a few digits of a meeting and
-  counts: never a key, what proves one, what a meeting goes by, a secret or a byte of what is passed
-  (`tests/meeting.rs` looks for each). A socket has one handle, shared (`Arc<TcpStream>`; `Hearer::socket`),
+  pipe (`secure`), as they do directly. Whoever has not got the invitation cannot knock: what a meeting goes
+  by is said in the clear, so whoever asks for one is put a question (a number by lot) and has to answer with
+  what it and the meeting's `Door` come to, which the holder handed over when it opened the meeting; a wrong
+  answer is told what an unknown meeting is told, and the holder hears nothing. A key never crosses the
+  network: which key it is does, and the rest is the handshake keyed with `Key::proof`. What a connection's
+  thread is to let go of, the chores let go of too when its time is over (`Shared::tend`: a knock, what a key
+  that was taken away holds), so that nothing is held for good because a thread did not get to it. What can
+  happen as often as a stranger likes is a line in the log once and then a count (`Shared::counted`). The log
+  holds the names a keeper gave, a few digits of a meeting and counts: never a key, what proves one, either of
+  the two things a meeting is known by, a secret or a byte of what is passed (`tests/meeting.rs` looks for
+  each). A socket has one handle, shared (`Arc<TcpStream>`; `Hearer::socket`),
   and never a second one of the system's (`try_clone`): on Windows a second handle keeps time limits of its
   own, and ending a connection through one fails now and then with the system saying it is not connected,
   while on Linux neither is so, and what is tested here runs there. `said::VERSION` goes up when
   what is said changes its meaning. Tests bind 127.0.0.1 on a port the system picks, and no address, name or
-  key of anyone's is in the repository: an example says `meet.example.org`.
+  key of anyone's is in the repository: an example says `meet.example.org`. A test makes the few connections
+  it is about and none in a loop, with their number beside it: a closed connection keeps one of the machine's
+  16,384 ports for two minutes, and the tests of this crate and `trill-together` leave about 180 a run.
 - **An MCP tool:** an argument struct in `requests.rs` (its doc comments are the schema descriptions the model
   reads, so write them for the model), the tool in `server.rs` or `music.rs`, a compact reply through `view.rs`,
   a test in `tests/mcp.rs` (and its name in `tools_are_listed_with_schemas`). If it changes how a song should be

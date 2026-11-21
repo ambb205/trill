@@ -9,12 +9,14 @@
 //! point reads nothing of what a pipe carries; it counts the bytes.
 //!
 //! What goes wrong on one connection ends that connection and is a line
-//! in the log.
+//! in the log. What a connection's thread was to let go of, the chores
+//! let go of too when its time is over (a knock, a key that was taken
+//! away): nothing is held for good because a thread did not get to it.
 
-use crate::key::{KeyId, Meeting, Ticket};
+use crate::key::{Door, KeyId, Meeting, Question, Ticket};
 use crate::keys::{Given, Keys, Reread};
 use crate::limits::Limits;
-use crate::said::{Hello, MAX_WORD, No, NoLine, Word, hear_line, say_line};
+use crate::said::{Hello, MAX_WORD, No, NoLine, Word, answered, ask, hear_line, say_line};
 use crate::secure::{Broken, Room, Sayer, secure_in};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
@@ -56,6 +58,12 @@ const ADDRESSES_AT_MOST: usize = 8192;
 const LEAVING_FOR: Duration = Duration::from_millis(300);
 const LEAVING_AT_MOST: usize = 64;
 const A_DAY: Duration = Duration::from_secs(24 * 3600);
+/// How long after its time a knock is let go of by the chores, where the
+/// thread that was to let go of it has not.
+const KNOCK_GRACE: Duration = Duration::from_secs(5);
+/// How often the chores ask whether the keys that hold something are
+/// still given.
+const KEYS_EVERY: Duration = Duration::from_secs(2);
 
 /// A lock that a fault on another thread does not take away: what it
 /// guards is counts and tables, each left whole by every hand.
@@ -110,6 +118,8 @@ struct Holder {
 struct Held {
     key: KeyId,
     name: String,
+    /// What whoever asks for it has to show that they have.
+    door: Door,
     /// Its holder's connection, while there is one.
     holder: Option<Holder>,
     /// Since when there is none.
@@ -124,6 +134,7 @@ struct Knock {
     joiner: Socket,
     /// Where the holder's connection is handed to the thread that waits.
     to: SyncSender<(Socket, Arc<Pipe>)>,
+    since: Instant,
 }
 
 /// A person in a meeting: their connection and the holder's to them.
@@ -142,7 +153,31 @@ struct Pipe {
     over: AtomicBool,
 }
 
-/// A kind of refusal, as the log keeps count of it.
+/// Something that can happen as often as a stranger likes, and is
+/// therefore said in the log once and then counted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum Counted {
+    /// Someone was turned away, and why.
+    Refusal(No),
+    /// Someone asked for a meeting that there is and could not answer
+    /// the question. (It is told what whoever asks for one that there is
+    /// not is told.)
+    Answer,
+    /// The system would not hand over a connection that arrived.
+    Accept,
+}
+
+impl Counted {
+    fn words(&self) -> String {
+        match self {
+            Counted::Refusal(no) => format!("turned away ({})", no.word()),
+            Counted::Answer => "turned away (answer)".to_owned(),
+            Counted::Accept => "a connection could not be taken".to_owned(),
+        }
+    }
+}
+
+/// How one of them is kept count of.
 struct Refused {
     quiet_until: Instant,
     more: u64,
@@ -156,9 +191,11 @@ struct State {
     meetings: HashMap<Meeting, Held>,
     knocks: HashMap<Ticket, Knock>,
     pipes: HashMap<u64, Arc<Pipe>>,
-    ended: VecDeque<(Meeting, Instant)>,
+    /// The meetings their holders ended, each with what whoever asks for
+    /// it has to show: only who has the invitation is told that it is over.
+    ended: VecDeque<(Meeting, Door, Instant)>,
     days: HashMap<KeyId, Arc<Day>>,
-    refused: HashMap<No, Refused>,
+    refused: HashMap<Counted, Refused>,
     /// Connections that were turned away at the door, for a moment more.
     leaving: VecDeque<(TcpStream, Instant)>,
 }
@@ -179,6 +216,8 @@ struct Shared {
     began: Instant,
     stop: AtomicBool,
     last: AtomicU64,
+    /// When the chores last asked about the keys.
+    keys_asked: Mutex<Instant>,
     state: Mutex<State>,
 }
 
@@ -207,15 +246,7 @@ impl Server {
     /// Starts a meeting point on `listeners`, which are bound already:
     /// it takes connections from the moment this returns.
     pub fn start(listeners: Vec<TcpListener>, keys: Keys, limits: Limits, log: Log) -> io::Result<Server> {
-        let shared = Arc::new(Shared {
-            limits,
-            keys,
-            log,
-            began: Instant::now(),
-            stop: AtomicBool::new(false),
-            last: AtomicU64::new(0),
-            state: Mutex::default(),
-        });
+        let shared = Arc::new(Shared::new(keys, limits, log));
         let mut addresses = Vec::new();
         let mut threads = Vec::new();
         for listener in listeners {
@@ -335,8 +366,9 @@ fn listen(shared: &Arc<Shared>, listener: &TcpListener) {
             Ok(accepted) => accepted,
             Err(error) => {
                 // The system has no room for another connection at the
-                // moment (its count of open files): said, and tried again.
-                shared.say(&format!("a connection could not be taken: {error}"));
+                // moment (its count of open files): said once, counted for
+                // as long as it goes on, and tried again.
+                shared.counted(Counted::Accept, || format!("a connection could not be taken: {error}"));
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -377,6 +409,19 @@ fn listen(shared: &Arc<Shared>, listener: &TcpListener) {
 }
 
 impl Shared {
+    fn new(keys: Keys, limits: Limits, log: Log) -> Shared {
+        Shared {
+            limits,
+            keys,
+            log,
+            began: Instant::now(),
+            stop: AtomicBool::new(false),
+            last: AtomicU64::new(0),
+            keys_asked: Mutex::new(Instant::now()),
+            state: Mutex::default(),
+        }
+    }
+
     fn say(&self, line: &str) {
         (self.log)(line);
     }
@@ -418,16 +463,25 @@ impl Shared {
     /// said a moment ago, and counted where it was. Whoever knocks a
     /// thousand times a second writes a line every ten seconds.
     fn refused(&self, no: No, from: IpAddr) {
+        self.counted(Counted::Refusal(no), || {
+            format!("turned away ({}), from {from}: {}", no.word(), turned_away(no, &self.limits))
+        });
+    }
+
+    /// Says `line` in the log, where the same kind of thing was not said
+    /// a moment ago, and counts it where it was: the count is said when
+    /// the moment is over.
+    fn counted(&self, what: Counted, line: impl FnOnce() -> String) {
         let now = Instant::now();
         let mut state = lock(&self.state);
-        let refused = state.refused.entry(no).or_insert(Refused { quiet_until: now, more: 0 });
+        let refused = state.refused.entry(what).or_insert(Refused { quiet_until: now, more: 0 });
         if now < refused.quiet_until {
             refused.more += 1;
             return;
         }
         (refused.quiet_until, refused.more) = (now + QUIET_FOR, 0);
         drop(state);
-        self.say(&format!("turned away ({}), from {from}: {}", no.word(), turned_away(no, &self.limits)));
+        self.say(&line());
     }
 
     /// The day of a key, begun if it has none.
@@ -466,10 +520,51 @@ impl Shared {
     fn tend(&self) {
         let now = Instant::now();
         let mut lines = Vec::new();
+        // Whether the keys are asked about this time, and which.
+        let mut holding: Vec<(KeyId, String)> = Vec::new();
+        let ask_keys = {
+            let mut asked = lock(&self.keys_asked);
+            let due = now.duration_since(*asked) >= KEYS_EVERY;
+            if due {
+                *asked = now;
+            }
+            due
+        };
         {
             let mut state = lock(&self.state);
             while state.leaving.front().is_some_and(|(_, since)| now.duration_since(*since) >= LEAVING_FOR) {
                 state.leaving.pop_front();
+            }
+            // A knock that nobody took up, and that the thread which
+            // waited with it did not let go of in its time: let go of
+            // here, with the seat it kept in its meeting.
+            let old = self.limits.answer + KNOCK_GRACE;
+            let left: Vec<Ticket> = (state.knocks.iter())
+                .filter(|(_, knock)| now.duration_since(knock.since) >= old)
+                .map(|(ticket, _)| *ticket)
+                .collect();
+            for ticket in left {
+                let Some(knock) = state.knocks.remove(&ticket) else { continue };
+                let _ = knock.joiner.shutdown(Shutdown::Both);
+                if let Some(held) = state.meetings.get_mut(&knock.meeting) {
+                    held.knocking = held.knocking.saturating_sub(1);
+                    lines.push(format!(
+                        "the meeting of {} ({}): a knock that nobody answered or gave up was let go of",
+                        held.name,
+                        knock.meeting.tag()
+                    ));
+                }
+            }
+            if ask_keys {
+                // Every key that holds something: a meeting, whether or not
+                // its holder is connected, or a person in one.
+                for (key, name) in (state.meetings.values().map(|held| (held.key, &held.name)))
+                    .chain(state.pipes.values().map(|pipe| (pipe.key, &pipe.name)))
+                {
+                    if !holding.iter().any(|(known, _)| *known == key) {
+                        holding.push((key, name.clone()));
+                    }
+                }
             }
             // A holder that stayed away.
             let away = self.limits.away;
@@ -487,7 +582,7 @@ impl Shared {
                     ));
                 }
             }
-            while state.ended.front().is_some_and(|(_, at)| now.duration_since(*at) >= ENDED_FOR) {
+            while state.ended.front().is_some_and(|(_, _, at)| now.duration_since(*at) >= ENDED_FOR) {
                 state.ended.pop_front();
             }
             state.from.retain(|_, seen| seen.now > 0 || now.duration_since(seen.since) < Duration::from_secs(60));
@@ -500,12 +595,12 @@ impl Shared {
                     day.said.store(false, Ordering::Relaxed);
                 }
             }
-            // Refusals that were only counted.
-            for (no, refused) in &mut state.refused {
+            // What was only counted.
+            for (what, refused) in &mut state.refused {
                 if now >= refused.quiet_until && refused.more > 0 {
                     lines.push(format!(
-                        "turned away ({}) {} more times in the {} s after",
-                        no.word(),
+                        "{} {} more times in the {} s after",
+                        what.words(),
                         refused.more,
                         QUIET_FOR.as_secs()
                     ));
@@ -515,6 +610,14 @@ impl Shared {
         }
         for line in lines {
             self.say(&line);
+        }
+        // A key that was taken away ends what it holds, whether or not
+        // its holder is there to be told: asked here and not only when a
+        // holder says that it is there.
+        for (key, name) in holding {
+            if self.given(key).is_none() {
+                self.end_key(key, &name);
+            }
         }
     }
 
@@ -539,8 +642,9 @@ impl Shared {
         ));
     }
 
-    /// Ends everything a key holds: its meetings and the people in them.
-    fn end_key(&self, key: KeyId, why: &str) {
+    /// Ends everything a key that was taken away holds: its meetings and
+    /// the people in them.
+    fn end_key(&self, key: KeyId, name: &str) {
         let (holders, pipes) = {
             let mut state = lock(&self.state);
             let meetings: Vec<Meeting> =
@@ -549,14 +653,38 @@ impl Shared {
             let pipes: Vec<Arc<Pipe>> = state.pipes.values().filter(|pipe| pipe.key == key).cloned().collect();
             (holders, pipes)
         };
+        if holders.is_empty() && pipes.is_empty() {
+            return;
+        }
         for held in holders {
             if let Some(holder) = held.holder {
                 let _ = holder.socket.shutdown(Shutdown::Both);
             }
         }
         for pipe in pipes {
-            self.end_pipe(&pipe, why);
+            self.end_pipe(&pipe, "the key was taken away");
         }
+        self.say(&format!("the key of {name} was taken away: what it held is ended"));
+    }
+
+    /// A holder's connection is gone, or cannot be told anything: the
+    /// meeting is its holder's to come back to, and whoever asks for it
+    /// meanwhile hears at once that its holder is away.
+    fn holder_lost(&self, meeting: Meeting, connection: u64) {
+        let (socket, name) = {
+            let mut state = lock(&self.state);
+            let Some(held) = state.meetings.get_mut(&meeting) else { return };
+            // (Unless another connection holds it by now.)
+            let Some(holder) = held.holder.take_if(|holder| holder.connection == connection) else { return };
+            held.away_since = Some(Instant::now());
+            (holder.socket, held.name.clone())
+        };
+        let _ = socket.shutdown(Shutdown::Both);
+        self.say(&format!(
+            "the holder of the meeting of {name} ({}) is away: remembered for {} s",
+            meeting.tag(),
+            self.limits.away.as_secs_f32()
+        ));
     }
 }
 
@@ -602,7 +730,7 @@ fn serve(shared: &Arc<Shared>, connection: u64, (from, origin): (IpAddr, Origin)
     };
     let turned = match hello {
         Ok(Hello::Open(key)) => hold(shared, connection, from, stream, key, end),
-        Ok(Hello::Join(meeting)) => join(shared, stream, meeting),
+        Ok(Hello::Join(meeting)) => join(shared, from, stream, meeting, end),
         Ok(Hello::Take(ticket)) => take(shared, origin, stream, ticket),
         Err(no) => Err(no),
     };
@@ -669,12 +797,14 @@ fn hold(
             return Ok(());
         }
     };
-    let _ = say.within(shared.limits.answer);
+    // (What is said to a holder is a few words into an empty buffer:
+    // one that does not take them in a moment is gone.)
+    let _ = say.within(ANSWERING);
     let say = Arc::new(Mutex::new(say));
     // Which meeting, within what is left of its time.
     let _ = hear.wait_at_most(Some(end.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))));
-    let meeting = match hear.hear(MAX_WORD).map(|heard| Word::read(&heard)) {
-        Ok(Some(Word::Open(meeting))) => meeting,
+    let (meeting, door) = match hear.hear(MAX_WORD).map(|heard| Word::read(&heard)) {
+        Ok(Some(Word::Open(meeting, door))) => (meeting, door),
         other => {
             let no = match other {
                 Err(Broken::Io(error)) if timed_out(&error) => No::Late,
@@ -702,14 +832,15 @@ fn hold(
                 if let Some(before) = held.holder.replace(holder) {
                     let _ = before.socket.shutdown(Shutdown::Both);
                 }
-                held.away_since = None;
+                (held.away_since, held.door) = (None, door);
                 Ok(false)
             }
             None if meetings >= shared.limits.meetings => Err(No::Meetings),
             None if of_key >= shared.limits.meetings_of_one_key => Err(No::Yours),
             None => {
-                state.ended.retain(|(ended, _)| *ended != meeting);
-                let held = Held { key, name: given.name.clone(), holder: Some(holder), away_since: None, knocking: 0 };
+                state.ended.retain(|(ended, ..)| *ended != meeting);
+                let name = given.name.clone();
+                let held = Held { key, name, door, holder: Some(holder), away_since: None, knocking: 0 };
                 state.meetings.insert(meeting, held);
                 Ok(true)
             }
@@ -735,8 +866,7 @@ fn hold(
                 Ok(Some(Word::Ping)) => {
                     if shared.given(key).is_none() {
                         word(&say, Word::No(No::Key));
-                        shared.end_key(key, "the key was taken away");
-                        shared.say(&format!("the key of {} was taken away: what it held is ended", given.name));
+                        shared.end_key(key, &given.name);
                         return Ok(());
                     }
                     // A key that has passed its bytes of the day is told so
@@ -758,45 +888,83 @@ fn hold(
             }
         }
     }
-    let mut state = lock(&shared.state);
-    let Some(held) = state.meetings.get_mut(&meeting) else { return Ok(()) };
-    // (Unless another connection holds it by now.)
-    if held.holder.as_ref().is_none_or(|holder| holder.connection != connection) {
+    if !ended {
+        shared.holder_lost(meeting, connection);
         return Ok(());
     }
-    if ended {
-        state.meetings.remove(&meeting);
-        state.ended.push_back((meeting, Instant::now()));
-        while state.ended.len() > ENDED_AT_MOST {
-            state.ended.pop_front();
-        }
-        drop(state);
-        shared.say(&format!("the meeting of {} ({tag}) is over: its holder ended it", given.name));
-    } else {
-        (held.holder, held.away_since) = (None, Some(Instant::now()));
-        drop(state);
-        shared.say(&format!(
-            "the holder of the meeting of {} ({tag}) is away: remembered for {} s",
-            given.name,
-            shared.limits.away.as_secs_f32()
-        ));
+    let mut state = lock(&shared.state);
+    // (Unless another connection holds it by now.)
+    let mine = |held: &Held| held.holder.as_ref().is_some_and(|holder| holder.connection == connection);
+    if !state.meetings.get(&meeting).is_some_and(mine) {
+        return Ok(());
     }
+    if let Some(held) = state.meetings.remove(&meeting) {
+        state.ended.push_back((meeting, held.door, Instant::now()));
+    }
+    while state.ended.len() > ENDED_AT_MOST {
+        state.ended.pop_front();
+    }
+    drop(state);
+    shared.say(&format!("the meeting of {} ({tag}) is over: its holder ended it", given.name));
     Ok(())
 }
 
-/// Someone who has an invitation and asks for its meeting.
-fn join(shared: &Arc<Shared>, stream: &Socket, meeting: Meeting) -> Result<(), No> {
+/// Someone who asks for a meeting. Whether they have its invitation is
+/// asked first: only who has is told anything of the meeting, and only
+/// for them is its holder told of a knock.
+fn join(shared: &Arc<Shared>, from: IpAddr, stream: &Socket, meeting: Meeting, end: Instant) -> Result<(), No> {
+    // The question, a number by lot, and the answer to it: within the
+    // time anyone has to say what they came for.
+    let question = Question::new().map_err(|_| No::Full)?;
+    if say_line(stream, &ask(&question), ANSWERING).is_err() {
+        return Ok(());
+    }
+    let answer = match hear_line(stream, end) {
+        Ok(line) => answered(&line).ok_or(No::What)?,
+        Err(NoLine::Late) => return Err(No::Late),
+        Err(NoLine::NoLine) => return Err(No::What),
+        Err(NoLine::Gone(_)) => return Ok(()),
+    };
+    let door = {
+        let state = lock(&shared.state);
+        let held = state.meetings.get(&meeting).map(|held| held.door);
+        held.or_else(|| state.ended.iter().find(|(ended, ..)| *ended == meeting).map(|(_, door, _)| *door))
+    };
+    // Where there is no such meeting the answer is held against a door
+    // nobody has, and whoever asked is told the same as someone who asked
+    // for one that there is and answered wrong: that there is none.
+    let right = match door {
+        Some(door) => door.answer(&question).is(&answer),
+        None => {
+            let nobodys = Door::nobodys().map_err(|_| No::Full)?;
+            std::hint::black_box(nobodys.answer(&question).is(&answer));
+            false
+        }
+    };
+    if !right && door.is_some() {
+        shared.counted(Counted::Answer, || {
+            format!(
+                "turned away (answer), from {from}: it asked for a meeting that there is and could not say what its \
+                 invitation comes to; it was told that there is none"
+            )
+        });
+        let _ = say_line(stream, &format!("no {}", No::Unknown.word()), ANSWERING);
+        return Ok(());
+    }
+    if !right {
+        return Err(No::Unknown);
+    }
     let ticket = Ticket::new().map_err(|_| No::Full)?;
     let (to, taken) = sync_channel(1);
-    let say = {
+    let (say, holder) = {
         let mut state = lock(&shared.state);
         let people = state.people(meeting);
         let Some(held) = state.meetings.get(&meeting) else {
-            let ended = state.ended.iter().any(|(ended, _)| *ended == meeting);
+            let ended = state.ended.iter().any(|(ended, ..)| *ended == meeting);
             return Err(if ended { No::Closed } else { No::Unknown });
         };
         let Some(holder) = &held.holder else { return Err(No::Away) };
-        let (say, key) = (holder.say.clone(), held.key);
+        let (say, holder, key) = (holder.say.clone(), holder.connection, held.key);
         if people >= shared.limits.people {
             return Err(No::Seats);
         }
@@ -805,8 +973,8 @@ fn join(shared: &Arc<Shared>, stream: &Socket, meeting: Meeting) -> Result<(), N
             return Err(No::Spent);
         }
         state.meetings.get_mut(&meeting).expect("it was there").knocking += 1;
-        state.knocks.insert(ticket, Knock { meeting, joiner: stream.clone(), to });
-        say
+        state.knocks.insert(ticket, Knock { meeting, joiner: stream.clone(), to, since: Instant::now() });
+        (say, holder)
     };
     // The knock is the holder's or the time's to answer; whichever takes
     // it out of the table has it.
@@ -825,11 +993,13 @@ fn join(shared: &Arc<Shared>, stream: &Socket, meeting: Meeting) -> Result<(), N
         Err(_) => taken.recv_timeout(ANSWERING).ok(),
     };
     if !word(&say, Word::Knock(ticket)) {
-        // Its holder cannot be told: it is gone, and will be seen to be.
-        return match give_up(shared) {
-            true => Err(No::Away),
-            false => Err(No::Slow),
-        };
+        // Its holder cannot be told. Its connection is closed for it, so
+        // that the meeting is away from this moment: whoever asks next
+        // hears so at once, and does not wait in turn for a holder that
+        // takes nothing.
+        give_up(shared);
+        shared.holder_lost(meeting, holder);
+        return Err(No::Away);
     }
     let Some((holder, pipe)) = wait(&taken) else { return Err(No::Slow) };
     if say_line(stream, "ok", ANSWERING).is_err() {
@@ -935,4 +1105,137 @@ fn pass(shared: &Shared, pipe: &Pipe, from: &TcpStream, to: &TcpStream) {
         }
     };
     shared.end_pipe(pipe, why);
+}
+
+/// What no connection from outside can bring about on demand (a thread
+/// that ends where it should not, a holder that takes nothing), set up
+/// by hand in what the meeting point holds. (Four connections.)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::key::Key;
+    use crate::said::{answering, asked};
+
+    type Lines = Arc<Mutex<Vec<String>>>;
+
+    fn shared(limits: Limits) -> (Arc<Shared>, Lines) {
+        let lines = Lines::default();
+        let log = lines.clone();
+        let said: Log = Arc::new(move |line: &str| log.lock().unwrap().push(line.to_owned()));
+        (Arc::new(Shared::new(Keys::of(Vec::new()), limits, said)), lines)
+    }
+
+    /// The two ends of a connection on this machine.
+    fn pair() -> (Socket, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let far = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        far.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        (Arc::new(listener.accept().unwrap().0), far)
+    }
+
+    fn held(key: &Key, door: Door, holder: Option<Holder>) -> Held {
+        Held { key: key.id(), name: "Ada".to_owned(), door, holder, away_since: None, knocking: 0 }
+    }
+
+    #[test]
+    fn a_knock_that_no_thread_let_go_of_is_let_go_of_by_the_chores_with_its_seat() {
+        let (shared, lines) = shared(Limits { answer: Duration::from_millis(100), ..Limits::default() });
+        let (key, secret) = (Key::new().unwrap(), b"an invitation's secret");
+        let (meeting, door) = (Meeting::of(secret), Door::of(secret));
+        let (joiner, mut far) = pair();
+        // A knock as the thread that serves whoever knocked leaves it, had
+        // it ended there: in the table, with its seat in the meeting. One
+        // is long past its time, and one has just been made.
+        let (old, new) = (Ticket::new().unwrap(), Ticket::new().unwrap());
+        let long_ago = Instant::now().checked_sub(Duration::from_secs(8)).expect("the machine is up that long");
+        {
+            let mut state = lock(&shared.state);
+            state.meetings.insert(meeting, Held { knocking: 2, ..held(&key, door, None) });
+            for (ticket, since) in [(old, long_ago), (new, Instant::now())] {
+                let (to, _) = sync_channel(1);
+                state.knocks.insert(ticket, Knock { meeting, joiner: joiner.clone(), to, since });
+            }
+            assert_eq!(state.people(meeting), 3);
+        }
+        shared.tend();
+        let state = lock(&shared.state);
+        assert!(!state.knocks.contains_key(&old) && state.knocks.contains_key(&new), "only the old one is let go of");
+        assert_eq!((state.meetings[&meeting].knocking, state.people(meeting)), (1, 2), "and its seat is free");
+        drop(state);
+        let mut nothing = [0u8; 1];
+        assert!(matches!(far.read(&mut nothing), Ok(0) | Err(_)), "whoever knocked is let go of with it");
+        let log = lines.lock().unwrap().join("\n");
+        assert!(log.contains("a knock that nobody answered or gave up was let go of"), "{log}");
+    }
+
+    #[test]
+    fn a_holder_that_cannot_be_told_of_a_knock_is_away_at_once_for_whoever_asks_next() {
+        let (shared, lines) = shared(Limits::default());
+        let (key, secret) = (Key::new().unwrap(), b"an invitation's secret");
+        let (meeting, door) = (Meeting::of(secret), Door::of(secret));
+        // A holder's connection, made as one is, to which nothing more
+        // can be said: as when its holder takes nothing and what waits
+        // to be said to it has filled what the system holds for it.
+        let (holders, far) = pair();
+        let proof = key.proof();
+        let within = Duration::from_secs(10);
+        let their_end = std::thread::spawn(move || secure_in(far, &proof, true, within, Room::SMALL).unwrap());
+        let (say, _hear) = secure_in(holders.clone(), &key.proof(), false, within, Room::SMALL).unwrap();
+        let (_their_say, mut their_hear) = their_end.join().unwrap();
+        holders.shutdown(Shutdown::Write).unwrap();
+        let holder = Holder { connection: 7, say: Arc::new(Mutex::new(say)), socket: holders };
+        lock(&shared.state).meetings.insert(meeting, held(&key, door, Some(holder)));
+
+        // Someone with the invitation asks for the meeting.
+        let asks = |shared: &Arc<Shared>| {
+            let (joiner, far) = pair();
+            let asking = std::thread::spawn(move || {
+                let end = Instant::now() + Duration::from_secs(20);
+                let Some(Ok(question)) = asked(&hear_line(&far, end).unwrap()) else { panic!("it is asked") };
+                say_line(&far, &answering(&door.answer(&question)), Duration::from_secs(5)).unwrap();
+                far
+            });
+            let began = Instant::now();
+            let from = IpAddr::from([127, 0, 0, 1]);
+            let turned = join(shared, from, &joiner, meeting, Instant::now() + Duration::from_secs(20));
+            (turned, began.elapsed(), asking.join().unwrap())
+        };
+        let (turned, _, _first) = asks(&shared);
+        assert_eq!(turned, Err(No::Away), "its holder could not be told");
+        // The meeting is away from that moment, its holder's connection
+        // closed, and no knock or seat is left of the one who asked.
+        {
+            let state = lock(&shared.state);
+            let held = &state.meetings[&meeting];
+            assert!(held.holder.is_none() && held.away_since.is_some() && held.knocking == 0);
+            assert!(state.knocks.is_empty());
+        }
+        their_hear.wait_at_most(Some(Duration::from_secs(20))).unwrap();
+        assert!(their_hear.hear(MAX_WORD).is_err(), "the holder's connection is closed for it");
+        // Whoever asks next hears so at once: nothing is said to a holder
+        // that takes nothing, and nobody waits in turn for it.
+        let (turned, took, _second) = asks(&shared);
+        assert_eq!(turned, Err(No::Away));
+        assert!(took < Duration::from_secs(5), "after {took:?}");
+        let log = lines.lock().unwrap().join("\n");
+        assert_eq!(log.matches("the holder of the meeting of Ada").count(), 1, "{log}");
+        assert!(log.contains("is away: remembered for 600 s"), "{log}");
+    }
+
+    #[test]
+    fn what_can_happen_as_often_as_a_stranger_likes_is_said_once_and_then_counted() {
+        let (shared, lines) = shared(Limits::default());
+        // The system hands over no connection, again and again.
+        for _ in 0..50 {
+            shared.counted(Counted::Accept, || "a connection could not be taken: too many open files".to_owned());
+        }
+        assert_eq!(lines.lock().unwrap().len(), 1, "one line for all of them");
+        // When the moment is over the count is said, once.
+        lock(&shared.state).refused.get_mut(&Counted::Accept).unwrap().quiet_until = Instant::now();
+        shared.tend();
+        shared.tend();
+        let log = lines.lock().unwrap().join("\n");
+        assert_eq!(log.lines().count(), 2, "{log}");
+        assert!(log.contains("a connection could not be taken 49 more times in the 10 s after"), "{log}");
+    }
 }

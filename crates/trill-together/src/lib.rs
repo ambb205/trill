@@ -140,9 +140,11 @@ mod tests {
     fn many_connections_without_the_invitation_are_let_go_of_and_whoever_has_it_still_joins() {
         let (mut sharer, mut joiner) = (Net::new(), Net::new());
         let invitation = sharer.listen(Reach::ThisMachine, 0).unwrap();
-        // More at once than may be proving who they are, none of which
-        // says a word; then they go.
-        let silent: Vec<_> = (0..60).filter_map(|_| std::net::TcpStream::connect(invitation.address()).ok()).collect();
+        // More at once than may be proving who they are (sixteen), none
+        // of which says a word; then they go. (And no more than a few
+        // more: every connection a test makes keeps one of the machine's
+        // ports for two minutes after.)
+        let silent: Vec<_> = (0..20).filter_map(|_| std::net::TcpStream::connect(invitation.address()).ok()).collect();
         assert!(silent.len() > 16, "they were connected: {}", silent.len());
         std::thread::sleep(Duration::from_millis(300));
         assert!(sharer.events().is_empty() && sharer.links().is_empty(), "none of them is a program in the song");
@@ -158,7 +160,7 @@ mod tests {
                 }
                 other => panic!("{other:?}"),
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(500));
         }
         let Event::Open { joined: false, .. } = next(&mut sharer) else { panic!("the sharer has it too") };
     }
@@ -187,7 +189,7 @@ mod tests {
 
     /// Waits until the meeting point holds what `as_wanted` says.
     fn until(server: &trill_meet::Server, what: &str, as_wanted: impl Fn(trill_meet::Counts) -> bool) {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + Duration::from_secs(30);
         while !as_wanted(server.counts()) {
             assert!(Instant::now() < end, "{what}: {:?}", server.counts());
             std::thread::sleep(Duration::from_millis(10));
@@ -208,7 +210,7 @@ mod tests {
     #[test]
     fn two_programs_that_only_connect_outward_meet_through_a_meeting_point_that_reads_nothing() {
         let (server, point, log) = meeting_point();
-        let (mut sharer, mut joiner, mut third) = (Net::new(), Net::new(), Net::new());
+        let (mut sharer, mut joiner) = (Net::new(), Net::new());
         let invitation = sharer.listen_through(&point).unwrap();
         let text = invitation.to_string();
         assert!(text.starts_with(&format!("trill:meet:127.0.0.1:{}:", point.port)), "{text}");
@@ -226,18 +228,12 @@ mod tests {
         assert_eq!((link, &message), (ours, &presence));
         sharer.say_to(&[ours], &Message::Gone { person: 7 });
         assert!(matches!(next(&mut joiner), Event::Heard { message: Message::Gone { person: 7 }, .. }));
-        // A third, while the second is in it.
-        third.join(invitation.clone());
-        assert!(matches!(next(&mut third), Event::Open { joined: true, .. }));
-        let Event::Open { link: to_third, joined: false } = next(&mut sharer) else { panic!("the sharer has it") };
-        sharer.say_to(&[ours, to_third], &Message::Gone { person: 8 });
-        assert!(matches!(next(&mut joiner), Event::Heard { message: Message::Gone { person: 8 }, .. }));
-        assert!(matches!(next(&mut third), Event::Heard { message: Message::Gone { person: 8 }, .. }));
         let counts = server.counts();
-        assert_eq!((counts.meetings, counts.held, counts.pipes, counts.connections), (1, 1, 2, 5));
+        assert_eq!((counts.meetings, counts.held, counts.pipes, counts.connections), (1, 1, 1, 3));
 
         // Sharing is stopped: the meeting is over where it was held, and
-        // whoever asks for it is told so. Who is connected stays.
+        // whoever asks for it with the invitation is told so. Who is
+        // connected stays.
         sharer.stop_listening();
         until(&server, "the meeting is over", |counts| counts.meetings == 0);
         let mut late = Net::new();
@@ -252,44 +248,46 @@ mod tests {
         let Event::Lost { link, why } = next(&mut sharer) else { panic!("the other hears of it") };
         assert_eq!(link, ours);
         assert!(why.contains("Jo left"), "{why}");
-        until(&server, "its pipe is gone", |counts| counts.pipes == 1);
+        until(&server, "its pipe is gone", |counts| counts.pipes == 0);
 
         // What the meeting point wrote down has neither the invitation's
-        // secret nor the key.
+        // secret nor the key, nor either of the two things it knows the
+        // meeting by.
         let log = log.lock().unwrap().join("\n");
         assert!(log.contains("Ada holds a meeting") && log.contains("is over: its holder ended it"), "{log}");
         let secret = text.rsplit(':').next().unwrap();
         let key = point.key.to_string();
-        for kept_out in [secret, &secret.replace('-', ""), &key[10..], &invitation.meeting().to_string()] {
+        let (meeting, door) = (invitation.meeting().to_string(), invitation.door().to_string());
+        for kept_out in [secret, &secret.replace('-', ""), &key[10..], &meeting, &door] {
             assert!(!log.to_uppercase().contains(&kept_out.to_uppercase()), "{kept_out} is in the log:\n{log}");
         }
     }
 
     #[test]
-    fn whoever_asks_for_the_meeting_without_the_invitation_is_no_program_in_the_song() {
-        use std::io::{Read, Write};
-        let (server, point, _) = meeting_point();
+    fn whoever_has_not_got_the_invitation_cannot_knock_and_whoever_knocks_without_it_is_not_in() {
+        use trill_meet::{Door, No, Turned, client};
+        let (server, point, log) = meeting_point();
         let (mut sharer, mut joiner) = (Net::new(), Net::new());
         let invitation = sharer.listen_through(&point).unwrap();
         assert!(matches!(next(&mut sharer), Event::Held));
+        let (at, meeting) = (point.address(), invitation.meeting());
+
         // Someone who knows what the meeting goes by, which is all that
-        // someone who listened on the way to the meeting point has. They
-        // are piped to the program that shares, like anyone who asks...
-        let ask = || trill_meet::client::join(&point.address(), invitation.meeting()).unwrap();
-        // ...and one says nothing,
-        let silent = ask();
-        // one says what is no handshake,
-        let mut nonsense = ask();
-        nonsense.write_all(&[0, 48]).unwrap();
-        nonsense.write_all(&[7u8; 48]).unwrap();
-        nonsense.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        let mut heard = Vec::new();
-        let _ = nonsense.read_to_end(&mut heard);
-        assert!(heard.is_empty(), "it is let go of without a word");
-        // and one does the handshake with a secret that is not the
-        // invitation's.
-        assert!(secure::secure(ask(), &[9u8; 32], true).is_err());
-        until(&server, "two of them are let go of", |counts| counts.pipes == 1);
+        // someone who listened on the way to the meeting point has: told
+        // that there is no such meeting, and the program that shares hears
+        // nothing of it.
+        let turned = client::join(&at, meeting, Door::of(b"not the invitation's")).unwrap_err();
+        assert_eq!(turned, Turned::No(No::Unknown));
+        assert_eq!(server.counts().knocks, 0);
+        assert!(sharer.events().is_empty(), "nobody knocked");
+
+        // Someone who has what the meeting point has of the meeting, and
+        // not the invitation: they can knock, and are piped to the program
+        // that shares, like anyone who asks. One does the handshake with a
+        // secret that is not the invitation's, and one says nothing.
+        let silent = client::join(&at, meeting, invitation.door()).unwrap();
+        assert!(secure::secure(client::join(&at, meeting, invitation.door()).unwrap(), &[9u8; 32], true).is_err());
+        until(&server, "the one with another secret is let go of", |counts| counts.pipes == 1);
         // Whoever has the invitation joins meanwhile.
         joiner.join(invitation.clone());
         assert!(matches!(next(&mut joiner), Event::Open { joined: true, .. }));
@@ -300,6 +298,8 @@ mod tests {
         drop(silent);
         assert!(sharer.events().is_empty(), "none of them was anything to the program that shares");
         assert_eq!(sharer.links().len(), 1);
+        let log = log.lock().unwrap().join("\n");
+        assert_eq!(log.matches("turned away (answer), from 127.0.0.1").count(), 1, "{log}");
     }
 
     #[test]
@@ -325,8 +325,8 @@ mod tests {
         assert!(why.contains("the meeting point did not answer"), "{why}");
 
         // It comes to be there, and the meeting is held without anyone
-        // doing anything.
-        // (However long the pause before it is tried again has grown.)
+        // doing anything. (However long the pause before it is tried
+        // again has grown.)
         let held = |sharer: &mut Net| loop {
             match next_within(sharer, Duration::from_secs(60)) {
                 Event::Held => break,

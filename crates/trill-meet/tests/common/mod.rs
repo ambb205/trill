@@ -1,5 +1,10 @@
 //! A meeting point on this machine for a test, on a port the system
 //! picks, with its log kept to be read.
+//!
+//! Every connection a test makes keeps one of the machine's ports for
+//! two minutes after it is closed, and the machine has some sixteen
+//! thousand: a test here makes the few connections it is about, each
+//! counted beside it, and none in a loop.
 
 #![allow(dead_code)]
 
@@ -9,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use trill_meet::keys::Given;
 use trill_meet::secure::{Hearer, Sayer, secure};
-use trill_meet::{Counts, Holding, Key, Keys, Limits, Meeting, Server, client};
+use trill_meet::{Counts, Door, Holding, Key, Keys, Limits, Meeting, Server, client};
 
 pub struct Point {
     pub server: Server,
@@ -39,6 +44,24 @@ pub fn quick() -> Limits {
     Limits { hello: Duration::from_secs(2), ..Limits::default() }
 }
 
+/// What an invitation's secret comes to at a meeting point: what its
+/// meeting goes by, and what whoever asks for it shows that they have.
+pub type Invited = (Meeting, Door);
+
+pub fn invited(secret: &[u8]) -> Invited {
+    (Meeting::of(secret), Door::of(secret))
+}
+
+/// Holds the meeting of an invitation open.
+pub fn hold(at: &str, key: &Key, (meeting, door): Invited) -> Result<Holding, trill_meet::Turned> {
+    Holding::open(at, key, meeting, door)
+}
+
+/// Asks for the meeting of an invitation, as someone who has it.
+pub fn ask(at: &str, (meeting, door): Invited) -> Result<TcpStream, trill_meet::Turned> {
+    client::join(at, meeting, door)
+}
+
 impl Point {
     /// The log so far, a line a line.
     pub fn log(&self) -> String {
@@ -46,7 +69,7 @@ impl Point {
     }
 
     /// Waits until the meeting point holds what `as_wanted` says, for a
-    /// few seconds.
+    /// while.
     pub fn until(&self, what: &str, as_wanted: impl Fn(Counts) -> bool) -> Counts {
         let end = Instant::now() + Duration::from_secs(20);
         loop {
@@ -71,16 +94,17 @@ impl Point {
     /// A connection that has said nothing yet.
     pub fn stranger(&self) -> TcpStream {
         let stream = TcpStream::connect(&self.address).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
         stream
     }
 
-    /// Someone who asks for `meeting` while its holder takes the knock
-    /// up: the two ends of the pipe that comes of it, the holder's first.
-    pub fn pipe(&self, holding: &mut Holding, meeting: Meeting) -> (TcpStream, TcpStream) {
+    /// Someone who asks for a meeting, with its invitation, while its
+    /// holder takes the knock up: the two ends of the pipe that comes of
+    /// it, the holder's first. (Two connections.)
+    pub fn pipe(&self, holding: &mut Holding, invited: Invited) -> (TcpStream, TcpStream) {
         let address = self.address.clone();
-        let joining = std::thread::spawn(move || client::join(&address, meeting));
-        let ticket = holding.next(Duration::from_secs(10)).unwrap().expect("someone knocked");
+        let joining = std::thread::spawn(move || ask(&address, invited));
+        let ticket = holding.next(Duration::from_secs(20)).unwrap().expect("someone knocked");
         let ours = client::take(&self.address, ticket).unwrap();
         let theirs = joining.join().unwrap().expect("and was let in");
         // (So that a test that waits for what never comes fails.)
@@ -115,6 +139,16 @@ pub fn heard_until_closed(mut stream: &TcpStream) -> (String, Duration) {
 /// Says a line to a connection.
 pub fn say(mut stream: &TcpStream, line: &str) {
     stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+}
+
+/// One line a connection says, without its end.
+pub fn heard_line(mut stream: &TcpStream) -> String {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+        line.push(byte[0]);
+    }
+    String::from_utf8(line).unwrap()
 }
 
 /// The two ends of a pipe, made secure by a secret both have, as two
