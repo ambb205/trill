@@ -60,6 +60,7 @@ pub mod jobs;
 mod listening;
 pub mod midi;
 mod missing;
+mod recording;
 mod recovery;
 mod settings;
 mod sounds;
@@ -295,6 +296,13 @@ impl Runtime {
             let journals = folder.join(JOURNALS_FOLDER);
             trill_engine::journal::prune(&journals);
             session.keep_journals_in(journals);
+            // And what is recorded for a song that has no place yet: in a
+            // folder of this run's own, until the song is saved and its
+            // recordings come beside it.
+            let run =
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+            let run = format!("{run} {}", std::process::id());
+            session.keep_unsaved_recordings_in(folder.join(recording::RECORDINGS_FOLDER).join(run));
         }
         session.set_journal_keeping(settings.current().journal.keep);
         let live = session.live();
@@ -403,7 +411,11 @@ impl Runtime {
     /// stream has changed even if the choice could not be written down.
     pub fn set_audio(&self, config: AudioConfig) -> (AudioStatus, Result<(), SaveError>) {
         self.session.lock().set_audio_config(config.clone());
-        let saved = self.update_settings(|settings| settings.audio = audio_settings(&config));
+        let saved = self.update_settings(|settings| {
+            // What was found out about pairs of devices stays.
+            let round_trips = std::mem::take(&mut settings.audio.round_trips);
+            settings.audio = AudioSettings { round_trips, ..audio_settings(&config) };
+        });
         (self.audio_status(), saved)
     }
 
@@ -609,6 +621,7 @@ fn audio_settings(config: &AudioConfig) -> AudioSettings {
         sample_rate: config.sample_rate,
         buffer_size: config.buffer_size,
         exclusive: config.exclusive,
+        round_trips: Vec::new(),
     }
 }
 

@@ -45,6 +45,9 @@ impl Housekeeper {
                 // live somewhere (saved, opened) is remembered among the
                 // songs Trill knows, whichever front end did it.
                 let mut lived: Option<std::path::PathBuf> = None;
+                // The audio streams as they were when the session was last
+                // given what is kept for its devices.
+                let mut audio_seen = u64::MAX;
                 loop {
                     {
                         let mut stopped = stopped.lock();
@@ -55,9 +58,16 @@ impl Housekeeper {
                             return;
                         }
                     }
+                    // What is kept of how long sound takes to go round the
+                    // devices, for whichever of them are open now.
+                    let round_trips = settings.lock().current().audio.round_trips.clone();
                     let lives = {
                         let mut session = session.lock();
                         session.housekeeping();
+                        if session.audio_revision() != audio_seen {
+                            crate::recording::apply_kept(&mut session, &round_trips);
+                            audio_seen = session.audio_revision();
+                        }
                         // What the user did in plugin windows since the
                         // last round: the project and every view follow.
                         session.absorb_editor_edits();

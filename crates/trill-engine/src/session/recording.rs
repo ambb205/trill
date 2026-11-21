@@ -269,6 +269,8 @@ pub(super) struct Audio {
     /// What ended a take early, until it has been said.
     notice: Option<String>,
     punch: bool,
+    /// How many songs this session has had before the one that is open.
+    songs: u32,
 }
 
 impl Audio {
@@ -704,6 +706,7 @@ impl Session {
     pub(super) fn abandon_audio_take(&mut self) {
         self.recording.take = None;
         self.recording.heard = None;
+        self.recording.songs += 1;
     }
 
     // ---- hearing a take in place ----------------------------------------
@@ -903,7 +906,11 @@ impl Session {
 
     fn unsaved_folder(&self) -> PathBuf {
         let unsaved = self.recording.unsaved.clone();
-        unsaved.unwrap_or_else(|| std::env::temp_dir().join("trill recordings").join(std::process::id().to_string()))
+        let base = unsaved
+            .unwrap_or_else(|| std::env::temp_dir().join("trill recordings").join(std::process::id().to_string()));
+        // Every song that has had no place yet has a folder of its own:
+        // what another left there is not this one's to list or delete.
+        base.join(format!("song {}", self.recording.songs + 1))
     }
 
     /// The recordings of an unsaved song that `project` or a state undo
