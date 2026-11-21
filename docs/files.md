@@ -27,6 +27,20 @@ is then the song without those files and not a quieter mix), and looks for the f
   song and its samples can be moved or sent whole. The table is an addition to the file, not a new format: a
   build that does not know it reads the song as before, and a file without one means what it always meant.
 
+**Recordings.** A take is a 32-bit float WAV file at the engine's sample rate, one channel for one input and two
+for a pair, one file for each track of each take with every pass of the loop in it (the takes are stretches of
+it). A saved song's recordings are in `<song> files\takes` beside it. An unsaved song's are in a folder of
+Trill's own (`recordings` beside the settings, a folder a run and a song) and **come beside the song when it is
+first saved**: they are copied there, the song and every state undo can reach name them where they are now, and
+only then are the first copies removed, so that a crash in the middle loses no audio and leaves nothing behind.
+A take's file is written as it is recorded and its header is brought up to date every second: a program that is
+killed in the middle of a take leaves a WAV file that reads, holding all but the last second or two, and the
+safety copy of the song plays it. Undoing a take leaves its file; letting go of a take leaves its file. **Trill
+never deletes a recording by itself.** `File`, `Unused recordings` (the `unused_recordings` tool) lists the ones
+nothing in the song plays and no undo or redo can bring back, with their sizes, and deletes them when that is
+asked for, in the window only after a second yes. A take's recording is one of the song's files like any other:
+listed when it is missing, looked for, and relinked.
+
 **When a song opens with files missing**, the clips and pads that lost their file are marked, the status bar
 says how many files are missing and how many were found, and a click on that line (or `File`, `Missing files`)
 opens the list: each file with where it is used and what was found for it. `Relink` takes everything that was

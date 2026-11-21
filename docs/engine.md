@@ -500,3 +500,86 @@ tenth, as files have it. Read, a track whose notes are all on one channel comes 
 only said which instrument a part was for. A track that uses several keeps them, curves too. (A file of the kind
 that holds every part in one track is taken apart by channel, a part a channel, as it always was.) So a part
 that is wholly on another channel than the first comes back from a file on the first.
+
+**Recording an input.** A track that says so records a channel, or a pair, of the audio device's input, and can be
+heard through its own devices meanwhile. The ordinary case is two devices: a microphone on one and headphones on
+another, each counting time by a clock of its own. So the input is brought into the engine's clock before
+anything uses it.
+
+*Handing it across.* The input's own thread does one thing: it puts the samples it is given into a ring, with
+the moment the first of them was heard. It allocates nothing and takes no lock; it is an audio thread like the
+others. The engine's callback takes exactly a block of input for each block it makes, once, before any track is
+made, so that every track on every thread reads the same frames.
+
+*Two clocks.* Each device's time stamps are a line: this frame, at this moment. The lines are fitted over the
+last twenty seconds, and of the stamps only the least late of each quarter of a second is believed, because a
+stamp says when a buffer was handed over and that is late or right, never early (the capture stamps of the
+cable below were up to 9 ms late and never one frame early). The input is read at the ratio of the two lines,
+through a windowed-sinc filter of 512 phases, at a constant delay behind what the engine is making: the input's
+own latency, its buffer, the engine's buffer and a margin. An input of the device that is played through shares
+its clock and is held to the exact ratio. Frames that did not arrive, or found no room on their way to disk, are
+silence of their length, never a shift, and are counted and said.
+
+*Where a take lands.* Where it was heard: the frame of the file that was sung to the song's first frame is the
+frame the engine read as it made that frame, later by the hand-over's delay and by the time the song takes to
+reach the speaker. The second is what the output says of itself, or, once the round trip was measured, what the
+measurement found in its place. A measurement plays a second of noise between 300 Hz and 6 kHz at a tenth of
+full scale and finds it in what comes back by correlation, to a fraction of a frame; the result is offered and
+kept for the pair of devices as they were opened.
+
+*Monitoring* is the same samples, added to the track where its clips come in, behind a gate that opens and
+shuts over a fixed number of frames. While a take is recorded on a track, what the track has under it is not
+heard.
+
+*What it is held to*, by the default tests, on scripted devices whose clocks are exact
+(`trill-engine/tests/recording.rs`, `takes.rs`, `realtime.rs`, the capture layer's own tests):
+
+| | Held to | Measured |
+|---|---|---|
+| A click heard with frame F of the song lands on F | within one frame, shared and exclusive at 64, 128, 256, 512 and 1024 frames; after a count-in; from the middle of the song | within one frame at all six |
+| The input's clock 200 parts in a million fast, for thirty minutes | every click within 0.5 ms; a recorded sine never a cent off after two seconds | clicks within 0.045 ms (0.020 ms after three seconds); 0.018 cents |
+| The same, slow | the same | 0.068 ms (0.027 ms); 0.025 cents |
+| A 1 kHz sine through the hand-over, at equal clocks, 200 parts in a million either way, and 44.1 kHz into 48 kHz | nothing that is not the sine less than 100 dB under it | held at all four |
+| Its response | flat within 0.1 dB to 20 kHz | at 44.1, 48 and 96 kHz |
+| An input that is heard, against the delay Trill says (60.521 ms on those devices) | within a millisecond while the clocks drift | 0.000 ms at equal clocks, 0.022 ms fast, 0.031 ms slow |
+| A song with inputs that are heard, on one thread and on several | the same samples, to the bit | on one, two and four |
+| Recording and monitoring | no allocation and no lock on the input's thread, the callback or the team's threads | none |
+| The seam of a comp between two takes of unrelated noise | level steady within 1 dB, and no step between two tones | within 0.35 dB; no step |
+| Every pass of a loop, through a change of tempo | its clip begins on the loop's first frame | 0.000 frames |
+| Eight inputs recorded and heard, at 128 frames | under 8 % of a buffer's time | 1.04 % (27.8 µs a buffer; the song without them 0.16 %) |
+| A round trip longer than the devices say (430 frames) | found by the measurement, then taken off | 8.958 ms more than said; then 0.00 frames |
+
+*Through a cable* (`tests/cable.rs`, opt-in: 'Line 1' of a virtual audio cable, out and in, on a machine that
+other work kept busy). Its two ends are one device with one clock, so this proves the path through the system's
+own devices and their time stamps, and not two clocks:
+
+| | Shared, 480 frames | Exclusive at both ends, 256 frames |
+|---|---|---|
+| A click by what the devices say of themselves | 340 to 350 frames late | 189 to 191 frames early |
+| The round trip, measured three times | 58.910, 58.861, 58.849 ms | 24.854, 24.856, 24.861 ms |
+| A click once that was taken | 0.5 to 1.7 frames from its place | 0.60 to 0.64 frames |
+| What was recorded less what was played | 24.3 dB under it | 24.4 dB under it |
+| How far the input's clock was read from the output's | 2.3 parts in a million | 1.7 |
+
+A take of ten minutes, shared, with the round trip measured first and every processor of the machine taken by
+other work: 598.01 s recorded with no frame silent; the first click 1.30 frames from its place, the last 0.85,
+the worst of the sixty 4.76 frames (a tenth of a millisecond); the two ends read 0.0 parts in a million apart.
+
+So what devices say of themselves was wrong by 7 ms one way and 4 ms the other on one machine, which is why the
+measurement is there and why the window says, until it has run, that the figure is the devices' own. The cable
+by itself, without the engine, wandered by 0.0 frames in twenty seconds.
+
+*Two real clocks have not been measured.* The only second device on the machine this was built on is its
+owner's microphone, which hears a room and was not opened. The engine's own tests are of clocks that differ by
+200 parts in a million, which is more than hardware does; the first take through a microphone on one device and
+headphones on another is the measurement that is still owed, and the Input page says what it finds: the drift it
+reads, and the round trip once `Measure` has run.
+
+*What a heard input costs a song that plays*, on the song of sixteen tracks above (`keeps_up --monitor 1`: a
+track that hears the stand-in's input always, handed over by a thread of its own), with every processor of the
+machine taken by other work, in plays of a minute taken turn about: 43.3 % and 41.6 % of a buffer's time on
+average without the input (2 and 5 of 6,000 buffers late), 42.1 % and 41.7 % with it (none and 1 late); the
+input's own track cost under 0.05 % of a processor and its longest block 0.09 ms. The whole song under the same
+load: 46.4 % and 11 of 19,294 buffers late without, 50.9 % and 90 late with, in a play during which the machine
+let 274 ms pass between two of the device's buffers (224 ms in one of the plays without an input): the late
+buffers are the machine's, and the input adds nothing that can be told from one play to the next.

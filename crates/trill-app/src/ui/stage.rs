@@ -358,11 +358,33 @@ impl StageView {
             ),
         }
         self.hint(ui, rect, started);
+        self.input_live(ui, rect, live);
         // The picture moves with the song, and its light fades after it.
         if live.playing || live.meters_moving() {
             ctx.request_repaint();
         }
         self.costs.add(started, live.playing, card);
+    }
+
+    /// That an input is open, for as long as it is: the stage hides the
+    /// status bar, and a microphone that is open hears the room whatever
+    /// the window shows.
+    fn input_live(&self, ui: &Ui, rect: Rect, live: &Live) {
+        let Some(open) = &live.input.open else { return };
+        let theme = &self.theme;
+        let style = theme.text.micro;
+        let words = format!("Input live \u{00B7} {}", open.device);
+        let painter = ui.painter();
+        let width = text::width(painter, style, &words) + 34.0;
+        let plate = Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + 14.0), vec2(width, 24.0));
+        painter.rect_filled(plate, 0.0, fade(theme.panel, 0.92));
+        trill_noir::paint::frame(painter, plate, theme.hairline);
+        let dot = pos2(plate.left() + 10.0, plate.center().y);
+        let text_from = trill_noir::paint::dot(painter, dot, theme.metric.dot, theme.signal) + 5.0;
+        let room = Rect::from_min_max(pos2(text_from, plate.top()), plate.max);
+        text::paint(painter, room, Align2::LEFT_CENTER, style, &words, theme.signal);
+        let response = ui.interact(plate, ui.scope_id().with("stage-input-live"), egui::Sense::hover());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &words));
     }
 
     /// The words that say how to leave, for a moment after the stage is

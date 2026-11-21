@@ -155,6 +155,28 @@ fn a_track_is_given_an_input_from_its_menu_and_arming_it_opens_the_input() {
 }
 
 #[test]
+fn the_stage_says_that_an_input_is_live_too() {
+    let (mut harness, stage, voice, _folder) = studio();
+    harness.session.lock().edit(|project| project.set_track_input(voice, Some(TrackInput::mono(1)))).unwrap();
+    harness.idle(2);
+    harness.click_label("Arm Voice");
+    stage.run(&mut harness, 4_800);
+    harness.idle(2);
+    assert!(harness.is_on_screen("Input live \u{00B7} Microphone"));
+    // The stage takes the status bar away, and not the words.
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.idle(3);
+    assert!(harness.app.state().stage_open);
+    assert!(harness.is_on_screen("Input live \u{00B7} Microphone"), "{:?}", harness.labels);
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.session.lock().set_armed(voice, false).unwrap();
+    stage.run(&mut harness, 4_800);
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.idle(3);
+    assert!(!harness.is_on_screen("Input live"), "nothing is said of an input that is closed");
+}
+
+#[test]
 fn a_take_grows_on_its_track_and_its_passes_unfold_as_lanes_to_choose_from() {
     let (mut harness, stage, voice, _folder) = studio();
     harness

@@ -38,6 +38,7 @@ TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to 
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
 cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency
 cargo test -p trill-runtime --test machine -- --include-ignored --nocapture    # lists and opens this machine's MIDI inputs
+cargo test -p trill-engine --test cable -- --ignored --nocapture --test-threads 1    # records what it plays through a virtual audio cable ('Line 1 (Virtual Audio Cable)', out and in; TRILL_CABLE names another pair): where a take lands before and after the round trip is measured, shared and exclusive, a ten-minute take's first click and last, and what is left of what was played when it is taken from what was recorded. Plays nothing while another program records from the cable, and opens no other input: never a microphone
 cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignored --nocapture    # what keeping the journal costs an edit on a large project (a measurement; run it alone)
 cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card makes of the stage, and a film as a file (a graphics card; two of them ffmpeg)
 cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
@@ -53,7 +54,9 @@ cargo run -p trill-runtime --example keeps_up -- SONG.trill    # whether the mac
 ```
 
 Run the `trill-plugins` ones after touching plugin hosting, the `trill-media` one after touching audio decoding,
-and the two `machine` ones after touching the audio device or MIDI port code. Run `keeps_up` on a song with plugins
+and the two `machine` ones after touching the audio device or MIDI port code. Run the `cable` one after touching how an
+input is opened, read or placed, on a machine that has a virtual audio cable: it opens no other input, and never a
+microphone. Run `keeps_up` on a song with plugins
 after touching what an audio thread runs or how a block is handed from one thread to another, and hold what it prints
 beside the numbers in [the engine's page](engine.md): that a real song is played in time is checked there and nowhere
 else. Everything else about devices is tested without any: the engine plays through a

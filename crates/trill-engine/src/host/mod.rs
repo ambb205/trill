@@ -286,7 +286,12 @@ pub struct NullHost {
     sample_rate: u32,
     block_frames: usize,
     audio_priority: bool,
+    /// How many channels its input has; none unless it was given one.
+    input_channels: u16,
 }
+
+/// The name [`NullHost`]'s input reports as its device.
+pub(crate) const NULL_INPUT: &str = "stand-in input";
 
 /// The name [`NullHost`]'s stream reports as its device.
 pub(crate) const NULL_DEVICE: &str = "none";
@@ -297,7 +302,19 @@ const NULL_CATCH_UP: Duration = Duration::from_millis(100);
 
 impl NullHost {
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate: sample_rate.max(1), block_frames: NULL_BLOCK_FRAMES, audio_priority: false }
+        Self {
+            sample_rate: sample_rate.max(1),
+            block_frames: NULL_BLOCK_FRAMES,
+            audio_priority: false,
+            input_channels: 0,
+        }
+    }
+
+    /// The same host with an input of `channels` channels that hears a
+    /// quiet tone, handed over by a thread of its own as a device's is:
+    /// for measuring what an input costs a song without a microphone.
+    pub fn with_input(self, channels: u16) -> Self {
+        Self { input_channels: channels.clamp(1, crate::capture::MAX_INPUT_CHANNELS as u16), ..self }
     }
 
     /// A host that asks for `block_frames` frames at a time where nothing
@@ -306,7 +323,12 @@ impl NullHost {
     /// device's does. For measuring whether a song is played in time
     /// without a device to play it on.
     pub fn like_a_device(sample_rate: u32, block_frames: usize) -> Self {
-        Self { sample_rate: sample_rate.max(1), block_frames: block_frames.clamp(16, 8192), audio_priority: true }
+        Self {
+            sample_rate: sample_rate.max(1),
+            block_frames: block_frames.clamp(16, 8192),
+            audio_priority: true,
+            input_channels: 0,
+        }
     }
 }
 
@@ -358,6 +380,56 @@ impl AudioHost for NullHost {
             exclusive: false,
         };
         Ok(OpenStream { format, handle: Box::new(NullStream { quit, thread: Some(thread) }) })
+    }
+
+    fn open_input(&self, _request: &InputRequest, _on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+        if self.input_channels == 0 {
+            return Err(OpenError::NoInput);
+        }
+        let (sample_rate, block_frames, channels) = (self.sample_rate, self.block_frames, self.input_channels);
+        let audio_priority = self.audio_priority;
+        let (mut sink, link) = crate::capture::link(f64::from(sample_rate), usize::from(channels));
+        let quit = Arc::new(AtomicBool::new(false));
+        let stop = quit.clone();
+        let thread = std::thread::Builder::new()
+            .name("audio-null-input".into())
+            .spawn(move || {
+                if audio_priority {
+                    priority::AudioPriority::raise_for_good();
+                }
+                let period = Duration::from_secs_f64(block_frames as f64 / f64::from(sample_rate));
+                let period_ns = period.as_nanos() as u64;
+                // A tone a tenth of full scale: something to add up, and
+                // nothing anyone hears.
+                let step = std::f64::consts::TAU * 220.0 / f64::from(sample_rate);
+                let (mut next, mut handed) = (Instant::now(), 0u64);
+                while !stop.load(Ordering::Relaxed) {
+                    let from = handed;
+                    // The first frame of a buffer was heard a buffer ago.
+                    sink.push(now_ns().saturating_sub(period_ns), block_frames, |frame, _| {
+                        (0.1 * ((from + frame as u64) as f64 * step).sin()) as f32
+                    });
+                    handed += block_frames as u64;
+                    next += period;
+                    let now = Instant::now();
+                    if next > now {
+                        std::thread::sleep(next - now);
+                    } else if now - next > NULL_CATCH_UP {
+                        next = now;
+                    }
+                }
+            })
+            .map_err(|error| OpenError::Failed(format!("cannot start a thread: {error}")))?;
+        let format = InputFormat {
+            device: NULL_INPUT.into(),
+            sample_rate,
+            channels,
+            buffer_frames: block_frames as u32,
+            latency_frames: 0,
+            exclusive: false,
+            shares_clock: false,
+        };
+        Ok(OpenInput { format, handle: Box::new(NullStream { quit, thread: Some(thread) }), link })
     }
 }
 

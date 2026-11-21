@@ -8,7 +8,16 @@ Only Windows has been run so far.
 ## Arrangement and engine
 
 - A session (clip-launching) view.
-- Audio recording. MIDI is recorded; audio is not.
+- Recording from more than one input device at once. A song records one input device, with all its channels,
+  beside the output it plays through; the two may be different devices on different clocks.
+- An input and an output on two real clocks, measured. The engine follows the two clocks and its tests hold it
+  to a click within half a millisecond over half an hour at 200 parts in a million; on hardware it has been run
+  through a virtual cable only, whose two ends share one clock. See [the engine's page](engine.md).
+- Takes of notes. A take of what a keyboard plays is written into the track's clip, each pass of a loop layered
+  onto the last, as before; lanes of takes and a comp are for audio.
+- A crossfade at a comp's seam is 12 ms and equal in power; its length and shape cannot be chosen.
+- Monitoring that makes up for a plugin's own delay: an input heard through an effect that looks ahead is heard
+  that much later than the switch says.
 - Polyphonic aftertouch and MPE (per-note expression). A note has a MIDI channel and a clip a curve for each
   controller on each channel, which is what an instrument that gives its channels meanings needs (an organ's
   pedalboard, a guitar with a string to a channel); expression that belongs to one note among others of its
