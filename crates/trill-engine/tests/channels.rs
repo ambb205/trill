@@ -34,7 +34,7 @@ fn note(pitch: u8, start: f64, length: f64) -> Note {
 }
 
 fn held(beat: f64, value: f64) -> AutomationPoint {
-    AutomationPoint { beat, value, shape: Segment::Hold }
+    AutomationPoint { beat, value, shape: Segment::Hold, id: 0 }
 }
 
 /// A probe's track with one clip of sixteen beats.

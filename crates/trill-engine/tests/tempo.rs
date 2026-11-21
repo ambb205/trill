@@ -399,7 +399,7 @@ fn an_envelope_and_a_loop_of_notes_follow_the_beats_through_a_change() {
         .unwrap()
         .add_notes(&[Note { pitch: 69, start: 0.0, length: 8.0, velocity: 100, ..Default::default() }])
         .unwrap();
-    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold, id: 0 };
     let volume = AutomationTarget::TrackVolume { track };
     project.set_automation(volume, vec![held(0.0, -70.0), held(6.0, 0.0)]).unwrap();
     let out = render(&project, &BuiltinFactory, &options()).unwrap();

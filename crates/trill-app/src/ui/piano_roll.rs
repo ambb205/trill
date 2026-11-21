@@ -1452,6 +1452,7 @@ fn grid_interaction(
                     length: cx.state.piano.note_length,
                     velocity: cx.state.piano.note_velocity,
                     channel: cx.state.piano.channel,
+                    id: 0,
                 };
                 if swap_notes(cx, clip.id, &[], &[note]) {
                     cx.state.selected_notes = vec![note];

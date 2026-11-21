@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn a_marker_is_grabbed_by_its_flag_and_its_name() {
         let g = geometry();
-        let marker = Marker { beat: 12.0, name: "Chorus".into() };
+        let marker = Marker { beat: 12.0, name: "Chorus".into(), id: 0 };
         let rect = marker_rect(&g, &marker, 40.0);
         assert_eq!(rect.left(), g.x(12.0));
         assert_eq!((rect.top(), rect.height()), (g.ruler.top() + LOOP_STRIP, MARKER_STRIP));

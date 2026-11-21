@@ -232,7 +232,8 @@ impl Session {
             table.push(KnownFile { path: file.path, beside, ..facts });
         }
         let table = FileTable::new(table);
-        let text = files::write(&self.project, &table);
+        // A song others hold too is written with what is held beside it.
+        let text = files::write_shared(&self.project, &table, self.kept().as_ref());
         self.files = table;
         text
     }

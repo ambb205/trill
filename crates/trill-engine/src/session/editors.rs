@@ -10,6 +10,7 @@
 
 use super::{Session, SessionError};
 use trill_core::device::{EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind};
+use trill_core::merge::Op;
 use trill_core::{DeviceId, EditError};
 
 impl Session {
@@ -37,6 +38,13 @@ impl Session {
             Some(controller) => controller.lock().open_editor(options),
             None => Err(EditorError::NoEditor),
         };
+        drop(_held);
+        if opened.is_ok() {
+            // What is done in the window is this program's doing: the
+            // state the plugin comes to is news to whoever else has the
+            // song.
+            self.watch(id);
+        }
         opened.map_err(|error| SessionError::Device(format!("{id}: {error}")))
     }
 
@@ -83,15 +91,18 @@ impl Session {
     /// value follows the edit.
     ///
     /// Like plugin state, this is bookkeeping and not an edit of the
-    /// project: it creates no undo step, and the history is corrected
-    /// along with the present, or undoing something unrelated would turn
-    /// the knob back.
+    /// project: it creates no undo step, and the steps that had set the
+    /// value last follow it, or undoing something unrelated would turn
+    /// the knob back. It is a change to the song all the same, and whoever
+    /// else has the song hears of it.
     ///
     /// The edits are returned in the order each device made them, with
     /// the start and end of each gesture, for whoever records automation.
     pub fn absorb_editor_edits(&mut self) -> Vec<(DeviceId, ParamEdit)> {
         let mut absorbed = Vec::new();
         let mut followed = Vec::new();
+        // What the stored values come to: the last of each.
+        let mut set: Vec<(DeviceId, String, f64)> = Vec::new();
         for (id, meta) in &self.bank.devices {
             let Some(controller) = &meta.controller else { continue };
             for edit in controller.lock().take_param_edits() {
@@ -103,19 +114,23 @@ impl Session {
                 else {
                     continue;
                 };
-                let stale = std::mem::replace(held, value);
+                *held = value;
                 if !followed.contains(id) {
                     followed.push(*id);
                 }
-                for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-                    if let Some(old) =
-                        step.project.device_mut(*id).ok().and_then(|device| device.params.get_mut(&info.id))
-                        && *old == stale
-                    {
-                        *old = value;
-                    }
-                }
+                set.retain(|(device, name, _)| (device, name) != (id, &info.id));
+                set.push((*id, info.id.clone(), value));
             }
+        }
+        if !set.is_empty() {
+            let ops = set.into_iter().map(|(device, name, value)| Op::Param(device, name, Some(value))).collect();
+            self.write_quietly(ops);
+        }
+        // A plugin that was worked in here has a state that is news.
+        let mut worked_in: Vec<DeviceId> = absorbed.iter().map(|(id, _)| *id).collect();
+        worked_in.dedup();
+        for id in worked_in {
+            self.watch(id);
         }
         // A knob turned in an editor changes what saving would write,
         // whether or not the project stores that parameter.

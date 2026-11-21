@@ -1281,7 +1281,7 @@ impl SongKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default = "format_version_default")]
     pub format_version: u32,
@@ -1312,6 +1312,41 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
     pub(crate) next_id: u64,
+}
+
+impl PartialEq for Project {
+    /// The same song. The number the next thing in it will be given is no
+    /// part of that: it only ever goes up, also when a step is taken
+    /// back, so that an id is never given twice.
+    fn eq(&self, other: &Self) -> bool {
+        let Project {
+            format_version,
+            name,
+            tempo,
+            time_signature,
+            key,
+            tempo_changes,
+            meter_changes,
+            loop_region,
+            tracks,
+            master,
+            automation,
+            markers,
+            next_id: _,
+        } = self;
+        *format_version == other.format_version
+            && *name == other.name
+            && *tempo == other.tempo
+            && *time_signature == other.time_signature
+            && *key == other.key
+            && *tempo_changes == other.tempo_changes
+            && *meter_changes == other.meter_changes
+            && *loop_region == other.loop_region
+            && *tracks == other.tracks
+            && *master == other.master
+            && *automation == other.automation
+            && *markers == other.markers
+    }
 }
 
 fn format_version_default() -> u32 {

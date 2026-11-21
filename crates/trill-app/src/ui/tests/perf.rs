@@ -94,7 +94,7 @@ fn heavy(session: &mut Session) -> Vec<AutomationTarget> {
                     let target = AutomationTarget::TrackVolume { track: id };
                     let points = (0..2000).map(|n| {
                         let shape = if n % 3 == 0 { Segment::Curve(0.4) } else { Segment::Linear };
-                        AutomationPoint { beat: n as f64 * 0.12, value: -30.0 + ((n * 37) % 300) as f64 / 10.0, shape }
+                        AutomationPoint { beat: n as f64 * 0.12, value: -30.0 + ((n * 37) % 300) as f64 / 10.0, shape, id: 0 }
                     });
                     project.set_automation(target.clone(), points.collect())?;
                     targets.push(target);

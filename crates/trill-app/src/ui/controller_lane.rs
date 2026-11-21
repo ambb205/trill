@@ -535,7 +535,7 @@ fn interact(
                     None => map.value(pointer.y),
                 };
                 let shape = if map.scale.stepped() { Segment::Hold } else { Segment::Linear };
-                let point = AutomationPoint { beat, value, shape };
+                let point = AutomationPoint { beat, value, shape, id: 0 };
                 if swap(cx, clip, kind, &[], &[point]) {
                     cx.state.piano.lane_points = vec![point];
                 }
@@ -693,7 +693,7 @@ fn context_menu(
         let line = envelopes::segment_at(points, map, pointer).map(|ends| ends[0]);
         let shape = if map.scale.stepped() { Segment::Hold } else { Segment::Linear };
         let place =
-            AutomationPoint { beat: frame.snapped(map.beat(pointer.x), false), value: map.value(pointer.y), shape };
+            AutomationPoint { beat: frame.snapped(map.beat(pointer.x), false), value: map.value(pointer.y), shape, id: 0 };
         // What was right-clicked is selected, so the menu's subject shows.
         if let Some(point) = point
             && !cx.state.piano.lane_points.contains(&point)

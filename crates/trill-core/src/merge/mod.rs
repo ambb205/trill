@@ -64,14 +64,16 @@ mod check;
 mod derive;
 mod diff;
 mod doc;
+#[doc(hidden)]
+pub mod lot;
 mod props;
 #[cfg(test)]
 mod tests;
 
 pub use check::{MAX_OPS, MAX_STATE_BYTES, MAX_TEXT, Refused};
-pub use derive::{Aside, Derived};
+pub use derive::{Aside, Derived, Why};
 pub use diff::diff;
-pub use doc::{Doc, Kept, Won};
+pub use doc::{Doc, Kept, Taken, Won};
 pub use props::{
     AudioSet, Blob, ClipSet, DeviceSet, FIRST_AUDIO, FIRST_MIDI, FIRST_SET, LaneSet, MarkerSet, MidiSet, NoteSet,
     PointSet, SongSet, TrackSet,
@@ -420,6 +422,16 @@ impl Op {
 pub struct Change {
     pub stamp: Stamp,
     pub ops: Vec<Op>,
+}
+
+/// A change as one program says it to another: with how much of everyone's
+/// its maker held when it was made, which is what tells a change that was
+/// made knowing of another from one made at the same moment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Said {
+    pub change: Change,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knew: Option<Floors>,
 }
 
 /// How much of what each program did another has: for each program by its

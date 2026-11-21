@@ -66,6 +66,7 @@ mod sounds;
 pub mod study_files;
 mod studying;
 pub mod taking;
+pub mod together;
 
 pub use instruments::{Arrived, Ask, INSTRUMENTS, SETS_FOLDER, fetch_list, part_of};
 pub use jobs::{Jobs, Program};
@@ -76,6 +77,8 @@ pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
 pub use studying::{MODELS_FOLDER, STUDIES_FOLDER, Studied, Studying};
+pub use together::{Here, Mine, Together};
+pub use trill_together::{Person, Reach};
 
 use housekeeping::Housekeeper;
 use midi::{MidiBackend, MidiInputs, SystemMidi};
@@ -194,6 +197,9 @@ pub struct Runtime {
     // last reference.
     _housekeeper: Housekeeper,
     midi: Option<MidiInputs>,
+    /// What connects the session to the programs of other people who
+    /// have the song: its thread holds the session too, and ends first.
+    sharing: together::Sharing,
     /// The one open project and the engine playing it.
     pub session: SharedSession,
     /// The cache every audio file is read through.
@@ -329,9 +335,11 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
+        let sharing = together::Sharing::new(session.clone(), settings.lock().current().together.name.clone());
         let runtime = Self {
             _housekeeper: housekeeper,
             midi,
+            sharing,
             session,
             media,
             library,

@@ -803,7 +803,7 @@ mod tests {
     }
 
     fn held(beat: f64, value: f64) -> AutomationPoint {
-        AutomationPoint { beat, value, shape: trill_core::Segment::Hold }
+        AutomationPoint { beat, value, shape: trill_core::Segment::Hold, id: 0 }
     }
 
     /// The one clip's curve for `kind`, as its points.

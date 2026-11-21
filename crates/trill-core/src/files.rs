@@ -523,6 +523,15 @@ impl FileTable {
 /// The text of a project file: `project`, and what is known of its files.
 /// A project file without a table is exactly [`Project::to_json`].
 pub fn write(project: &Project, files: &FileTable) -> String {
+    write_shared(project, files, None)
+}
+
+/// [`write`], for a song that other programs hold too: with what is held
+/// beside the song ([`Kept`](crate::merge::Kept)), which is what lets it
+/// be closed, worked on alone and merged with the others' again. Like the
+/// table of files it is beside the song and no part of it: a program that
+/// knows nothing of it reads the song.
+pub fn write_shared(project: &Project, files: &FileTable, shared: Option<&crate::merge::Kept>) -> String {
     fn none(files: &&[KnownFile]) -> bool {
         files.is_empty()
     }
@@ -532,9 +541,28 @@ pub fn write(project: &Project, files: &FileTable) -> String {
         project: &'a Project,
         #[serde(skip_serializing_if = "none")]
         files: &'a [KnownFile],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shared: Option<&'a crate::merge::Kept>,
     }
-    serde_json::to_string_pretty(&WithFiles { project, files: files.files() })
+    serde_json::to_string_pretty(&WithFiles { project, files: files.files(), shared })
         .expect("project model is always serializable")
+}
+
+/// What a project file of a shared song holds beside the song, if it is
+/// one. A file whose section makes no sense is refused in words: opened
+/// as a song of one's own it would no longer merge with the others'.
+pub fn read_shared(json: &str) -> Result<Option<crate::merge::Kept>, EditError> {
+    #[derive(Deserialize)]
+    struct Shared {
+        #[serde(default)]
+        shared: Option<crate::merge::Kept>,
+    }
+    match serde_json::from_str::<Shared>(json) {
+        Ok(read) => Ok(read.shared),
+        Err(error) => Err(EditError::Invalid(format!(
+            "what this file keeps of the song it shares with others cannot be read: {error}"
+        ))),
+    }
 }
 
 /// Reads a project file: the song as [`Project::from_json`] reads it, and

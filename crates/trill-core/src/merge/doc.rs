@@ -9,7 +9,7 @@ use super::{
 use crate::channel::Channel;
 use crate::controllers::{ControllerCurve, ControllerKind};
 use crate::project::{
-    AutomationPoint, AutomationTarget, ChainRef, Clip, ClipContent, Device, FORMAT_VERSION, LoopRegion, Marker,
+    AutomationPoint, AutomationTarget, ChainRef, Clip, ClipContent, Device, FORMAT_VERSION, Marker,
     Master, MidiContent, Note, Project, Reference, Track,
 };
 use crate::time::TimeSignature;
@@ -80,10 +80,34 @@ impl Default for LaneHeld {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Won {
     pub op: Op,
+    /// When the change it is a part of was made.
+    pub stamp: Stamp,
     /// The same property as it was, for a part that sets one.
     pub was: Option<Op>,
     /// When it had last been set.
     pub was_stamp: Stamp,
+}
+
+/// What taking a change in did.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Taken {
+    /// The parts that set something. Among them may be parts of earlier
+    /// changes that waited for a thing this one made: each says when its
+    /// own change was made.
+    pub won: Vec<Won>,
+    /// The parts of this change that are held until the thing they are
+    /// about is known: news to whoever has not heard them, like the parts
+    /// that set something.
+    pub waiting: Vec<Op>,
+}
+
+impl Taken {
+    /// Whether the change was news here: something of it was set or is
+    /// held. One that was heard before, or that later changes had already
+    /// had their way over, is not.
+    pub fn is_news(&self) -> bool {
+        !self.won.is_empty() || !self.waiting.is_empty()
+    }
 }
 
 /// What a shared song remembers beside the song itself: what a project
@@ -110,6 +134,24 @@ pub struct Kept {
     /// Changes to things that are not known yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orphans: Vec<(Stamp, Op)>,
+}
+
+impl Kept {
+    /// What is kept, as it is handed to another program: without what is
+    /// one's own listening.
+    pub fn impersonal(mut self) -> Kept {
+        for (_, keys) in &mut self.stamps {
+            keys.retain(|key| !key.is_personal());
+        }
+        self.stamps.retain(|(_, keys)| !keys.is_empty());
+        for op in &mut self.hidden {
+            if let Op::Track(_, TrackOp::Whole(track, _)) = op {
+                **track = impersonal((**track).clone());
+            }
+        }
+        self.hidden.retain(|op| !op.is_personal());
+        self
+    }
 }
 
 /// A song as every program that holds it holds it: see the
@@ -527,9 +569,11 @@ impl Doc {
     /// had already had its way over is not among them. The same changes
     /// leave the same properties in whatever order and however often they
     /// are taken in.
-    pub fn apply(&mut self, change: &Change) -> Vec<Won> {
+    pub fn apply(&mut self, change: &Change) -> Taken {
         let stamp = change.stamp;
         self.clock = self.clock.max(stamp.0);
+        let waited: Vec<Op> =
+            self.orphans.iter().filter(|(held, _)| *held == stamp).map(|(_, op)| op.clone()).collect();
         let mut won = Vec::new();
         let mut made = false;
         for op in &change.ops {
@@ -548,7 +592,11 @@ impl Doc {
             made = self.orphans.len() < before;
         }
         self.tidy_lanes();
-        won
+        let waiting = (self.orphans.iter())
+            .filter(|(held, op)| *held == stamp && !waited.contains(op))
+            .map(|(_, op)| op.clone())
+            .collect();
+        Taken { won, waiting }
     }
 
     /// An envelope that has nothing held in it and is as one that was
@@ -587,7 +635,7 @@ impl Doc {
         let was = self.read(&key);
         put(self, op.clone());
         self.stamps.insert(key, stamp);
-        won.push(Won { op, was, was_stamp });
+        won.push(Won { op, stamp, was, was_stamp });
     }
 
     /// [`Doc::outranks`], for what a thing is for good: said when it is
@@ -930,7 +978,7 @@ impl Doc {
                 1 => absent.pop(),
                 _ => None,
             };
-            won.push(Won { op, was, was_stamp: Stamp::ZERO });
+            won.push(Won { op, stamp, was, was_stamp: Stamp::ZERO });
         }
     }
 
@@ -1255,11 +1303,6 @@ pub(super) fn impersonal(mut track: Track) -> Track {
         reference.listening = false;
     }
     track
-}
-
-/// The loop a program that has not set one has.
-pub(super) fn no_loop() -> LoopRegion {
-    LoopRegion { enabled: false, start: 0.0, end: 16.0 }
 }
 
 fn points_since(

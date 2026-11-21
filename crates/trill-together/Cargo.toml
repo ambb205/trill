@@ -1,0 +1,30 @@
+[package]
+name = "trill-together"
+description = "The wire between programs that hold the same song: invitations, encrypted connections and what is said over them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+trill-core.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The Noise protocol: who may connect is proved, and what is said is
+# encrypted and authenticated, by a library that does that and nothing
+# else. No cipher is written here. Only the pieces one handshake needs
+# are built: X25519, ChaCha20-Poly1305 and BLAKE2 (Apache-2.0 or MIT).
+snow = { version = "0.10", default-features = false, features = [
+    "std",
+    "use-chacha20poly1305",
+    "use-blake2",
+    "use-curve25519",
+    "use-getrandom",
+] }
+# The secret of an invitation, from the system's own source. In the tree
+# already, through snow and others.
+getrandom = "0.3"
+# The key an invitation's secret comes to. In the tree already, through
+# trill-fetch.
+sha2 = "0.11"
