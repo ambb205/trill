@@ -319,7 +319,7 @@ fn name_field(ui: &mut Ui, cx: &mut Cx) {
     let label = rect.with_max_x(rect.left() + 110.0);
     text::paint(ui.painter(), label, Align2::LEFT_CENTER, theme.text.micro, "Your name", theme.ink_faint);
     let field = rect.with_min_x(label.right()).with_max_x(label.right() + 220.0);
-    let id = egui::Id::new("together-name");
+    let id = egui::Id::unique("together-name");
     let response = trill_noir::text_field(ui, theme, field, id, &mut cx.state.together.name, "What the others see");
     if response.changed() || response.lost_focus() {
         let name = cx.state.together.name.trim().to_owned();
@@ -429,8 +429,8 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
             let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.chip), Sense::hover());
             let labels = ["This computer only", "My network"];
             let at = usize::from(cx.state.together.network);
-            let id = ui.id().with("reach");
-            if let (Some(chosen), _) = trill_noir::chip_row(ui, theme, rect.min, WIDTH, id, &labels, Some(at)) {
+            let id = ui.scope_id().with("reach");
+            if let (Some(chosen), _) = trill_noir::chip_row(ui, theme, rect.min, WIDTH, id, &labels, Some(at), false) {
                 cx.state.together.network = chosen == 1;
             }
             ui.add_space(6.0);
@@ -490,7 +490,7 @@ fn join_panel(ui: &mut Ui, cx: &mut Cx) {
     line(ui, cx, "Paste the invitation the other person's Trill shows (File, Share this song).", theme.ink_dim);
     ui.add_space(8.0);
     let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, 30.0), Sense::hover());
-    let id = egui::Id::new("together-invitation");
+    let id = egui::Id::unique("together-invitation");
     trill_noir::text_field(ui, theme, rect, id, &mut cx.state.together.invitation, "trill:HOST:PORT:SECRET");
     if std::mem::take(&mut cx.state.together.focus) {
         ui.memory_mut(|memory| memory.request_focus(id.with("editor")));
@@ -503,7 +503,7 @@ fn join_panel(ui: &mut Ui, cx: &mut Cx) {
         let chip = Chip::new("Let the open song go", cx.state.together.replace);
         let width = chip.width(ui, theme);
         let at = Rect::from_min_size(rect.min, vec2(width, theme.metric.chip));
-        if trill_noir::chip(ui, theme, at, ui.id().with("replace"), &chip).clicked() {
+        if trill_noir::chip(ui, theme, at, ui.scope_id().with("replace"), &chip).clicked() {
             cx.state.together.replace = !cx.state.together.replace;
         }
         ui.add_space(6.0);

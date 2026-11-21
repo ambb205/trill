@@ -279,6 +279,7 @@ impl Snapshot {
             can_undo: false,
             can_redo: false,
             modified: false,
+            shared: false,
             path: None,
             problems: Vec::new(),
             clip_problems: HashMap::new(),
