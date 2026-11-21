@@ -61,6 +61,7 @@ mod listening;
 pub mod midi;
 mod missing;
 mod recording;
+pub use recording::{PlayedElsewhere, UnusedRecordings};
 mod recovery;
 mod settings;
 mod sounds;
@@ -303,6 +304,14 @@ impl Runtime {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
             let run = format!("{run} {}", std::process::id());
             session.keep_unsaved_recordings_in(folder.join(recording::RECORDINGS_FOLDER).join(run));
+        }
+        // A recording that is removed goes to the system's Recycle Bin for
+        // a program that is the user's own. One that keeps nothing of
+        // theirs, or keeps it in a folder it was pointed at (a test, a run
+        // by hand with a profile), puts nothing in their bin: there it
+        // goes into a folder beside the takes.
+        if matches!(options.storage, Storage::User) {
+            session.remove_recordings_into(trill_engine::Bin::System);
         }
         session.set_journal_keeping(settings.current().journal.keep);
         let live = session.live();

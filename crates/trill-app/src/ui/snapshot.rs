@@ -528,6 +528,9 @@ pub struct InputLive {
     pub punch: bool,
     /// The take that is heard in place of what its track plays.
     pub heard_take: Option<ClipId>,
+    /// The tracks whose input is held: the song says it is heard through
+    /// them, and nobody at this window has switched that on.
+    pub held: Vec<TrackId>,
     pub growing: Vec<Grown>,
 }
 
@@ -571,6 +574,9 @@ impl InputLive {
         self.measurement = Some(session.measurement());
         self.punch = session.punch();
         self.heard_take = session.heard_take();
+        self.held.clear();
+        let tracks = session.project().tracks.iter().filter(|track| track.input.is_some());
+        self.held.extend(tracks.filter(|track| session.input_held(track.id)).map(|track| track.id));
         let levels = if self.open.is_some() { session.input_levels() } else { Vec::new() };
         self.feed(&levels, dt);
         self.grow(session.growing_takes());

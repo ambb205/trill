@@ -87,8 +87,12 @@ fn main() -> anyhow::Result<()> {
     }
     options.also_select = cli.clips_to_also_select(session.lock().project())?;
     let armed = cli.tracks_to_arm(session.lock().project())?;
-    for track in armed {
-        session.lock().set_armed(track, true).context("could not arm a track")?;
+    {
+        // Asked for on the command line by whoever started the program.
+        let _hand = trill_engine::hand::by_hand();
+        for track in armed {
+            session.lock().set_armed(track, true).context("could not arm a track")?;
+        }
     }
     // Returns at once; the folders are scanned in the background and the
     // browser fills in as they are.

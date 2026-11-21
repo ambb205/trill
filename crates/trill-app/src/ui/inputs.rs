@@ -20,10 +20,13 @@ use super::snapshot::{MeterState, Snapshot};
 use super::state::{Cx, UiState};
 use super::{audio_settings, units, widgets};
 use eframe::egui::{self, Align2, Color32, Id, Rect, Sense, Ui, pos2, vec2};
+use parking_lot::Mutex;
 use std::path::PathBuf;
+use std::sync::Arc;
 use trill_core::{Monitoring, Track, TrackId, TrackInput, TrackKind};
-use trill_engine::{Correction, Recorded};
+use trill_engine::{Correction, Recorded, Removed};
 use trill_noir::{Chip, MenuItem, Variant, paint, text};
+use trill_runtime::UnusedRecordings;
 
 /// Channels a menu offers at the most: an interface with more is still
 /// reached by a tool, and a menu of sixty lines is no menu.
@@ -127,6 +130,12 @@ pub fn menu(ui: &mut Ui, cx: &mut Cx, track: &Track, most: u16) {
     let Some(input) = now else { return };
     trill_noir::menu_separator(ui, theme);
     trill_noir::menu_heading(ui, theme, "Heard through this track");
+    if cx.live.input.held.contains(&id) {
+        let detail = "Held: nobody has switched it on at this window since the song was opened";
+        if MenuItem::new("Let it be heard").detail(detail).show(ui, theme).clicked() {
+            cx.try_session(|session| session.let_input_be_heard(id));
+        }
+    }
     for choice in [Monitoring::Off, Monitoring::Armed, Monitoring::Always] {
         if MenuItem::new(monitor_name(choice)).checked(input.monitor == choice).show(ui, theme).clicked() {
             set_monitor(cx, id, input, choice);
@@ -236,6 +245,20 @@ pub fn monitor_chip(
     place: &str,
 ) {
     let theme = cx.theme;
+    if cx.live.input.held.contains(&track.id) {
+        // The song says the input is heard, and nobody at this window
+        // switched that on: it is held, and this click lets it go.
+        let name = format!("Monitor {}{place}, held", track.name);
+        let chip = Chip::new("I", false).accent(theme.warn).quiet(theme.warn).named(&name);
+        let response = trill_noir::chip(ui, theme, rect, id, &chip);
+        paint::frame(ui.painter(), rect, theme.warn);
+        cx.hint(&response, held_words(input));
+        if response.clicked() {
+            let id = track.id;
+            cx.try_session(|session| session.let_input_be_heard(id));
+        }
+        return;
+    }
     let accent = if input.monitor == Monitoring::Always { theme.info } else { theme.ok };
     let name = format!("Monitor {}{place}", track.name);
     // On, the switch says how late the input is heard, in milliseconds,
@@ -263,6 +286,28 @@ pub fn monitor_chip(
     if response.clicked() {
         let next = if input.monitor == Monitoring::Off { Monitoring::Armed } else { Monitoring::Off };
         set_monitor(cx, track.id, input, next);
+    }
+}
+
+/// What the pointer is told over the switch of an input that is held.
+fn held_words(input: TrackInput) -> String {
+    let says = match input.monitor {
+        Monitoring::Always => "always",
+        _ => "while the track is armed",
+    };
+    format!(
+        "Held: the song says {} is heard through this track {says}, which opens the microphone into the speakers, and \
+         nobody has switched that on at this window since the song was opened \u{00B7} click to let it be heard",
+        input.said()
+    )
+}
+
+/// A sentence as the session words it, with a capital.
+pub fn capitalized(words: &str) -> String {
+    let mut letters = words.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => String::new(),
     }
 }
 
@@ -386,22 +431,49 @@ fn samples_in_words(frames: u64) -> String {
 
 // ---- the recordings the song no longer uses --------------------------------
 
-/// The list of recordings nothing in the song, and nothing undo can
-/// reach, plays any more, while it is up.
-#[derive(Clone, Debug, Default)]
-pub struct Unused {
-    /// Each file and its size in bytes, as the session listed them.
-    pub files: Vec<(PathBuf, u64)>,
-    pub folder: PathBuf,
-    /// Whether the question was asked: Trill never deletes a recording by
-    /// itself, and never without being told twice.
-    pub asked: bool,
+/// What a worker found or did, on its way back to the window.
+#[derive(Default)]
+struct Worked {
+    listed: Option<UnusedRecordings>,
+    removed: Option<Result<Removed, String>>,
 }
 
-/// Opens the list.
+/// The list of recordings nothing plays any more, while it is up. Which
+/// they are is a question about every song Trill knows of, whose files a
+/// worker reads: the list says so until it has come.
+#[derive(Clone, Default)]
+pub struct Unused {
+    /// What was found; `None` while the songs are being looked through.
+    pub listed: Option<UnusedRecordings>,
+    /// Whether the question was asked: Trill never removes a recording by
+    /// itself, and never without being told twice.
+    pub asked: bool,
+    /// Whether the ones listed are being removed.
+    removing: bool,
+    worked: Arc<Mutex<Worked>>,
+}
+
+impl Unused {
+    /// True while a worker is still at it: a picture waits for it.
+    pub fn is_waiting(&self) -> bool {
+        self.listed.is_none() || self.removing
+    }
+
+    /// True while the ones listed are being removed.
+    pub fn is_removing(&self) -> bool {
+        self.removing
+    }
+}
+
+/// Opens the list, and has a worker look through the songs.
 pub fn open_unused(cx: &mut Cx) {
-    let (files, folder) = cx.with_session(|session| (session.unused_recordings(), session.recordings_folder()));
-    cx.state.unused_recordings = Some(Unused { files, folder, asked: false });
+    let unused = Unused::default();
+    let worked = unused.worked.clone();
+    cx.state.unused_recordings = Some(unused);
+    cx.sounds.quietly(move |runtime| {
+        worked.lock().listed = Some(runtime.unused_recordings());
+        Ok(())
+    });
 }
 
 /// A size in bytes as a person reads it.
@@ -416,12 +488,45 @@ pub fn size_words(bytes: u64) -> String {
     }
 }
 
+/// "1 recording", "3 recordings".
+fn counted(count: usize) -> String {
+    if count == 1 { "1 recording".to_owned() } else { format!("{count} recordings") }
+}
+
 /// The list, while it is open.
 pub fn unused_window(ctx: &egui::Context, cx: &mut Cx) {
-    let Some(unused) = cx.state.unused_recordings.clone() else { return };
+    let Some(mut unused) = cx.state.unused_recordings.clone() else { return };
     let theme = cx.theme;
-    let total: u64 = unused.files.iter().map(|(_, size)| size).sum();
-    let (mut close, mut ask, mut delete) = (false, false, false);
+    // What the worker has finished since the last frame.
+    let (listed, removed) = {
+        let mut worked = unused.worked.lock();
+        (worked.listed.take(), worked.removed.take())
+    };
+    if let Some(listed) = listed {
+        unused.listed = Some(listed);
+    }
+    let mut close = false;
+    match removed {
+        Some(Ok(removed)) => {
+            let count = removed.recycled + removed.set_aside.len();
+            cx.state.toasts.info(format!(
+                "Removed {}, {}, {}",
+                counted(count),
+                size_words(removed.bytes),
+                removed.went()
+            ));
+            close = true;
+        }
+        Some(Err(why)) => {
+            cx.state.toasts.error(capitalized(&why));
+            close = true;
+        }
+        None => {}
+    }
+    if unused.is_waiting() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    let (mut ask, mut remove) = (false, false);
     let frame = egui::Frame::NONE
         .fill(theme.panel)
         .stroke(egui::Stroke::new(1.0, theme.hairline))
@@ -432,6 +537,8 @@ pub fn unused_window(ctx: &egui::Context, cx: &mut Cx) {
         text::paint(ui.painter(), rect, Align2::LEFT_CENTER, style, words, ink);
         rect
     };
+    let name_of =
+        |path: &std::path::Path| path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let modal =
         egui::Modal::new(Id::unique("unused-recordings")).frame(frame).backdrop_color(theme.backdrop).show(ctx, |ui| {
             ui.set_width(WIDTH);
@@ -445,25 +552,47 @@ pub fn unused_window(ctx: &egui::Context, cx: &mut Cx) {
             ui.add_space(8.0);
 
             let small = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
-            if unused.files.is_empty() {
-                line(ui, "Every recording of this song is still in use.", small, theme.ink);
-                let about = "A recording is in use while a clip or a take plays it, or undo can bring one back.";
+            let value = trill_noir::TextStyle { size: 11.0, ..theme.text.value };
+            let Some(listed) = &unused.listed else {
+                line(ui, "Looking through the songs Trill knows of\u{2026}", small, theme.ink_dim);
+                return;
+            };
+            if listed.unused.is_empty() {
+                line(ui, "No recording of this song can go.", small, theme.ink);
+                let about = "A recording stays while a clip or a take plays it, or undo can bring one back.";
                 line(ui, about, small, theme.ink_dim);
             } else {
-                let about = "Nothing in the song plays these any more, and undo cannot bring back anything that does.";
+                let about = "Nothing plays these any more, in this song or any other Trill knows of, and no undo does.";
                 line(ui, about, small, theme.ink_dim);
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical().max_height(ROWS * ROW).auto_shrink([false, true]).show(ui, |ui| {
-                    for (path, size) in &unused.files {
-                        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                        let rect = line(ui, &name, small, theme.ink);
-                        let value = trill_noir::TextStyle { size: 11.0, ..theme.text.value };
-                        text::paint(ui.painter(), rect, Align2::RIGHT_CENTER, value, &size_words(*size), theme.ink_dim);
-                    }
-                });
+                egui::ScrollArea::vertical().id_salt("unused").max_height(ROWS * ROW).auto_shrink([false, true]).show(
+                    ui,
+                    |ui| {
+                        for (path, size) in &listed.unused {
+                            let rect = line(ui, &name_of(path), small, theme.ink);
+                            let size = size_words(*size);
+                            text::paint(ui.painter(), rect, Align2::RIGHT_CENTER, value, &size, theme.ink_dim);
+                        }
+                    },
+                );
+            }
+            if !listed.played_elsewhere.is_empty() {
+                // Not this song's any more, and somebody else's still.
+                ui.add_space(8.0);
+                line(ui, "Another song plays these, so they stay:", small, theme.ink_dim);
+                egui::ScrollArea::vertical()
+                    .id_salt("elsewhere")
+                    .max_height(4.0 * ROW)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for kept in &listed.played_elsewhere {
+                            let words = format!("{} \u{00B7} played by {}", name_of(&kept.path), kept.by.join(" and "));
+                            line(ui, &words, small, theme.ink_dim);
+                        }
+                    });
             }
             ui.add_space(6.0);
-            let folder = format!("In {}", unused.folder.display());
+            let folder = format!("In {}", listed.folder.display());
             line(ui, &folder, theme.text.micro, theme.ink_faint);
             ui.add_space(10.0);
 
@@ -471,55 +600,57 @@ pub fn unused_window(ctx: &egui::Context, cx: &mut Cx) {
             let layout = egui::Layout::right_to_left(egui::Align::Center);
             let mut cell = ui.new_child(egui::UiBuilder::new().id_salt("unused-foot").max_rect(foot).layout(layout));
             cell.spacing_mut().item_spacing = vec2(theme.metric.gap, 0.0);
-            if unused.asked {
-                // The question: nothing is deleted before it is answered.
-                let count = unused.files.len();
+            let count = listed.unused.len();
+            if unused.removing {
+                text::paint(ui.painter(), foot, Align2::LEFT_CENTER, small, "Removing\u{2026}", theme.ink_dim);
+            } else if unused.asked {
+                // The question: nothing goes before it is answered, and it
+                // says where what goes will be.
                 let question = match count {
-                    1 => "Delete this recording for good? It cannot be brought back.".to_owned(),
-                    count => format!("Delete these {count} recordings for good? They cannot be brought back."),
+                    1 => format!("Remove this recording? It goes {}.", listed.goes),
+                    count => format!("Remove these {count} recordings? They go {}.", listed.goes),
                 };
-                text::paint(ui.painter(), foot, Align2::LEFT_CENTER, small, &question, theme.warn);
-                if trill_noir::button(&mut cell, theme, "Delete them", Variant::Primary).clicked() {
-                    delete = true;
+                let (asked, said) = ui.allocate_exact_size(vec2(0.0, 0.0), Sense::hover());
+                let _ = asked;
+                said.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &question));
+                let room = foot.with_max_x(foot.right() - 230.0);
+                text::paint(ui.painter(), room, Align2::LEFT_CENTER, small, &question, theme.warn);
+                if trill_noir::button(&mut cell, theme, "Remove them", Variant::Primary).clicked() {
+                    remove = true;
                 }
                 if trill_noir::button(&mut cell, theme, "Keep them", Variant::Default).clicked() {
                     close = true;
                 }
             } else {
-                let note = match unused.files.len() {
-                    0 => String::new(),
-                    1 => format!("1 recording \u{00B7} {}", size_words(total)),
-                    count => format!("{count} recordings \u{00B7} {}", size_words(total)),
+                let total: u64 = listed.unused.iter().map(|(_, size)| size).sum();
+                let note = if count == 0 {
+                    String::new()
+                } else {
+                    format!("{} \u{00B7} {}", counted(count), size_words(total))
                 };
                 text::paint(ui.painter(), foot, Align2::LEFT_CENTER, theme.text.micro, &note, theme.ink_faint);
                 if trill_noir::button(&mut cell, theme, "Close", Variant::Default).clicked() {
                     close = true;
                 }
-                if !unused.files.is_empty()
-                    && trill_noir::button(&mut cell, theme, "Delete\u{2026}", Variant::Default).clicked()
-                {
+                if count > 0 && trill_noir::button(&mut cell, theme, "Remove\u{2026}", Variant::Default).clicked() {
                     ask = true;
                 }
             }
         });
-    if modal.should_close() {
+    if modal.should_close() && !unused.removing {
         close = true;
     }
-    if ask && let Some(unused) = &mut cx.state.unused_recordings {
-        unused.asked = true;
+    unused.asked |= ask;
+    if remove && let Some(listed) = &unused.listed {
+        unused.removing = true;
+        let paths: Vec<PathBuf> = listed.unused.iter().map(|(path, _)| path.clone()).collect();
+        let worked = unused.worked.clone();
+        cx.sounds.quietly(move |runtime| {
+            worked.lock().removed = Some(runtime.delete_unused_recordings(&paths));
+            Ok(())
+        });
     }
-    if delete {
-        let paths: Vec<PathBuf> = unused.files.iter().map(|(path, _)| path.clone()).collect();
-        if let Some(freed) = cx.try_session(|session| session.delete_unused_recordings(&paths)) {
-            let count = paths.len();
-            let what = if count == 1 { "1 recording".to_owned() } else { format!("{count} recordings") };
-            cx.state.toasts.info(format!("Deleted {what}, {}", size_words(freed)));
-        }
-        close = true;
-    }
-    if close {
-        cx.state.unused_recordings = None;
-    }
+    cx.state.unused_recordings = (!close).then_some(unused);
 }
 
 #[cfg(test)]

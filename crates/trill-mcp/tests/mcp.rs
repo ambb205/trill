@@ -2585,10 +2585,14 @@ async fn the_assistant_opens_no_microphone_and_deletes_no_recording() {
     let error = call(client, "recording_latency", json!({ "action": "measure" })).await.unwrap_err();
     assert!(error.contains("the user runs it"), "{error}");
     let error = call(client, "unused_recordings", json!({ "delete": ["x.wav"] })).await.unwrap_err();
-    assert!(error.contains("cannot be undone"), "{error}");
+    assert!(error.contains("is the user's to do, who is asked first"), "{error}");
     // Once the user has armed the track it may record: here there is no
     // input to open, which it is told.
-    fixture.session.lock().set_armed(trill_core::TrackId(voice), true).unwrap();
+    {
+        // The user's own hand on the arm button.
+        let _hand = trill_engine::hand::by_hand();
+        fixture.session.lock().set_armed(trill_core::TrackId(voice), true).unwrap();
+    }
     let error = call(client, "transport", json!({ "action": "record", "count_in_bars": 0 })).await.unwrap_err();
     assert!(error.contains("the input cannot be opened"), "{error}");
     // What it may always do: read.
@@ -2596,4 +2600,253 @@ async fn the_assistant_opens_no_microphone_and_deletes_no_recording() {
     ok(client, "takes", json!({})).await;
     ok(client, "recording_latency", json!({})).await;
     ok(client, "unused_recordings", json!({})).await;
+}
+
+/// Both doors of one program, on devices that exist only here: the
+/// client the user set up (`fixture.client`), the assistant's door, the
+/// scripted host with a microphone that hears a tone, and the folder the
+/// assistant may write to.
+async fn two_doors(folder: tempfile::TempDir) -> (Fixture, Client, ScriptedHost, PathBuf) {
+    use trill_engine::host::scripted::{Hears, ScriptedInput};
+    let host = ScriptedHost::with_speakers();
+    host.add_input(ScriptedInput::new("Microphone"));
+    host.hear(Hears::Sound(Arc::new(|_, seconds| (0.25 * (seconds * std::f64::consts::TAU * 440.0).sin()) as f32)));
+    let work = folder.path().join("work");
+    let parts = Parts { audio: Some(Arc::new(host.clone())), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options_in(folder.path()), parts).unwrap());
+    let options = trill_mcp::HttpOptions { assistant_folder: Some(work.clone()) };
+    let server = trill_mcp::serve_http_with(runtime.clone(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let to =
+        |url: String| StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(url));
+    let client = ClientConfig::default().serve(to(server.url())).await.unwrap();
+    let door = ClientConfig::default().serve(to(server.assistant_url())).await.unwrap();
+    (Fixture { session: runtime.session.clone(), runtime, client, _server: server, folder }, door, host, work)
+}
+
+/// Unsaved work of a program that died in `folder`: a song whose first
+/// track records an input and is always heard.
+fn lost_song_that_is_always_heard(folder: &std::path::Path) {
+    let lost = Runtime::start(options_in(folder)).unwrap();
+    lost.session
+        .lock()
+        .edit(|project| {
+            project.name = "Lost".into();
+            let voice = project.add_track("Voice");
+            let always = trill_core::TrackInput { channel: 1, stereo: false, monitor: trill_core::Monitoring::Always };
+            project.set_track_input(voice, Some(always))
+        })
+        .unwrap();
+    lost.refresh_safety_copy();
+    lost.abandon();
+}
+
+/// A round of the session's chores and a few buffers of the device: what
+/// was let has opened the input by now, and what was not has not.
+fn chores(fixture: &Fixture, host: &ScriptedHost) {
+    fixture.session.lock().housekeeping();
+    host.advance(2_400);
+    fixture.session.lock().housekeeping();
+}
+
+fn track_of<'a>(project: &'a Value, name: &str) -> &'a Value {
+    let tracks = project["tracks"].as_array().unwrap();
+    tracks.iter().find(|track| track["name"] == name).unwrap_or_else(|| panic!("no track {name} in {project}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_at_the_assistants_door_opens_the_microphone_by_any_route() {
+    let folder = tempfile::tempdir().unwrap();
+    lost_song_that_is_always_heard(folder.path());
+    let (fixture, door, host, work) = two_doors(folder).await;
+    let hand = &fixture.client;
+    // How often the device was asked for its input: what is held here.
+    let opens = || host.input_requests().len();
+
+    // Monitoring that is always on, on a track that is not armed: the
+    // song has it, and it is held.
+    let voice = ok(&door, "create_track", json!({ "name": "Voice" })).await["track_id"].as_u64().unwrap();
+    let set = ok(&door, "track_input", json!({ "track": voice, "input": "1", "monitor": "always" })).await;
+    assert_eq!(set["input"]["monitor"], "always");
+    assert!(set["input_held"].as_str().unwrap().contains("held and not heard"), "{set}");
+    assert_eq!(set["device_input"]["open"], false);
+    // Asked again, it is still held: asking is not a hand.
+    let again = ok(&door, "track_input", json!({ "track": voice, "monitor": "always" })).await;
+    assert!(again.get("input_held").is_some(), "{again}");
+    chores(&fixture, &host);
+
+    // Arming a track that records an input, and giving an armed track one.
+    let error = call(&door, "update_track", json!({ "track": voice, "armed": true })).await.unwrap_err();
+    assert!(error.contains("opens the microphone") && error.contains("arm button"), "{error}");
+    let keys = ok(&door, "create_track", json!({ "name": "Keys" })).await["track_id"].as_u64().unwrap();
+    ok(&door, "update_track", json!({ "track": keys, "armed": true })).await;
+    let error = call(&door, "track_input", json!({ "track": keys, "input": "2" })).await.unwrap_err();
+    assert!(error.contains("armed") && error.contains("themselves"), "{error}");
+    chores(&fixture, &host);
+
+    // The same by way of undo and redo: an input given to a track that is
+    // not armed, taken back, the track armed while it has none, and the
+    // input brought back. The track is disarmed.
+    ok(&door, "update_track", json!({ "track": keys, "armed": false })).await;
+    ok(&door, "track_input", json!({ "track": keys, "input": "2", "monitor": "armed" })).await;
+    ok(&door, "history", json!({ "action": "undo" })).await;
+    let armed = ok(&door, "update_track", json!({ "track": keys, "armed": true })).await;
+    assert_eq!(armed["armed"], true, "a track that records a keyboard is the assistant's to arm");
+    ok(&door, "history", json!({ "action": "redo" })).await;
+    let project = ok(&door, "get_project", json!({})).await;
+    let found = track_of(&project, "Keys");
+    assert_eq!(found["input"]["records"], "input 2");
+    assert!(found.get("armed").is_none(), "an armed track that came to record an input is disarmed: {found}");
+    assert!(fixture.session.lock().armed().is_empty());
+    chores(&fixture, &host);
+
+    // Looking at the level, the measurement, and a take with nothing armed.
+    let error = call(&door, "audio_inputs", json!({ "listen": true })).await.unwrap_err();
+    assert!(error.contains("opens the microphone"), "{error}");
+    let error = call(&door, "recording_latency", json!({ "action": "measure" })).await.unwrap_err();
+    assert!(error.contains("the user runs it"), "{error}");
+    let error = call(&door, "transport", json!({ "action": "record", "count_in_bars": 0 })).await.unwrap_err();
+    assert!(error.contains("no track is armed"), "{error}");
+    assert!(fixture.session.lock().armed().is_empty(), "and nothing was armed for it");
+
+    // A device with a preset, given to the track that is held.
+    ok(&door, "add_device", json!({ "track": voice, "uri": "builtin:polysynth", "preset": "warm_pad" })).await;
+    chores(&fixture, &host);
+
+    // Another song. The user saves this one, begins another, and arms a
+    // track of it that records a keyboard; its tracks have the numbers
+    // the first song's have. The assistant opens the first song again:
+    // nothing is armed in it, and what it says of always is held.
+    let first = work.join("First.trill");
+    ok(hand, "save_project", json!({ "path": first.display().to_string() })).await;
+    ok(hand, "new_project", json!({})).await;
+    let one = ok(hand, "create_track", json!({ "name": "One" })).await["track_id"].as_u64().unwrap();
+    let two = ok(hand, "create_track", json!({ "name": "Two" })).await["track_id"].as_u64().unwrap();
+    assert_eq!((one, two), (voice, keys), "ids begin again in every song");
+    ok(hand, "update_track", json!({ "track": two, "armed": true })).await;
+    ok(hand, "save_project", json!({ "path": work.join("Second.trill").display().to_string() })).await;
+    ok(&door, "load_project", json!({ "path": first.display().to_string() })).await;
+    let project = ok(&door, "get_project", json!({})).await;
+    assert!(track_of(&project, "Keys").get("armed").is_none(), "arming does not carry into another song: {project}");
+    assert!(fixture.session.lock().armed().is_empty());
+    assert!(track_of(&project, "Voice").get("input_held").is_some(), "{project}");
+    chores(&fixture, &host);
+
+    // Unsaved work of a program that died, recovered: the same.
+    let back = ok(&door, "recover_project", json!({ "action": "open", "index": 0 })).await;
+    assert_eq!(back["recovered"], "Lost");
+    let project = ok(&door, "get_project", json!({})).await;
+    assert_eq!(track_of(&project, "Voice")["input"]["monitor"], "always");
+    assert!(track_of(&project, "Voice").get("input_held").is_some(), "{project}");
+    chores(&fixture, &host);
+
+    assert_eq!(opens(), 0, "the device was asked for its input: {:?}", host.input_requests());
+    assert!(host.capturing().is_none());
+
+    // Last, with a take there is to hear: the user records one and
+    // disarms, and the input is closed again.
+    let take_track = ok(hand, "create_track", json!({ "name": "Take" })).await["track_id"].as_u64().unwrap();
+    ok(hand, "track_input", json!({ "track": take_track, "input": "1" })).await;
+    ok(hand, "update_track", json!({ "track": take_track, "armed": true })).await;
+    host.advance(48_000);
+    ok(hand, "transport", json!({ "action": "record", "count_in_bars": 0, "position": 0 })).await;
+    host.advance(96_000);
+    let stopped = ok(hand, "transport", json!({ "action": "stop" })).await;
+    let take = stopped["recorded"]["takes"][0]["take_id"].as_u64().expect("a take was recorded");
+    ok(hand, "update_track", json!({ "track": take_track, "armed": false })).await;
+    chores(&fixture, &host);
+    assert!(host.capturing().is_none());
+    let before = opens();
+    assert!(before >= 1, "the user's own client did open it");
+    // The assistant hears the take in place, measures it, looks at the
+    // input as it stands and at the round trip, and plays the song.
+    ok(&door, "takes", json!({ "action": "hear", "take": take })).await;
+    ok(&door, "takes", json!({ "action": "measure", "take": take })).await;
+    assert_eq!(ok(&door, "audio_inputs", json!({})).await["open"], false);
+    ok(&door, "recording_latency", json!({})).await;
+    ok(&door, "transport", json!({ "action": "play" })).await;
+    chores(&fixture, &host);
+    ok(&door, "transport", json!({ "action": "stop" })).await;
+    ok(&door, "takes", json!({ "action": "hear" })).await;
+    assert_eq!(opens(), before, "the device was asked for its input: {:?}", host.input_requests());
+    assert!(host.capturing().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_users_own_client_opens_the_microphone_and_what_no_hand_asked_for_is_held() {
+    let folder = tempfile::tempdir().unwrap();
+    lost_song_that_is_always_heard(folder.path());
+    let (fixture, door, host, work) = two_doors(folder).await;
+    let hand = &fixture.client;
+    let opens = || host.input_requests().len();
+    let voice = ok(hand, "create_track", json!({ "name": "Voice" })).await["track_id"].as_u64().unwrap();
+    let keys = ok(hand, "create_track", json!({ "name": "Keys" })).await["track_id"].as_u64().unwrap();
+
+    // Switching monitoring on.
+    let set = ok(hand, "track_input", json!({ "track": voice, "input": "1", "monitor": "always" })).await;
+    assert!(set.get("input_held").is_none(), "{set}");
+    chores(&fixture, &host);
+    assert_eq!(opens(), 1);
+    assert!(host.capturing().is_some());
+    ok(hand, "track_input", json!({ "track": voice, "monitor": "off" })).await;
+    chores(&fixture, &host);
+    assert!(host.capturing().is_none());
+
+    // Arming a track as it then records an input; and bringing its input
+    // back by the hand's own undo and redo.
+    ok(hand, "track_input", json!({ "track": keys, "input": "2" })).await;
+    ok(hand, "history", json!({ "action": "undo" })).await;
+    ok(hand, "update_track", json!({ "track": keys, "armed": true })).await;
+    ok(hand, "history", json!({ "action": "redo" })).await;
+    let project = ok(hand, "get_project", json!({})).await;
+    assert_eq!(track_of(&project, "Keys")["armed"], true, "the hand's redo is the hand's: {project}");
+    chores(&fixture, &host);
+    assert_eq!(opens(), 2);
+    assert!(host.capturing().is_some());
+
+    // Looking at the level opens it too, for as long as the look takes.
+    ok(hand, "update_track", json!({ "track": keys, "armed": false })).await;
+    chores(&fixture, &host);
+    assert!(host.capturing().is_none());
+    let looked = ok(hand, "audio_inputs", json!({ "listen": true })).await;
+    assert_eq!(looked["open"], true);
+    assert_eq!(opens(), 3);
+    chores(&fixture, &host);
+    assert!(host.capturing().is_none(), "and it is closed when the look is over");
+
+    // What the assistant switches on is held, and the user's own asking
+    // for it lets it go.
+    let held = ok(&door, "track_input", json!({ "track": voice, "monitor": "always" })).await;
+    assert!(held.get("input_held").is_some(), "{held}");
+    chores(&fixture, &host);
+    assert_eq!(opens(), 3);
+    let let_go = ok(hand, "track_input", json!({ "track": voice, "monitor": "always" })).await;
+    assert!(let_go.get("input_held").is_none(), "{let_go}");
+    chores(&fixture, &host);
+    assert_eq!(opens(), 4);
+
+    // Another song, opened by the user: arming does not carry into it,
+    // and what it says of always is held for the user too, until asked.
+    ok(hand, "update_track", json!({ "track": keys, "armed": true })).await;
+    let song = work.join("Song.trill");
+    ok(hand, "save_project", json!({ "path": song.display().to_string() })).await;
+    let before = opens();
+    ok(hand, "load_project", json!({ "path": song.display().to_string() })).await;
+    let project = ok(hand, "get_project", json!({})).await;
+    assert!(track_of(&project, "Keys").get("armed").is_none(), "{project}");
+    assert!(track_of(&project, "Voice").get("input_held").is_some(), "{project}");
+    chores(&fixture, &host);
+    assert!(host.capturing().is_none());
+    assert_eq!(opens(), before);
+
+    // Unsaved work recovered by the user: held as well, and let go when asked.
+    ok(hand, "recover_project", json!({ "action": "open", "index": 0 })).await;
+    let project = ok(hand, "get_project", json!({})).await;
+    let lost = track_of(&project, "Voice")["id"].as_u64().unwrap();
+    assert!(track_of(&project, "Voice").get("input_held").is_some(), "{project}");
+    chores(&fixture, &host);
+    assert_eq!(opens(), before);
+    ok(hand, "track_input", json!({ "track": lost, "monitor": "always" })).await;
+    chores(&fixture, &host);
+    assert_eq!(opens(), before + 1);
+    assert!(host.capturing().is_some());
 }

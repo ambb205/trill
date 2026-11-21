@@ -222,6 +222,10 @@ pub struct Live {
     /// The tracks that are armed: one that records an input and is
     /// monitored while armed lets it through.
     pub armed: HashSet<TrackId>,
+    /// The tracks whose input is not let through although the song says
+    /// it is heard: nobody's hand switched that on. See
+    /// [`Session::input_held`](crate::Session::input_held).
+    pub held: HashSet<TrackId>,
 }
 
 impl Compiler<'_> {
@@ -350,7 +354,7 @@ impl Compiler<'_> {
                     Monitoring::Off => false,
                     Monitoring::Armed => live_now.armed.contains(&track.id),
                     Monitoring::Always => true,
-                };
+                } && !live_now.held.contains(&track.id);
                 InputTap { left, right, heard }
             });
 

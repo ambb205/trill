@@ -1197,19 +1197,27 @@ pub struct Cx<'a> {
 impl Cx<'_> {
     /// Applies an edit to the project as one undo step. A failed edit
     /// leaves the project untouched and tells the user why.
+    ///
+    /// What a view asks of the session through these three is asked by
+    /// the user's own hand ([`trill_engine::hand`]): a click, a key, a
+    /// drag. The assistant in the window never comes this way; it works
+    /// at its own door of the MCP server.
     pub fn edit<T>(&mut self, edit: impl FnOnce(&mut Project) -> Result<T, EditError>) -> Option<T> {
+        let _hand = trill_engine::hand::by_hand();
         let result = self.session.lock().edit(edit);
         self.report(result)
     }
 
     /// Runs a fallible session operation, reporting failure to the user.
     pub fn try_session<T>(&mut self, call: impl FnOnce(&mut Session) -> Result<T, SessionError>) -> Option<T> {
+        let _hand = trill_engine::hand::by_hand();
         let result = call(&mut self.session.lock());
         self.report(result)
     }
 
     /// Runs an infallible session operation (transport, undo).
     pub fn with_session<T>(&self, call: impl FnOnce(&mut Session) -> T) -> T {
+        let _hand = trill_engine::hand::by_hand();
         call(&mut self.session.lock())
     }
 

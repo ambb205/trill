@@ -3504,6 +3504,10 @@ fn add_range_warning(out: &mut Value, session: &Session, clip: ClipId) {
 /// the session while it runs is entered in the journal as that call's.
 struct Acted<'a> {
     call: Option<CallId>,
+    /// Whether the call is the user's own hand: a client the user set
+    /// up is, and the door of the assistant in the window never is. Only
+    /// the user's hand opens a microphone ([`trill_engine::hand`]).
+    by_hand: bool,
     future: Pin<Box<dyn Future<Output = Result<CallToolResponse, ErrorData>> + Send + 'a>>,
 }
 
@@ -3514,6 +3518,7 @@ impl Future for Acted<'_> {
         // Only for the length of the poll: between polls the thread is
         // someone else's, and the next poll may be on another.
         let _acting = self.call.map(trill_engine::journal::acting);
+        let _hand = self.by_hand.then(trill_engine::hand::by_hand);
         self.future.as_mut().poll(context)
     }
 }
@@ -3580,7 +3585,8 @@ impl ServerHandler for TrillServer {
         };
         let closing = Closing { session: &self.session, call };
         let running = ToolCallContext::new(self, request, context);
-        let response = Acted { call, future: Box::pin(self.tool_router.call(running)) }.await;
+        let by_hand = !self.is_guarded();
+        let response = Acted { call, by_hand, future: Box::pin(self.tool_router.call(running)) }.await;
         closing.with(|session| {
             let answered = match &response {
                 Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true) => {

@@ -23,10 +23,31 @@ const HEADER_BYTES: u64 = 56;
 /// A WAV file's lengths are 32 bits: this is all one holds, header and all.
 const MOST_BYTES: u64 = u32::MAX as u64 - 1;
 
+/// What a file is held to. As it comes, to what a WAV file can be and to
+/// the disk it is on; a test lowers either, to reach in a second what a
+/// take reaches in hours or on a disk that fills.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The most bytes a file may be, header and all.
+    pub most_bytes: u64,
+    /// The byte of the file at which writing fails as it does on a disk
+    /// that is full: what comes before it is written, and nothing after.
+    pub fails_at: Option<u64>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { most_bytes: MOST_BYTES, fails_at: None }
+    }
+}
+
 /// See the module documentation.
 pub struct GrowingWav {
     path: PathBuf,
     file: File,
+    limits: Limits,
+    /// How many bytes of it are on disk, header and all.
+    on_disk: u64,
     channels: u16,
     sample_rate: u32,
     /// Frames handed over, and how many of them the header on disk says.
@@ -40,6 +61,11 @@ impl GrowingWav {
     /// Begins a file at `path`, creating missing parent folders. It is
     /// there from now on: a file of no length that reads as one.
     pub fn create(path: &Path, sample_rate: f64, channels: u16) -> Result<Self, MediaError> {
+        Self::create_within(path, sample_rate, channels, Limits::default())
+    }
+
+    /// [`GrowingWav::create`], held to `limits`.
+    pub fn create_within(path: &Path, sample_rate: f64, channels: u16, limits: Limits) -> Result<Self, MediaError> {
         let rate = sample_rate.round();
         if !(1.0..=f64::from(u32::MAX / 8)).contains(&rate) {
             return Err(MediaError::write(path, format!("{sample_rate} is not a usable sample rate")));
@@ -59,6 +85,8 @@ impl GrowingWav {
         Ok(Self {
             path: path.to_path_buf(),
             file,
+            limits: Limits { most_bytes: limits.most_bytes.clamp(HEADER_BYTES, MOST_BYTES), ..limits },
+            on_disk: HEADER_BYTES,
             channels,
             sample_rate: rate as u32,
             frames: 0,
@@ -76,11 +104,18 @@ impl GrowingWav {
         self.frames
     }
 
+    /// How many frames the file on disk says it holds, and does: all that
+    /// was handed over up to the last time it was put there. What a
+    /// reader finds, whatever became of the rest.
+    pub fn kept(&self) -> u64 {
+        self.said
+    }
+
     /// How many frames it can still take before it is as long as a WAV
     /// file can be.
     pub fn room(&self) -> u64 {
         let block = u64::from(self.channels) * 4;
-        (MOST_BYTES - HEADER_BYTES) / block - self.frames
+        ((self.limits.most_bytes - HEADER_BYTES) / block).saturating_sub(self.frames)
     }
 
     /// Appends frames: `samples` holds every frame's channels side by
@@ -122,7 +157,19 @@ impl GrowingWav {
     /// more than is there.
     pub fn checkpoint(&mut self) -> Result<(), MediaError> {
         let written = (|| {
+            if let Some(at) = self.limits.fails_at
+                && self.on_disk + self.waiting.len() as u64 > at
+            {
+                // As a disk that fills does it: what there was room for
+                // is written, and the rest is refused.
+                let fits = at.saturating_sub(self.on_disk).min(self.waiting.len() as u64) as usize;
+                self.file.write_all(&self.waiting[..fits])?;
+                self.waiting.drain(..fits);
+                self.on_disk += fits as u64;
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+            }
             self.file.write_all(&self.waiting)?;
+            self.on_disk += self.waiting.len() as u64;
             self.waiting.clear();
             let data = self.frames * u64::from(self.channels) * 4;
             self.file.seek(SeekFrom::Start(RIFF_LENGTH_AT))?;
@@ -134,7 +181,11 @@ impl GrowingWav {
             self.file.seek(SeekFrom::End(0))?;
             Ok(())
         })();
-        written.map_err(|error: std::io::Error| MediaError::write(&self.path, error))?;
+        written.map_err(|error: std::io::Error| match error.kind() {
+            // In words: the system's own differ from one to the next.
+            std::io::ErrorKind::StorageFull => MediaError::write(&self.path, "the disk is full"),
+            _ => MediaError::write(&self.path, error),
+        })?;
         self.said = self.frames;
         Ok(())
     }

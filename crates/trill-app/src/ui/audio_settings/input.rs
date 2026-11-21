@@ -115,13 +115,14 @@ pub(super) fn device_row(ui: &mut Ui, cx: &mut Cx, draft: &mut AudioConfig, devi
 /// stopped. The input is open for as long as somebody watches.
 pub(super) fn listen(cx: &mut Cx, on: bool) {
     if std::mem::replace(&mut cx.settings.input.listening, on) != on {
-        cx.with_session(|session| {
-            session.watch_input(on);
+        cx.try_session(|session| {
+            session.watch_input(on)?;
             // Open now, in place of at the next round of chores: the
             // switch was just pressed. Why it could not be is said below.
             if on {
                 let _ = session.ready_input();
             }
+            Ok(())
         });
     }
 }

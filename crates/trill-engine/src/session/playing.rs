@@ -174,8 +174,10 @@ impl Session {
 
     fn before_audio_change(&mut self) {
         if self.playing.take.is_some() {
+            // The take ends there; the song is not stopped for it. Where
+            // the stream that comes runs at the rate of the one that goes
+            // the song plays on through it.
             self.end_take_early("the audio device changed: the take ends there, whole up to that moment");
-            self.engine.send(Message::Stop);
             self.finish_take(true);
         }
         // Nothing may sound on into the new stream: keys that come up
@@ -315,12 +317,23 @@ impl Session {
     /// keyboard was holding on the track. Only tracks that hold clips can
     /// be armed (not groups or returns), and at most
     /// [`MAX_LIVE_TRACKS`] at once.
+    ///
+    /// Arming a track that records an input opens the input, which only
+    /// the user's own hand does ([`crate::hand::by_hand`]): asked by
+    /// anybody else it is refused, and the track is as it was.
     pub fn set_armed(&mut self, track: TrackId, armed: bool) -> Result<(), SessionError> {
         let found = self.project.track(track)?;
         let found_input = found.input;
         if !armed {
             self.playing.armed.retain(|id| *id != track);
         } else if !self.playing.armed.contains(&track) {
+            if found_input.is_some() && !crate::hand::is_by_hand() {
+                return Err(SessionError::Recording(format!(
+                    "{track} ({}) records an input of the audio device, and arming it opens the microphone: the user \
+                     arms it themselves, with the track's arm button. Once it is armed it can be recorded",
+                    found.name
+                )));
+            }
             if found.kind != TrackKind::Normal {
                 let kind = if found.kind == TrackKind::Group { "group" } else { "return" };
                 return Err(SessionError::Recording(format!(
@@ -335,6 +348,8 @@ impl Session {
             }
             self.playing.armed.push(track);
         }
+        // Whose hand it was is what lets the input be opened for it.
+        self.hold_to_the_hand(&|_| true);
         self.send_live_targets();
         // A track that records an input is heard through its devices
         // while it is armed, where it says so: the graph has that. And
@@ -347,6 +362,17 @@ impl Session {
             self.input_is_to_be_tried();
         }
         Ok(())
+    }
+
+    /// Disarms `tracks` without a word: for the rule that holds the input
+    /// to the user's hand, which says its own.
+    pub(super) fn playing_disarm(&mut self, tracks: &[TrackId]) {
+        self.playing.armed.retain(|id| !tracks.contains(id));
+    }
+
+    /// Nothing is armed any more: another song is open.
+    pub(super) fn disarm_all(&mut self) {
+        self.playing.armed.clear();
     }
 
     /// The armed tracks, in the order they were armed.

@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use trill_core::TrackId;
-use trill_media::GrowingWav;
+use trill_media::{GrowingLimits as Limits, GrowingWav};
 
 /// How many frames of a recording one column of its picture stands for.
 pub const COLUMN_FRAMES: usize = 256;
@@ -304,10 +304,12 @@ impl Written {
             Ok(_) => "the recording is as long as one file can be (4 GB)".to_string(),
             Err(error) => error.to_string(),
         };
-        self.growing.frames.store(file.frames(), Ordering::Relaxed);
-        // What is in it is put on disk as far as that can still be done.
+        // What is in it is put on disk as far as that can still be done,
+        // and the file is as long as it then says it is: a take is whole
+        // up to there, and not a frame longer than can be read back.
         let mut file = self.file.take().expect("it was there a moment ago");
         let _ = file.checkpoint();
+        self.growing.frames.store(file.kept(), Ordering::Relaxed);
         *self.growing.failed.lock() = Some(why);
     }
 
@@ -347,12 +349,19 @@ impl TakeWriter {
     /// Begins the files and the thread that writes them, and returns the
     /// audio thread's end with it. A file that cannot be begun is a
     /// sentence, and then none is.
-    pub fn start(files: Vec<FileOf>, sample_rate: f64, tail: u32) -> Result<(Self, Box<Feeds>), String> {
+    /// Every file is held to `limits`: a WAV file's own, as it comes.
+    pub fn start(
+        files: Vec<FileOf>,
+        sample_rate: f64,
+        tail: u32,
+        limits: Limits,
+    ) -> Result<(Self, Box<Feeds>), String> {
         let mut feeds = Vec::with_capacity(files.len());
         let mut written = Vec::with_capacity(files.len());
         for FileOf { track, path, left, right } in files {
             let channels = 1 + u16::from(right.is_some());
-            let file = GrowingWav::create(&path, sample_rate, channels).map_err(|error| error.to_string())?;
+            let file =
+                GrowingWav::create_within(&path, sample_rate, channels, limits).map_err(|error| error.to_string())?;
             let room = (sample_rate * RING_SECONDS) as usize * usize::from(channels);
             let (samples_in, samples_out) = rtrb::RingBuffer::new(room);
             let (gaps_in, gaps_out) = rtrb::RingBuffer::new(GAPS);
@@ -506,7 +515,7 @@ mod tests {
             FileOf { track: TrackId(1), path: folder.path().join("one.wav"), left: 1, right: None },
             FileOf { track: TrackId(2), path: folder.path().join("pair.wav"), left: 0, right: Some(1) },
         ];
-        let (writer, mut feeds) = TakeWriter::start(files, 48_000.0, 0).unwrap();
+        let (writer, mut feeds) = TakeWriter::start(files, 48_000.0, 0, Limits::default()).unwrap();
         assert_eq!(feeds.channels(), 0b11);
         // Without an input there is silence, of the right length.
         for _ in 0..100 {
@@ -523,6 +532,6 @@ mod tests {
         // A file that cannot be begun is a sentence.
         let nowhere =
             vec![FileOf { track: TrackId(1), path: folder.path().join("one.wav/x.wav"), left: 0, right: None }];
-        assert!(TakeWriter::start(nowhere, 48_000.0, 0).is_err());
+        assert!(TakeWriter::start(nowhere, 48_000.0, 0, Limits::default()).is_err());
     }
 }

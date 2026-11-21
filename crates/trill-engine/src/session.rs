@@ -21,6 +21,7 @@ use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
 use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
+mod bin;
 mod controllers;
 mod cores;
 mod editors;
@@ -40,6 +41,7 @@ mod wavetable;
 pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_after};
 pub use wavetable::{TableReport, factory_tables};
 
+pub use bin::{Bin, REMOVED_FOLDER, Removed};
 pub use controllers::SilentInstrument;
 pub use cores::{Costs, KeepingUp, Shortfall, TrackCost};
 pub use files::file_facts;
@@ -1152,6 +1154,13 @@ impl Session {
         // made away from here: see `opening`.
         self.forget_opening();
         self.another_song = true;
+        // Nothing that was armed in the song before is armed in this one,
+        // whatever numbers its tracks have, and nothing a hand let there
+        // is let here: what this song says of its inputs is held until a
+        // hand says so again.
+        self.disarm_all();
+        self.forget_the_hand();
+        self.hold_to_the_hand(&|_| false);
         // Its recordings are read several at a time, ahead of the compile
         // that would read them one after the other.
         let read = self.audio.read_ahead(&self.project, self.engine.sample_rate());
@@ -1228,6 +1237,9 @@ impl Session {
     /// Brings the engine in line with the project after it changed from
     /// `old`.
     fn sync(&mut self, old: &Project, scope: Scope) {
+        // Before the graph is made: what came to want the input by this
+        // change is let, held or disarmed by whose hand made it.
+        self.hold_to_the_hand(&|track| old.track(track).is_ok());
         if scope == Scope::Everything {
             self.compile_and_swap();
             // A track that is gone is no longer armed or played.

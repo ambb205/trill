@@ -339,13 +339,13 @@ fn an_input_is_open_only_while_something_needs_it_and_says_what_is_wrong() {
     assert!(!open(&mut rig), "and no longer once it is disarmed");
 
     // Looking at the level opens it, for as long as anyone looks.
-    rig.session.watch_input(true);
+    rig.session.watch_input(true).unwrap();
     assert!(open(&mut rig));
     rig.host.hear(Hears::Sound(Arc::new(|channel, _| if channel == 0 { 0.25 } else { 1.5 })));
     rig.run(20);
     let levels = rig.session.input_levels();
     assert_eq!(levels, [(0.25, false), (1.5, true)], "the second channel is over full scale");
-    rig.session.watch_input(false);
+    rig.session.watch_input(false).unwrap();
     assert!(!open(&mut rig));
     assert!(rig.session.input_levels().is_empty());
 
@@ -697,13 +697,111 @@ fn an_input_that_goes_away_ends_the_take_whole_up_to_there_and_the_song_plays_on
     assert!(rig.session.input_status().open.is_some(), "{:?}", rig.session.input_status());
     rig.session.seek(0.0);
     rig.run(4);
+    let began = rig.now() + LATENCY;
+    bumps.at((began + 12_000.0) / SR);
     rig.session.record().unwrap();
     rig.run_until(rig.now() + 48_000.0);
+    // The output is made again under the take: taken for the program
+    // alone, with another buffer, at the rate it had.
     rig.session.set_audio_config(AudioConfig { exclusive: true, buffer_size: Some(256), ..AudioConfig::default() });
     assert!(!rig.session.is_recording());
     let notice = rig.session.take_recording_notice().expect("it is said");
-    assert!(notice.contains("the audio device changed"), "{notice}");
-    assert_eq!(rig.session.last_recording().unwrap().takes.len(), 1, "whole up to there");
+    assert!(notice.contains("the audio device changed") && notice.contains("whole up to that moment"), "{notice}");
+    let recorded = rig.session.last_recording().unwrap().clone();
+    assert_eq!(recorded.takes.len(), 1, "whole up to there");
+    assert!(recorded.takes[0].seconds > 0.9, "a second of it had been sung: {:?}", recorded.takes[0]);
+    let off = off_its_place(&rig.session, voice, 12_000.0);
+    assert!(off.abs() <= 1.0, "and what was sung is where it was sung: {off:.3}");
+    // The song plays on, through the stream that came.
+    let position = rig.session.transport().position_beats;
+    rig.run(40);
+    let status = rig.session.transport();
+    assert!(status.playing, "the song was not stopped for it");
+    assert!(status.position_beats > position + 0.2, "{} after {position}", status.position_beats);
+}
+
+/// A tone for an input to hear, a quarter of full scale.
+fn tone() -> Hears {
+    Hears::Sound(Arc::new(|_, seconds| (0.25 * (seconds * std::f64::consts::TAU * 440.0).sin()) as f32))
+}
+
+/// Records a take of four seconds on a rig whose files are held to
+/// `limits`, and returns the rig once the take has ended by itself, with
+/// the track it was on.
+fn a_take_cut_short_by(limits: trill_media::GrowingLimits) -> (Rig, TrackId, tempfile::TempDir) {
+    let (mut rig, folder) = rig_on(studio(microphone()), AudioConfig::default());
+    rig.host.hear(tone());
+    let voice = armed_track(&mut rig, "Voice", TrackInput::mono(1));
+    rig.run(40);
+    rig.session.hold_recordings_to(limits);
+    rig.session.seek(0.0);
+    rig.run(4);
+    rig.session.record().unwrap();
+    // Four seconds are asked for; the file takes fewer, and the session
+    // comes to know at a round of its chores.
+    let until = rig.now() + 4.0 * SR;
+    run_taking(&mut rig, until);
+    for _ in 0..400 {
+        if !rig.session.is_recording() {
+            break;
+        }
+        rig.run(4);
+        rig.session.housekeeping();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!rig.session.is_recording(), "the take ended by itself");
+    (rig, voice, folder)
+}
+
+/// What every take that a file cut short has to be: on its track, as
+/// long as the file and no longer, the file reading back whole with the
+/// tone in it to its last frame, and the song playing on.
+fn whole_up_to_there(rig: &mut Rig, voice: TrackId, holds: std::ops::RangeInclusive<u64>, why: &str) {
+    let recorded = rig.session.last_recording().unwrap().clone();
+    let said = recorded.ended_early.clone().expect("it ended before it was stopped");
+    assert!(said.contains(why) && said.contains("the take ends there, whole up to that moment"), "{said}");
+    assert_eq!(rig.session.take_recording_notice(), Some(said));
+    assert_eq!(recorded.takes.len(), 1);
+    // The file reads, and holds what its header says: all that was put
+    // on disk before it could take no more.
+    let file = recorded.takes[0].file.clone();
+    let audio = trill_media::MediaCache::default().audio(&file).expect("the file reads");
+    let frames = audio.frames() as u64;
+    assert!(holds.contains(&frames), "the file holds {frames} frames, not {holds:?}");
+    let last = &audio.left[audio.frames() - 24_000..];
+    let loudest = last.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!((loudest - 0.25).abs() < 0.01, "the tone is in it to its end: {loudest}");
+    assert!((pitch_of(last) - 440.0).abs() < 3.0);
+    // The take is as long as the file, to the frame, and no longer.
+    let (_, start, length, clip) = clip_at(&rig.session, voice, 0.5);
+    let ends_in_file = clip.offset_seconds * SR + (start + length) * FRAMES_PER_BEAT - start * FRAMES_PER_BEAT;
+    assert!(ends_in_file <= frames as f64 + 0.5, "the clip ends at frame {ends_in_file} of a file of {frames}");
+    assert!(ends_in_file >= frames as f64 - 2.0, "and holds all of it: {ends_in_file} of {frames}");
+    assert_eq!(rig.session.project().track(voice).unwrap().takes.len(), 1, "kept as a take, like any other");
+    // The song plays on.
+    let position = rig.session.transport().position_beats;
+    rig.run(40);
+    let status = rig.session.transport();
+    assert!(status.playing && status.position_beats > position + 0.2, "the song plays on: {status:?}");
+}
+
+#[test]
+fn a_disk_that_fills_ends_the_take_whole_up_to_there_and_the_song_plays_on() {
+    // The disk has room for two and a half seconds of it: the header's 56
+    // bytes and 120,000 frames of four bytes. A second at a time is put on
+    // disk, so two seconds are there when the third finds no room.
+    let limits = trill_media::GrowingLimits { fails_at: Some(56 + 120_000 * 4), ..Default::default() };
+    let (mut rig, voice, _folder) = a_take_cut_short_by(limits);
+    // (A second, and what the writer had in hand when the second was full.)
+    whole_up_to_there(&mut rig, voice, 96_000..=119_999, "the disk is full");
+}
+
+#[test]
+fn a_file_as_long_as_a_file_can_be_ends_the_take_whole_up_to_there_and_the_song_plays_on() {
+    // A file may be 100,000 frames here, and four gigabytes as it comes.
+    let limits = trill_media::GrowingLimits { most_bytes: 56 + 100_000 * 4, ..Default::default() };
+    let (mut rig, voice, _folder) = a_take_cut_short_by(limits);
+    whole_up_to_there(&mut rig, voice, 100_000..=100_000, "as long as one file can be");
 }
 
 #[test]
@@ -831,11 +929,30 @@ fn a_songs_recordings_come_beside_it_when_it_is_saved_and_the_unused_ones_can_be
     assert_eq!(unused.len(), 1, "{unused:?}");
     assert_eq!(unused[0].0, third);
     assert!(unused[0].1 > 24_000 * 4, "its size in bytes: {}", unused[0].1);
-    let refusal = rig.session.delete_unused_recordings(std::slice::from_ref(&new_first)).unwrap_err().to_string();
+    let nobody_else = |_: &Path| None;
+    let refusal =
+        rig.session.delete_unused_recordings(std::slice::from_ref(&new_first), &nobody_else).unwrap_err().to_string();
     assert!(refusal.contains("nothing was deleted") && refusal.contains("Lead Vox 3.wav"), "{refusal}");
     assert!(new_first.is_file());
-    assert_eq!(rig.session.delete_unused_recordings(std::slice::from_ref(&third)).unwrap(), unused[0].1);
+    // One that whoever keeps the session says another song plays is
+    // refused with that song's name: this song is not the only one.
+    let another = |path: &Path| (path == third).then(|| "'My Song v2'".to_string());
+    let refusal = rig.session.delete_unused_recordings(std::slice::from_ref(&third), &another).unwrap_err().to_string();
+    assert!(refusal.contains("is played by 'My Song v2'") && refusal.contains("nothing was removed"), "{refusal}");
+    assert!(third.is_file());
+    // Removed, it is out of the song's folder and not out of existence:
+    // in a folder beside the takes, where a run that keeps nothing of
+    // the user's puts it, with all it held.
+    let held = std::fs::read(&third).unwrap();
+    assert_eq!(rig.session.removed_recordings_go(), format!("to {}", beside.join("removed").display()));
+    let removed = rig.session.delete_unused_recordings(std::slice::from_ref(&third), &nobody_else).unwrap();
+    assert_eq!((removed.bytes, removed.recycled), (unused[0].1, 0));
+    assert_eq!(removed.set_aside, [beside.join("removed").join("Lead Vox 3.wav")]);
     assert!(!third.exists() && rig.session.unused_recordings().is_empty());
+    assert_eq!(std::fs::read(&removed.set_aside[0]).unwrap(), held, "not a byte of it is lost");
+    // What was set aside is not listed again, and the name is free for
+    // the next take.
+    assert_eq!(record(&mut rig, 24_000.0), third);
 }
 
 #[test]

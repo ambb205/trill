@@ -128,6 +128,9 @@ impl Staging {
     /// Plays the scene out on the song that is open: the track, its takes
     /// and what is made of them. Returns the track that was recorded on.
     pub fn play(&self, runtime: &Runtime) -> Option<TrackId> {
+        // The scene stands for somebody at the window: its devices are
+        // made up, and so is the hand that arms its track.
+        let _hand = trill_engine::hand::by_hand();
         let chosen = AudioConfig { output: Some(INTERFACE.to_owned()), ..AudioConfig::default() };
         let _ = runtime.set_audio(chosen);
         let session = &runtime.session;

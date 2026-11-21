@@ -412,7 +412,7 @@ fn the_panel_shows_the_inputs_level_only_when_asked_and_measures_the_round_trip(
 }
 
 #[test]
-fn unused_recordings_are_listed_and_deleted_only_when_asked_twice() {
+fn unused_recordings_are_listed_and_go_only_when_asked_twice_and_never_out_of_existence() {
     let (mut harness, stage, voice, folder) = studio();
     harness.session.lock().edit(|project| project.set_track_input(voice, Some(TrackInput::mono(1)))).unwrap();
     harness.idle(2);
@@ -426,10 +426,17 @@ fn unused_recordings_are_listed_and_deleted_only_when_asked_twice() {
     let file = std::path::PathBuf::from(file);
     assert!(file.starts_with(folder.path()) && file.is_file());
 
+    // The list is made by a worker, which reads the songs Trill knows of.
+    fn open_list(harness: &mut Harness) {
+        harness.click_label("File");
+        harness.click_label("Unused recordings");
+        harness.settle_work();
+        harness.idle(3);
+    }
+
     // While undo can reach the take, its recording is in use.
-    harness.click_label("File");
-    harness.click_label("Unused recordings");
-    assert!(harness.is_on_screen("Every recording of this song is still in use."), "{:?}", harness.labels);
+    open_list(&mut harness);
+    assert!(harness.is_on_screen("No recording of this song can go."), "{:?}", harness.labels);
     harness.key(Modifiers::NONE, Key::Escape);
     assert!(harness.app.state().unused_recordings.is_none());
 
@@ -439,24 +446,35 @@ fn unused_recordings_are_listed_and_deleted_only_when_asked_twice() {
     assert!(harness.project().track(voice).unwrap().takes.is_empty());
     harness.session.lock().edit(|project| Ok(project.add_track("Other"))).unwrap();
     harness.idle(2);
-    harness.click_label("File");
-    harness.click_label("Unused recordings");
+    open_list(&mut harness);
     let name = file.file_name().unwrap().to_string_lossy().into_owned();
     assert!(harness.is_on_screen(&name), "{:?}", harness.labels);
-    // Asked once, it asks back; told to keep them, it does.
-    harness.click_label("Delete\u{2026}");
+    // Asked once, it asks back, and says where the recording would go: a
+    // run that keeps nothing of the user's puts nothing in their bin.
+    let removed = file.parent().unwrap().join("removed");
+    harness.click_label("Remove\u{2026}");
     harness.idle(2);
-    assert!(file.is_file(), "nothing is deleted before the question is answered");
-    assert!(harness.is_on_screen("Delete them") && harness.is_on_screen("Keep them"));
+    assert!(file.is_file(), "nothing goes before the question is answered");
+    let question = label(&harness, "Remove this recording?");
+    assert!(question.contains(&format!("It goes to {}", removed.display())), "{question}");
+    assert!(harness.is_on_screen("Remove them") && harness.is_on_screen("Keep them"));
+    // Told to keep it, it does.
     harness.click_label("Keep them");
     assert!(file.is_file() && harness.app.state().unused_recordings.is_none());
-    // Asked twice, it is gone.
-    harness.click_label("File");
-    harness.click_label("Unused recordings");
-    harness.click_label("Delete\u{2026}");
-    harness.click_label("Delete them");
+    // Asked twice, it goes: out of the song's folder, and not out of
+    // existence.
+    let held = std::fs::metadata(&file).unwrap().len();
+    open_list(&mut harness);
+    harness.click_label("Remove\u{2026}");
+    harness.click_label("Remove them");
+    harness.settle_work();
+    harness.idle(3);
     assert!(!file.exists());
+    assert_eq!(std::fs::metadata(removed.join(&name)).unwrap().len(), held, "what it held is all there");
     assert!(harness.app.state().unused_recordings.is_none());
+    let said: Vec<String> = harness.app.state().toasts.texts().iter().map(|text| text.to_string()).collect();
+    let told = format!("to {}", removed.display());
+    assert!(said.iter().any(|text| text.starts_with("Removed 1 recording") && text.ends_with(&told)), "{said:?}");
 }
 
 #[test]

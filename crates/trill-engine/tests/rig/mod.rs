@@ -164,6 +164,10 @@ impl Rig {
     }
 
     pub fn with(host: ScriptedHost, config: AudioConfig, patience: Patience) -> Self {
+        // A test stands for the user: what its own thread asks of the
+        // session is asked by the user's hand, for as long as the thread
+        // lives. (What stands for the assistant's door asks on another.)
+        std::mem::forget(trill_engine::hand::by_hand());
         let probes = Arc::new(ProbeLog::default());
         let factory =
             CompositeFactory::new(vec![Box::new(BuiltinFactory), Box::new(ProbeFactory { log: probes.clone() })]);

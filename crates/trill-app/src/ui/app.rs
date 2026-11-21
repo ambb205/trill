@@ -425,6 +425,11 @@ impl TrillApp {
                 if let Some(notice) = session.take_recording_notice() {
                     self.state.toasts.error(notice);
                 }
+                // What was held or disarmed because no hand at this
+                // window asked for it: a sentence, and nothing is wrong.
+                if let Some(note) = session.take_input_note() {
+                    self.state.toasts.info(inputs::capitalized(&note));
+                }
             }
             None => ctx.request_repaint_after(Duration::from_millis(8)),
         }
@@ -1492,8 +1497,12 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 cx.state.shortcuts_open = false;
             } else if cx.state.credits_open {
                 cx.state.credits_open = false;
-            } else if cx.state.unused_recordings.is_some() {
-                cx.state.unused_recordings = None;
+            } else if let Some(unused) = &cx.state.unused_recordings {
+                // Not while its recordings are on their way out: what
+                // became of them is said when they have gone.
+                if !unused.is_removing() {
+                    cx.state.unused_recordings = None;
+                }
             } else if cx.state.load_open {
                 cx.state.load_open = false;
             } else if cx.settings.is_open() {

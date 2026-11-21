@@ -690,6 +690,7 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
                 if session.is_armed(track.id) {
                     out["armed"] = json!(true);
                 }
+                crate::recording::say_held(session, track.id, &mut out);
                 out["devices"] = json!(chain_json(session, &track.devices));
                 crate::instruments::describe_track(session, track.id, &mut out);
                 out

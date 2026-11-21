@@ -39,6 +39,7 @@
 //! ones no state of the song names any more
 //! ([`Session::unused_recordings`]) and deletes those it is asked to.
 
+use super::bin::{Bin, Removed};
 use super::{Session, SessionError};
 use crate::capture::Health;
 use crate::compile::Live;
@@ -46,7 +47,7 @@ use crate::engine::{InputInfo, Message};
 use crate::live::AudioMark;
 use crate::processor::Measure;
 use crate::recorder::{FileOf, Growing, TakeWriter};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -274,6 +275,38 @@ pub(super) struct Audio {
     punch: bool,
     /// How many songs this session has had before the one that is open.
     songs: u32,
+    /// Whose hand opened what: see [`Session::hold_to_the_hand`].
+    hand: Let,
+    /// Where a recording that is removed goes.
+    bin: Bin,
+    /// What a take's files are held to: a WAV file's own length and the
+    /// disk, unless a test says less.
+    limits: trill_media::GrowingLimits,
+}
+
+/// What the user's own hand has let the input be opened for, in this run
+/// of the program and in this song.
+#[derive(Default)]
+struct Let {
+    /// The armed tracks that record an input, where a hand made them so.
+    open: HashSet<TrackId>,
+    /// The tracks whose input is heard through them, and as what (while
+    /// armed, or always), where a hand switched that on.
+    heard: HashMap<TrackId, Monitoring>,
+    /// The tracks whose input would be heard, let or held, and as what,
+    /// when this was last looked at: what is the same after an act did
+    /// not come about by it.
+    wanted: HashMap<TrackId, Monitoring>,
+    /// What was held or disarmed for want of a hand, until it is said.
+    said: Option<String>,
+}
+
+impl Let {
+    /// Whether hearing the input of `track` as `heard` is held: no hand
+    /// switched it on.
+    fn holds(&self, track: TrackId, heard: Monitoring) -> bool {
+        self.heard.get(&track) != Some(&heard)
+    }
 }
 
 impl Audio {
@@ -305,12 +338,21 @@ impl Session {
     }
 
     /// Says that somebody is looking at the input's level, or has stopped:
-    /// the input is open for as long as anybody is. A settings panel says
-    /// so while it is shown.
-    pub fn watch_input(&mut self, watching: bool) {
+    /// the input is open for as long as anybody is. Looking opens the
+    /// input, so only the user's own hand begins to
+    /// ([`crate::hand::by_hand`]); anybody stops.
+    pub fn watch_input(&mut self, watching: bool) -> Result<(), SessionError> {
+        if watching && !crate::hand::is_by_hand() {
+            return Err(SessionError::Recording(
+                "looking at what arrives on the input opens the microphone: the user does that themselves, in the \
+                 audio settings (Show level) or by arming a track"
+                    .to_string(),
+            ));
+        }
         let watchers = &mut self.recording.watchers;
         *watchers = if watching { *watchers + 1 } else { watchers.saturating_sub(1) };
         self.recording.tried = None;
+        Ok(())
     }
 
     /// The highest level each channel of the input has had since this was
@@ -348,8 +390,14 @@ impl Session {
     /// armed or is always monitored, a take is being recorded, a
     /// measurement runs, or somebody is looking at its level.
     fn input_needed(&self) -> bool {
+        // An armed track that records an input was made so by a hand, or
+        // it is no longer armed; one that is always heard needs the input
+        // only once a hand has let it be.
         let wanted = |track: &trill_core::Track| {
-            track.input.is_some_and(|input| input.monitor == Monitoring::Always || self.is_armed(track.id))
+            track.input.is_some_and(|input| {
+                self.is_armed(track.id)
+                    || (input.monitor == Monitoring::Always && !self.recording.hand.holds(track.id, input.monitor))
+            })
         };
         self.recording.watchers > 0
             || self.recording.measuring.is_some()
@@ -380,7 +428,153 @@ impl Session {
 
     /// What goes on beside the song that the graph has to know of.
     pub(super) fn live_now(&self) -> Live {
-        Live { armed: self.armed().iter().copied().collect() }
+        let held = self.project.tracks.iter().filter(|track| self.input_held(track.id)).map(|track| track.id);
+        Live { armed: self.armed().iter().copied().collect(), held: held.collect() }
+    }
+
+    // ---- whose hand opened it --------------------------------------------
+
+    /// As what the input of `track` would be heard through it now: while
+    /// armed, or always. `None` where it is not heard at all.
+    fn heard_as(&self, track: &trill_core::Track) -> Option<Monitoring> {
+        match track.input?.monitor {
+            Monitoring::Always => Some(Monitoring::Always),
+            Monitoring::Armed if self.is_armed(track.id) => Some(Monitoring::Armed),
+            _ => None,
+        }
+    }
+
+    /// Whether the input of `track` is held: the song says it is heard
+    /// through the track, and nobody's hand switched that on in this run
+    /// of the program and in this song. It is then not heard, and not
+    /// opened for being heard; [`Session::let_input_be_heard`] lets it go.
+    pub fn input_held(&self, track: TrackId) -> bool {
+        let Ok(found) = self.project.track(track) else { return false };
+        self.heard_as(found).is_some_and(|heard| self.recording.hand.holds(track, heard))
+    }
+
+    /// Lets the input of `track` be heard as the song says, where it was
+    /// held: the click on its switch. The user's own hand only.
+    pub fn let_input_be_heard(&mut self, track: TrackId) -> Result<(), SessionError> {
+        let found = self.project.track(track)?;
+        let Some(heard) = self.heard_as(found) else { return Ok(()) };
+        if !crate::hand::is_by_hand() {
+            return Err(SessionError::Recording(format!(
+                "letting the input of '{}' be heard opens the microphone into the speakers: the user does that \
+                 themselves, with the track's monitor switch",
+                found.name
+            )));
+        }
+        if self.recording.hand.heard.insert(track, heard) != Some(heard) {
+            self.input_is_to_be_tried();
+            self.compile_and_swap();
+        }
+        Ok(())
+    }
+
+    /// What was held or disarmed for want of the user's hand, said once: a
+    /// front end shows it.
+    pub fn take_input_note(&mut self) -> Option<String> {
+        self.recording.hand.said.take()
+    }
+
+    /// Holds the input to its rule, after anything that may have changed
+    /// what wants it: **the input is opened for a track only by the user's
+    /// own hand, in this run of the program and in this song.** The hand
+    /// arms a track that records an input, gives an armed track its input,
+    /// or switches its monitoring on; an undo or a redo of the hand's is
+    /// the hand's too. Nothing else opens it: not what is asked at a door
+    /// where nobody says they are the user ([`crate::hand`]), not a song
+    /// that is opened, begun or recovered, not a track that is new (a
+    /// duplicate, a paste).
+    ///
+    /// So an armed track that came to record an input any other way is
+    /// disarmed, and an input that the song says is heard, and that no
+    /// hand switched on, is held ([`Session::input_held`]).
+    ///
+    /// `there_before` says whether a track was in the song before what
+    /// was just done. Arming does not carry into another song, and
+    /// neither does anything a hand let: [`Session::forget_the_hand`].
+    pub(super) fn hold_to_the_hand(&mut self, there_before: &dyn Fn(TrackId) -> bool) {
+        let by_hand = crate::hand::is_by_hand();
+        let mut hand = std::mem::take(&mut self.recording.hand);
+        let mut disarmed: Vec<(TrackId, String)> = Vec::new();
+        let mut held: Vec<String> = Vec::new();
+        let mut wanted = HashMap::new();
+        for track in &self.project.tracks {
+            let id = track.id;
+            let this_act = by_hand && there_before(id);
+            // Open for a take: armed, and recording an input.
+            let mut armed = self.is_armed(id);
+            if armed && track.input.is_some() {
+                if !hand.open.contains(&id) && this_act {
+                    hand.open.insert(id);
+                } else if !hand.open.contains(&id) {
+                    disarmed.push((id, track.name.clone()));
+                    armed = false;
+                }
+            } else {
+                hand.open.remove(&id);
+            }
+            // Heard through the track, and as what.
+            let heard = match track.input.map(|input| input.monitor) {
+                Some(Monitoring::Always) => Some(Monitoring::Always),
+                Some(Monitoring::Armed) if armed => Some(Monitoring::Armed),
+                _ => None,
+            };
+            match heard {
+                None => drop(hand.heard.remove(&id)),
+                Some(heard) => {
+                    wanted.insert(id, heard);
+                    if hand.heard.get(&id) != Some(&heard) {
+                        hand.heard.remove(&id);
+                        // It came to be heard so by what was just done,
+                        // and that was the user's doing.
+                        if this_act && hand.wanted.get(&id) != Some(&heard) {
+                            hand.heard.insert(id, heard);
+                        } else if hand.wanted.get(&id) != Some(&heard) {
+                            held.push(track.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let there = |id: &TrackId| self.project.track(*id).is_ok();
+        hand.open.retain(|id| there(id));
+        hand.heard.retain(|id, _| there(id));
+        hand.wanted = wanted;
+        let mut said = Vec::new();
+        if !disarmed.is_empty() {
+            let names: Vec<String> = disarmed.iter().map(|(_, name)| format!("'{name}'")).collect();
+            said.push(format!(
+                "{} {} disarmed: arming a track that records an input opens the microphone, and that is done by \
+                 hand, with the track's arm button",
+                names.join(", "),
+                if names.len() == 1 { "was" } else { "were" }
+            ));
+        }
+        if !held.is_empty() {
+            let names: Vec<String> = held.iter().map(|name| format!("'{name}'")).collect();
+            said.push(format!(
+                "the input of {} is held, not heard: the song says it is heard through the track, and that opens \
+                 the microphone into the speakers. A click on the track's monitor switch lets it be heard",
+                names.join(", ")
+            ));
+        }
+        if !said.is_empty() {
+            hand.said = Some(said.join(". "));
+        }
+        self.recording.hand = hand;
+        if !disarmed.is_empty() {
+            self.playing_disarm(&disarmed.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        }
+    }
+
+    /// Another song: nothing a hand let in the song before is this one's,
+    /// and nothing that was armed there is armed here. Track ids begin
+    /// again in every song.
+    pub(super) fn forget_the_hand(&mut self) {
+        self.recording.hand = Let::default();
     }
 
     /// Opens the input when something has come to need it, closes it when
@@ -508,7 +702,7 @@ impl Session {
         let said = self.engine.steady_output_latency().round() as i64;
         let more = measured.map_or(0, |measured| measured - said).max(0) + adjust.max(0);
         let tail = more as u32 + (HANDLE_SECONDS * rate) as u32;
-        let (writer, feeds) = match TakeWriter::start(files, rate, tail) {
+        let (writer, feeds) = match TakeWriter::start(files, rate, tail, self.recording.limits) {
             Ok(started) => started,
             Err(why) => return refuse(format!("the take cannot be written: {why}")),
         };
@@ -653,7 +847,18 @@ impl Session {
             // written.
             (files.iter().map(|file| file.frames()).min().unwrap_or(0), self.engine.position())
         });
-        let passes = passes(&audio, rolled, stopped);
+        let mut passes = passes(&audio, rolled, stopped);
+        if files.iter().any(|file| file.failed().is_some()) {
+            // A file that took no more holds less than was sung: the take
+            // is what the file holds, whole up to there, and no longer.
+            let held = files.iter().map(|file| file.frames()).min().unwrap_or(0);
+            let map = self.project.tempo_map();
+            for pass in &mut passes {
+                let most = held.saturating_sub(pass.at + shift);
+                pass.end = pass.end.min(map.beat_after(pass.start, most as f64, rate));
+            }
+            passes.retain(|pass| pass.end - pass.start >= SHORTEST_TAKE);
+        }
         let tracks = audio.tracks.clone();
         let paths: Vec<PathBuf> = files.iter().map(|file| file.path().to_path_buf()).collect();
         match self.edit(|project| put_takes(project, &tracks, &paths, &passes, shift, rate)) {
@@ -791,6 +996,12 @@ impl Session {
     /// result a few seconds later; it changes nothing by itself.
     pub fn measure_latency(&mut self, channel: u16) -> Result<(), SessionError> {
         let refuse = |sentence: &str| Err(SessionError::Recording(sentence.to_string()));
+        if !crate::hand::is_by_hand() {
+            return refuse(
+                "the measurement opens the microphone and plays through the output: the user runs it themselves, in \
+                 the audio settings (Input and round trip, Measure)",
+            );
+        }
         if self.is_recording() {
             return refuse("a take is being recorded; measure when it has ended");
         }
@@ -1024,14 +1235,53 @@ impl Session {
         unused
     }
 
-    /// Deletes the recordings among `paths` that are unused
-    /// ([`Session::unused_recordings`]) and returns how many bytes that
-    /// freed. One that the song names, or that is not in the song's own
-    /// folder, is refused, and then none is deleted. This cannot be
-    /// undone: a front end asks first.
-    pub fn delete_unused_recordings(&mut self, paths: &[PathBuf]) -> Result<u64, SessionError> {
+    /// Holds the files of the takes recorded from now on to `limits`: for
+    /// a test, which reaches a full disk or the length a file can have in
+    /// a second and not in hours.
+    #[doc(hidden)]
+    pub fn hold_recordings_to(&mut self, limits: trill_media::GrowingLimits) {
+        self.recording.limits = limits;
+    }
+
+    /// Says where recordings that are removed go: the system's Recycle
+    /// Bin, or a folder beside the takes. The folder unless a program says
+    /// otherwise, so that nothing of a test's goes into anybody's bin.
+    pub fn remove_recordings_into(&mut self, bin: Bin) {
+        self.recording.bin = bin;
+    }
+
+    /// Where a recording that is removed now would go, for the question
+    /// that is asked first: "to the Recycle Bin", "to C:\…\removed".
+    pub fn removed_recordings_go(&self) -> String {
+        self.recording.bin.goes(&self.recordings_folder())
+    }
+
+    /// Removes the recordings among `paths` that are unused
+    /// ([`Session::unused_recordings`]) and says how much room they took
+    /// and where they went. None is unlinked: each goes to the system's
+    /// Recycle Bin or into a folder beside the takes (see
+    /// [`Session::remove_recordings_into`]), from where it can be had back.
+    ///
+    /// One that the open song names, or that is not in its own folder, is
+    /// refused, and so is one that `elsewhere` says another song plays (by
+    /// that song's name): then none is removed. The session knows the song
+    /// that is open; which others there are is its keeper's to say, so a
+    /// front end asks [`Runtime`](../../trill_runtime/struct.Runtime.html)
+    /// and not this.
+    pub fn delete_unused_recordings(
+        &mut self,
+        paths: &[PathBuf],
+        elsewhere: &dyn Fn(&Path) -> Option<String>,
+    ) -> Result<Removed, SessionError> {
         let unused = self.unused_recordings();
         for path in paths {
+            if let Some(song) = elsewhere(path) {
+                return Err(SessionError::Recording(format!(
+                    "'{}' is played by {song}: nothing was removed. A recording goes only when no song Trill knows \
+                     of plays it",
+                    path.display()
+                )));
+            }
             if !unused.iter().any(|(known, _)| known == path) {
                 return Err(SessionError::Recording(format!(
                     "'{}' is not a recording the song has stopped using: nothing was deleted. The ones that can be are: {}",
@@ -1044,13 +1294,12 @@ impl Session {
                 )));
             }
         }
-        let mut freed = 0;
-        for (path, bytes) in unused.iter().filter(|(path, _)| paths.contains(path)) {
-            std::fs::remove_file(path).map_err(|error| super::io_error(path, error))?;
+        let going: Vec<(PathBuf, u64)> = unused.into_iter().filter(|(path, _)| paths.contains(path)).collect();
+        for (path, _) in &going {
+            // Nothing reads it any more, so that it can go.
             self.audio.media().forget(path);
-            freed += bytes;
         }
-        Ok(freed)
+        self.recording.bin.remove(&going).map_err(|(_, path, error)| super::io_error(&path, error))
     }
 }
 

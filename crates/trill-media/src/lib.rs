@@ -38,4 +38,4 @@ pub use peaks::{MinMax, PeakColumn, Peaks, scan_columns};
 pub use resample::{Resampler, resample};
 pub use stream::{AudioFile, open, wav_loop};
 pub use wav::{WavFormat, WavWriter, write_wav};
-pub use wav_growing::GrowingWav;
+pub use wav_growing::{GrowingWav, Limits as GrowingLimits};

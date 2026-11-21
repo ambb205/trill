@@ -324,19 +324,27 @@ fn run(options: &Options) -> Result<(), String> {
             session.play();
         }
         if options.monitor > 0 {
+            // Whoever asked for --monitor is the hand that switches it on.
+            let _hand = trill_engine::hand::by_hand();
             // In the song as it is held here, which is never written: a
             // track for each channel of the stand-in's input, heard always.
             let tracks = options.monitor;
             let edited = session.edit(|project| {
+                let mut added = Vec::new();
                 for channel in 1..=tracks as u16 {
                     let track = project.add_track(format!("Input {channel}"));
                     let input = TrackInput { channel, stereo: false, monitor: Monitoring::Always };
                     project.set_track_input(track, Some(input))?;
                     project.set_track_volume(track, -30.0)?;
+                    added.push(track);
                 }
-                Ok(())
+                Ok(added)
             });
-            edited.map_err(|error| error.to_string())?;
+            // A track that is new is held, whoever made it: the click on
+            // its switch is what lets it be heard.
+            for track in edited.map_err(|error| error.to_string())? {
+                session.let_input_be_heard(track).map_err(|error| error.to_string())?;
+            }
             session.ready_input().map_err(|error| error.to_string())?;
             let open = session.input_status().open.ok_or("the stand-in's input did not open")?;
             println!(

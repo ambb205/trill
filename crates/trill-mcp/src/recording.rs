@@ -198,6 +198,19 @@ pub(crate) fn input_json(input: TrackInput) -> Value {
     json!({ "records": input.said(), "monitor": monitor_word(input.monitor) })
 }
 
+/// What a reply says of a track whose input is held: the song says it is
+/// heard, and nobody's hand has switched that on.
+pub(crate) const HELD: &str = "The song says this input is heard through the track, but it is held and not heard: only \
+                               the user opens a microphone into the speakers, with a click on the track's monitor \
+                               switch. Nothing is wrong with the song.";
+
+/// Says in `out`, the reply about track `id`, that its input is held, where it is.
+pub(crate) fn say_held(session: &Session, id: TrackId, out: &mut Value) {
+    if session.input_held(id) {
+        out["input_held"] = json!(HELD);
+    }
+}
+
 /// The input as it stands: open or not, and what is wrong.
 fn status_json(session: &Session) -> Value {
     let status = session.input_status();
@@ -394,6 +407,13 @@ impl TrillServer {
                     }
                 }
             }
+            // A client the user set up, asking for an input to be heard
+            // that the song already says is, and that is held: that is
+            // the hand that lets it go. (At the assistant's door it stays
+            // held, and the reply says so.)
+            if request.monitor.is_some() && wanted == was && !self.is_guarded() && session.input_held(id) {
+                session.let_input_be_heard(id).map_err(|error| explain(session.project(), error))?;
+            }
             if wanted != was {
                 // A microphone goes live by the user's own hand.
                 if self.is_guarded() && wanted.is_some() && session.is_armed(id) {
@@ -413,6 +433,7 @@ impl TrillServer {
                 None => out["records"] = json!("what a keyboard plays"),
             }
             out["armed"] = json!(session.is_armed(id));
+            say_held(&session, id, &mut out);
             out["device_input"] = status_json(&session);
             if let Some(latency) = session.recording_latency() {
                 out["round_trip_ms"] = json!(round(latency.round_trip_ms));
@@ -429,6 +450,8 @@ impl TrillServer {
     async fn audio_inputs(&self, Parameters(request): Parameters<AudioInputsRequest>) -> CallToolResult {
         let (session, guarded) = (self.session.clone(), self.is_guarded());
         let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            // A client the user set up is the user's hand, on this thread too.
+            let _hand = (!guarded).then(trill_engine::hand::by_hand);
             let listen = request.listen.unwrap_or(false);
             let was_open = session.lock().input_status().open.is_some();
             if listen && !was_open {
@@ -438,9 +461,9 @@ impl TrillServer {
                         .into());
                 }
                 let mut session = session.lock();
-                session.watch_input(true);
+                session.watch_input(true).map_err(|error| error.to_string())?;
                 if let Err(error) = session.ready_input() {
-                    session.watch_input(false);
+                    let _ = session.watch_input(false);
                     return Err(error.to_string());
                 }
                 session.input_levels();
@@ -461,7 +484,7 @@ impl TrillServer {
                 out["arriving"] = json!(channels);
             }
             if listen && !was_open {
-                session.watch_input(false);
+                let _ = session.watch_input(false);
             }
             out["asked_for"] = json!(session.audio_config().input.clone().unwrap_or_else(|| "the system's default input".into()));
             Ok(out)
@@ -548,6 +571,8 @@ impl TrillServer {
     async fn recording_latency(&self, Parameters(request): Parameters<RecordingLatencyRequest>) -> CallToolResult {
         let (session, runtime, guarded) = (self.session.clone(), self.runtime.clone(), self.is_guarded());
         let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            // A client the user set up is the user's hand, on this thread too.
+            let _hand = (!guarded).then(trill_engine::hand::by_hand);
             let saved = |kept: Result<(), trill_library::SaveError>, out: &mut Value| {
                 if let Err(error) = kept {
                     out["not_saved"] = json!(format!("{error}. It holds for this run only."));
@@ -615,35 +640,54 @@ impl TrillServer {
         finish(outcome.unwrap_or_else(|error| Err(format!("the measurement did not answer: {error}"))))
     }
 
-    /// The recordings in the song's own folder that neither the song nor any state undo can reach names any
-    /// more, with their sizes; and, with `delete`, their deletion, which cannot be undone. Trill never deletes
-    /// a recording by itself: a take that is removed or undone leaves its file.
+    /// The recordings in the song's own folder that nothing plays any more, with their sizes: not the song or
+    /// any state undo can reach, not another song Trill knows of (one saved under another name plays the same
+    /// files), not unsaved work that can still be recovered. With `delete`, their removal: to the system's
+    /// Recycle Bin, or a `removed` folder beside the takes; never out of existence. One that any song plays is
+    /// refused with that song's name. Trill never removes a recording by itself: a take that is removed or
+    /// undone leaves its file.
     #[tool(annotations(title = "Unused recordings", destructive_hint = true))]
-    fn unused_recordings(&self, Parameters(request): Parameters<UnusedRecordingsRequest>) -> CallToolResult {
-        let mut session = self.session.lock();
-        let reply = (|| -> Reply {
-            let mut out = json!({ "folder": session.recordings_folder() });
+    async fn unused_recordings(&self, Parameters(request): Parameters<UnusedRecordingsRequest>) -> CallToolResult {
+        let (runtime, guarded) = (self.runtime.clone(), self.is_guarded());
+        // The other songs' files are read to answer: not with the server's own thread.
+        let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            let mut out = json!({});
             if let Some(paths) = &request.delete {
-                if self.is_guarded() {
-                    return Err("Deleting a recording cannot be undone, so that is the user's to do: File, Unused \
-                                recordings lists them."
+                if guarded {
+                    return Err("Removing a recording is the user's to do, who is asked first: File, Unused \
+                                recordings lists them and says where they would go."
                         .into());
                 }
                 let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-                let freed = session.delete_unused_recordings(&paths).map_err(|error| error.to_string())?;
-                out["deleted"] = json!(paths.len());
-                out["freed_bytes"] = json!(freed);
+                let removed = runtime.delete_unused_recordings(&paths)?;
+                out["removed"] = json!({
+                    "count": paths.len(),
+                    "bytes": removed.bytes,
+                    "went": removed.went(),
+                    "in_the_recycle_bin": removed.recycled,
+                    "set_aside": removed.set_aside,
+                });
             }
-            let unused: Vec<Value> = session
-                .unused_recordings()
-                .iter()
-                .map(|(path, bytes)| json!({ "path": path, "bytes": bytes }))
-                .collect();
-            out["bytes"] = json!(session.unused_recordings().iter().map(|(_, bytes)| bytes).sum::<u64>());
+            let listed = runtime.unused_recordings();
+            out["folder"] = json!(listed.folder);
+            out["bytes"] = json!(listed.unused.iter().map(|(_, bytes)| bytes).sum::<u64>());
+            let unused: Vec<Value> =
+                listed.unused.iter().map(|(path, bytes)| json!({ "path": path, "bytes": bytes })).collect();
             out["unused"] = json!(unused);
+            if !listed.played_elsewhere.is_empty() {
+                // Not this song's any more, and somebody else's still: they stay.
+                let kept: Vec<Value> = listed
+                    .played_elsewhere
+                    .iter()
+                    .map(|kept| json!({ "path": kept.path, "bytes": kept.bytes, "played_by": kept.by }))
+                    .collect();
+                out["played_by_other_songs"] = json!(kept);
+            }
+            out["removed_go"] = json!(listed.goes);
             Ok(out)
-        })();
-        finish(reply)
+        })
+        .await;
+        finish(outcome.unwrap_or_else(|error| Err(format!("the recordings could not be listed: {error}"))))
     }
 }
 
