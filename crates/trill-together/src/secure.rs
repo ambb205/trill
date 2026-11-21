@@ -19,7 +19,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The Noise handshake both sides speak.
 const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
@@ -83,6 +83,28 @@ fn read_frame(stream: &mut impl Read, into: &mut Vec<u8>) -> io::Result<()> {
     stream.read_exact(into)
 }
 
+/// A socket read until a moment and no longer. A time limit on the socket
+/// alone is a limit on each read: a side that said its part of the
+/// handshake a byte at a time would be waited for as long as it cared to
+/// go on, and hold one of the few places there are for proving an
+/// invitation.
+struct Until<'a> {
+    stream: &'a TcpStream,
+    end: Instant,
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "its part of the handshake was not said in time"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(into)
+    }
+}
+
 /// The keys of one connection, which its reader and its writer share.
 struct Keys(snow::StatelessTransportState);
 
@@ -109,24 +131,34 @@ pub struct Hearer {
 }
 
 /// Makes `stream` a connection only the holders of `key` can use: the
-/// side that connected is the `initiator`. Both sides say their part
-/// within a few seconds, or there is no connection.
+/// side that connected is the `initiator`. The other side has said the
+/// whole of its part within a few seconds, or there is no connection.
 pub fn secure(stream: TcpStream, key: &[u8; 32], initiator: bool) -> Result<(Sayer, Hearer), Broken> {
+    secure_within(stream, key, initiator, HANDSHAKE)
+}
+
+/// [`secure`], with how long the other side has for its part.
+fn secure_within(
+    stream: TcpStream,
+    key: &[u8; 32],
+    initiator: bool,
+    within: Duration,
+) -> Result<(Sayer, Hearer), Broken> {
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(HANDSHAKE))?;
     stream.set_write_timeout(Some(WRITING))?;
     let builder = snow::Builder::new(PATTERN.parse()?).psk(0, key)?;
     let mut state = if initiator { builder.build_initiator()? } else { builder.build_responder()? };
     let (mut said, mut heard) = (vec![0u8; 1024], Vec::new());
     let mut nothing = [0u8; 1024];
-    let mut wire = stream.try_clone()?;
+    let mut wire = &stream;
+    let mut hearing = Until { stream: &stream, end: Instant::now() + within };
     if initiator {
         let length = state.write_message(&[], &mut said)?;
         write_frame(&mut wire, &said[..length])?;
-        read_frame(&mut wire, &mut heard)?;
+        read_frame(&mut hearing, &mut heard)?;
         state.read_message(&heard, &mut nothing)?;
     } else {
-        read_frame(&mut wire, &mut heard)?;
+        read_frame(&mut hearing, &mut heard)?;
         state.read_message(&heard, &mut nothing)?;
         let length = state.write_message(&[], &mut said)?;
         write_frame(&mut wire, &said[..length])?;
@@ -305,5 +337,30 @@ mod tests {
         let ((mut say, _hear), (_their_say, mut their_hear)) = (ours.unwrap(), theirs.unwrap());
         std::thread::spawn(move || say.say(&vec![0u8; 300_000]));
         assert!(matches!(their_hear.hear(100_000), Err(Broken::TooMuch(300_000))));
+    }
+
+    #[test]
+    fn someone_who_says_their_part_a_byte_at_a_time_has_no_longer_than_anyone_else() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepting = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap().0;
+            let began = Instant::now();
+            let secured = secure_within(stream, &[3u8; 32], false, Duration::from_millis(400));
+            (secured.is_err(), began.elapsed())
+        });
+        // A frame that says it is long, and then a byte every so often:
+        // each of them arrives well within the time the whole has.
+        let mut stranger = TcpStream::connect(address).unwrap();
+        stranger.write_all(&[0xff, 0xff]).unwrap();
+        for _ in 0..100 {
+            if accepting.is_finished() || stranger.write_all(&[0]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (refused, took) = accepting.join().unwrap();
+        assert!(refused, "no connection comes of it");
+        assert!(took < Duration::from_secs(3), "and it was let go of when its time was up, not after {took:?}");
     }
 }

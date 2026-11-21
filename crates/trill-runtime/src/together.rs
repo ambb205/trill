@@ -449,7 +449,7 @@ impl Driver {
                     }
                 };
                 if news {
-                    self.net.say_to_all(&Message::Presence(presence), Some(link));
+                    self.say_to_greeted(&Message::Presence(presence), Some(link));
                     self.shared.lock().status.revision += 1;
                 }
             }
@@ -457,7 +457,7 @@ impl Driver {
                 let before = self.people.len();
                 self.people.retain(|(here, ..)| here.person.id != person);
                 if self.people.len() != before {
-                    self.net.say_to_all(&Message::Gone { person }, Some(link));
+                    self.say_to_greeted(&Message::Gone { person }, Some(link));
                     self.shared.lock().status.revision += 1;
                 }
             }
@@ -472,9 +472,17 @@ impl Driver {
             .filter(|(link, peer)| peer.synced && Some(**link) != except)
             .map(|(link, _)| *link)
             .collect();
-        for link in to {
-            self.net.say(link, message);
-        }
+        self.net.say_to(&to, message);
+    }
+
+    /// Says `message` to every program this one has greeted, but `except`.
+    /// Never to every connection the network has: one is there before this
+    /// thread has heard of it and said who it is, and a program that hears
+    /// who is here before it hears that takes the other for no Trill and
+    /// lets go. That is how a third person once never got into a song.
+    fn say_to_greeted(&mut self, message: &Message, except: Option<LinkId>) {
+        let to: Vec<LinkId> = self.peers.keys().copied().filter(|link| Some(*link) != except).collect();
+        self.net.say_to(&to, message);
     }
 
     fn events(&mut self) {
@@ -499,7 +507,7 @@ impl Driver {
                         .collect();
                     self.people.retain(|(_, via, _)| *via != link);
                     for person in gone {
-                        self.net.say_to_all(&Message::Gone { person }, None);
+                        self.say_to_greeted(&Message::Gone { person }, None);
                     }
                     if let Some(person) = peer.person {
                         match why.as_str() {
@@ -560,7 +568,7 @@ impl Driver {
         if due && !self.peers.is_empty() {
             self.presence_seq += 1;
             let saying = Presence { seq: self.presence_seq, ..presence.clone() };
-            self.net.say_to_all(&Message::Presence(saying), None);
+            self.say_to_greeted(&Message::Presence(saying), None);
             self.presence_said = Some((presence, Instant::now()));
         }
     }

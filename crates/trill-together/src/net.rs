@@ -321,11 +321,16 @@ impl Net {
         self.say_encoded(&[link], Arc::new(message.encode()));
     }
 
-    /// Says `message` to every program that is connected but `except`.
-    pub fn say_to_all(&mut self, message: &Message, except: Option<LinkId>) {
-        let to: Vec<LinkId> = self.links().into_iter().filter(|link| Some(*link) != except).collect();
+    /// Says `message` to each of `to`, written out once.
+    ///
+    /// There is no saying to every connection there is, on purpose: a
+    /// connection is there ([`Net::links`]) before whoever drives the song
+    /// has heard of it ([`Event::Open`]) and said who it is, and a program
+    /// that hears anything else first lets go. Whoever says names the
+    /// connections it has greeted.
+    pub fn say_to(&mut self, to: &[LinkId], message: &Message) {
         if !to.is_empty() {
-            self.say_encoded(&to, Arc::new(message.encode()));
+            self.say_encoded(to, Arc::new(message.encode()));
         }
     }
 

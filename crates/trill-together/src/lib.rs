@@ -76,7 +76,7 @@ mod tests {
         joiner.say(theirs, &presence);
         let Event::Heard { link, message } = next(&mut sharer) else { panic!("it is heard") };
         assert_eq!((link, &message), (ours, &presence));
-        sharer.say_to_all(&Message::Gone { person: 7 }, None);
+        sharer.say_to(&[ours], &Message::Gone { person: 7 });
         assert!(matches!(next(&mut joiner), Event::Heard { message: Message::Gone { person: 7 }, .. }));
 
         // One of them leaves, and says why.

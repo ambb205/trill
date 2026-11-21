@@ -321,6 +321,32 @@ fn a_program_that_says_what_no_edit_could_have_made_is_let_go_of_and_the_song_is
 }
 
 #[test]
+fn whoever_connects_is_told_who_shares_the_song_before_anything_else_is_said_to_them() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, keys, _) = with_a_song(folder.path(), "Ada");
+    let ben = start(folder.path(), "Ben");
+    let invitation = ada.share(Reach::ThisMachine, 0).unwrap();
+    ben.join(&invitation, false).unwrap();
+    eventually("Ben is in the song", || same(&ada, &ben) && ada.together().people.len() == 1);
+
+    // Ada's program is kept from its song for a moment, as a save or a
+    // long edit keeps it, and has something new to say of where she is.
+    // Someone connects meanwhile: the connection is there before the
+    // program has come round to greeting it.
+    let held = ada.session.lock();
+    std::thread::sleep(Duration::from_millis(150));
+    let (_say, mut hear) = by_hand(&invitation);
+    std::thread::sleep(Duration::from_millis(150));
+    ada.holding(Mine { tracks: vec![keys], holding: Some("the volume of Keys".into()), ..Mine::default() });
+    drop(held);
+
+    // Whoever hears something else first takes the other for no Trill and
+    // lets go, which is how a third person once never got into a song.
+    let first = Message::decode(&hear.hear(trill_together::MAX_MESSAGE).unwrap()).unwrap();
+    assert!(matches!(first, Message::Hello { .. }), "the first thing said is who is there, not {first:?}");
+}
+
+#[test]
 fn opening_another_song_leaves_the_shared_one_and_the_others_go_on() {
     let folder = tempfile::tempdir().unwrap();
     let (ada, keys, _) = with_a_song(folder.path(), "Ada");
