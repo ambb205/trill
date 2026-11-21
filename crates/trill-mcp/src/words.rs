@@ -615,6 +615,15 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         },
         "song_credits" => about("Working out", "Worked out", "what the song owes for its instruments"),
         "playback_load" => about("Checking", "Checked", "how the machine keeps up with the song"),
+        "shared_song" => match call.text("action") {
+            Some("share") => about("Sharing", "Shared", "the song"),
+            Some("stop_sharing") => Wording::new("Taking the invitation back", "Took the invitation back"),
+            Some("join") => about("Joining", "Joined", "someone's song"),
+            Some("leave") => about("Leaving", "Left", "the shared song"),
+            Some("put_back") => Wording::new("Putting back what gave way", "Put back what gave way"),
+            Some("dismiss") => about("Reading", "Read", "a notice"),
+            _ => about("Looking at", "Looked at", "who is here"),
+        },
         "listen" | "transcribe" => {
             // The sound by its file's name, or the clip that plays it by its own.
             let sound = match (call.text("path"), call.clip("clip")) {
@@ -817,6 +826,15 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
                 said.push(format!("{loudness} LUFS"));
             }
             Some(said.join(", "))
+        }
+        "shared_song" => {
+            // Who is here, by name.
+            let here = answer.get("here").and_then(Value::as_array)?;
+            let names: Vec<&str> = here.iter().filter_map(|person| person.get("name").and_then(Value::as_str)).collect();
+            Some(match names.len() {
+                0 => "nobody else is here".to_owned(),
+                _ => format!("here: {}", names.join(", ")),
+            })
         }
         "playback_load" => {
             // How much of its time the audio thread needs, and what came late.

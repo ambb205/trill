@@ -135,7 +135,8 @@ fn open(
                 break "the other program said more, faster, than anything it could be doing to a song".to_owned();
             }
             match message {
-                Ok(Message::Bye { why }) => break format!("the other program ended it: {}", shortened(&why)),
+                // In the other side's own words.
+                Ok(Message::Bye { why }) => break shortened(&why),
                 Ok(message) => {
                     if happened.send(Event::Heard { link, message }).is_err() {
                         break "this program stopped listening".to_owned();

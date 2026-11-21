@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(shaped.phrases.len(), 1);
         assert_eq!(
             shaped.points[0],
-            AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Hold },
+            AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Hold, id: 0 },
             "at rest until it starts"
         );
         // The same notes give the same curve.

@@ -201,6 +201,7 @@ async fn tools_are_listed_with_schemas() {
         "instrument_catalogue",
         "song_credits",
         "playback_load",
+        "shared_song",
         "listen",
         "transcribe",
         "study",

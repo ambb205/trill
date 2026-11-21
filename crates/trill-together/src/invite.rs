@@ -74,9 +74,10 @@ impl Invitation {
         Ok(Self { host: host.to_owned(), port, secret: read })
     }
 
-    /// The key both sides prove they have: worked out from the secret, so
-    /// that the secret itself is never used as one.
-    pub(crate) fn key(&self) -> [u8; 32] {
+    /// The key both sides prove they have ([`secure`](crate::secure)):
+    /// worked out from the secret, so that the secret itself is never
+    /// used as one.
+    pub fn key(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"trill together, protocol 1");
         hash.update(self.secret);
@@ -125,7 +126,8 @@ mod tests {
         assert_eq!(text.rsplit(':').next().unwrap().len(), 32 + 7, "thirty-two letters in groups of four: {text}");
         assert_eq!(Invitation::parse(&text).unwrap(), made);
         // As someone types it: small letters, spaces, an O for a zero.
-        let typed = text.to_lowercase().replace('-', " ").replace('0', "o");
+        let (place, secret) = text.rsplit_once(':').unwrap();
+        let typed = format!("{place}:{}", secret.to_lowercase().replace('-', " ").replace('0', "o"));
         assert_eq!(Invitation::parse(&format!("  {typed} \n")).unwrap(), made);
         assert_ne!(Invitation::new("192.168.1.20", 47_600).unwrap().key(), made.key(), "the secret is by lot");
         // The same invitation at another address is the same secret.

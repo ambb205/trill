@@ -165,7 +165,8 @@ pub fn who(author: &Author) -> String {
         Author::Person => "You".to_owned(),
         Author::Assistant => "The assistant".to_owned(),
         Author::Client(name) if name.is_empty() => "A client".to_owned(),
-        Author::Client(name) => name.clone(),
+        Author::Other(name) if name.is_empty() => "Someone else".to_owned(),
+        Author::Client(name) | Author::Other(name) => name.clone(),
     }
 }
 
@@ -175,6 +176,9 @@ pub fn hue(theme: &Theme, author: &Author) -> egui::Color32 {
         Author::Person => theme.ink,
         Author::Assistant => theme.info,
         Author::Client(_) => theme.data,
+        // Someone else who holds the song: neither this program's person
+        // nor one of its helpers.
+        Author::Other(_) => theme.ok,
     }
 }
 

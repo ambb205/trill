@@ -76,10 +76,6 @@ fn clip(session: &Session, name: &str) -> ClipId {
     clips.into_iter().find(|clip| clip.name == name).map(|clip| clip.id).expect("the clip is there")
 }
 
-fn device(session: &Session, name: &str) -> DeviceId {
-    session.project().devices().find(|device| device.name == name).map(|device| device.id).expect("the device is there")
-}
-
 #[test]
 fn what_either_of_two_sessions_changes_the_other_has() {
     let (mut a, mut b) = two();

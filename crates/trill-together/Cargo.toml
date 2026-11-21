@@ -15,8 +15,9 @@ serde_json.workspace = true
 # encrypted and authenticated, by a library that does that and nothing
 # else. No cipher is written here. Only the pieces one handshake needs
 # are built: X25519, ChaCha20-Poly1305 and BLAKE2 (Apache-2.0 or MIT).
+# (Without its `std` feature, which would bring in `ring` and a second
+# SHA-2 that nothing here uses.)
 snow = { version = "0.10", default-features = false, features = [
-    "std",
     "use-chacha20poly1305",
     "use-blake2",
     "use-curve25519",

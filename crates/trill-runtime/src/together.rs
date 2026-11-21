@@ -45,6 +45,9 @@ const PRESENCE_EVERY: Duration = Duration::from_millis(100);
 pub const COLOURS: u8 = 8;
 /// How many sentences are kept for a front end that has not read them.
 const SAID_KEPT: usize = 64;
+/// What a program says as it leaves, and as it is closed.
+const LEFT: &str = "left";
+const CLOSED: &str = "the program was closed";
 
 /// Someone else who has the song open, as a front end shows them.
 #[derive(Clone, Debug, PartialEq)]
@@ -289,7 +292,10 @@ impl Driver {
                 }
                 Ask::Leave => {
                     if self.is_live() {
-                        self.leave("they left");
+                        // Nothing is said here of what one did oneself.
+                        let gone: Vec<LinkId> = self.peers.keys().copied().collect();
+                        self.leave(LEFT);
+                        self.net.events().retain(|event| !matches!(event, Event::Lost { link, .. } if gone.contains(link)));
                     }
                 }
             }
@@ -475,10 +481,12 @@ impl Driver {
                     for person in gone {
                         self.net.say_to_all(&Message::Gone { person }, None);
                     }
-                    if let Some(person) = peer.person
-                        && why != "they left"
-                    {
-                        self.say(format!("{} is no longer here: {why}.", person.name));
+                    if let Some(person) = peer.person {
+                        match why.as_str() {
+                            LEFT => self.say(format!("{} left.", person.name)),
+                            CLOSED => self.say(format!("{} closed their Trill.", person.name)),
+                            why => self.say(format!("{} is no longer here: {why}.", person.name)),
+                        }
                     }
                     self.shared.lock().status.revision += 1;
                 }
@@ -499,7 +507,7 @@ impl Driver {
         // Another song was opened: the one the others are in is closed.
         if self.epoch.is_some_and(|epoch| epoch != session.song_epoch()) {
             drop(session);
-            self.leave("they opened another song");
+            self.leave("opened another song");
             self.say("You left the shared song: another song was opened.");
             return;
         }
@@ -576,7 +584,7 @@ impl Driver {
                 std::thread::park_timeout(Duration::from_millis(250));
             }
         }
-        self.leave("the program was closed");
+        self.leave(CLOSED);
     }
 }
 

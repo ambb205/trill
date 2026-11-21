@@ -76,7 +76,8 @@ fn author(by: &Author) -> &str {
         Author::Person => "person",
         Author::Assistant => "assistant",
         Author::Client(name) if name.is_empty() => "client",
-        Author::Client(name) => name,
+        Author::Other(name) if name.is_empty() => "someone else",
+        Author::Client(name) | Author::Other(name) => name,
     }
 }
 
