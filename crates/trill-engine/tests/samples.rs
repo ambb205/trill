@@ -34,7 +34,7 @@ fn render(session: &mut Session) -> Vec<f32> {
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 127 }
+    Note { pitch, start, length, velocity: 127, ..Default::default() }
 }
 
 /// A track with `uri` on it and a clip of `notes`.

@@ -23,7 +23,7 @@ fn roll_ruler(harness: &Harness, beat: f64) -> Pos2 {
 #[test]
 fn notes_are_copied_cut_pasted_and_duplicated() {
     let (mut harness, clip) = with_open_clip();
-    let original = Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 };
+    let original = Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100, ..Default::default() };
     harness.click(harness.note_cell(1.5, 60));
     assert_eq!(harness.app.state().selected_notes, [original]);
     let before = harness.undo_depth();
@@ -72,8 +72,8 @@ fn shift_arrows_move_notes_by_octaves_and_ctrl_u_quantizes() {
 
     // Off the grid, then back onto it with one key.
     let loose = vec![
-        Note { pitch: 60, start: 1.07, length: 0.5, velocity: 100 },
-        Note { pitch: 64, start: 1.9, length: 0.5, velocity: 90 },
+        Note { pitch: 60, start: 1.07, length: 0.5, velocity: 100, ..Default::default() },
+        Note { pitch: 64, start: 1.9, length: 0.5, velocity: 90, ..Default::default() },
     ];
     harness.session.lock().edit(|project| project.clip_mut(clip)?.set_notes(loose)).unwrap();
     harness.idle(2);

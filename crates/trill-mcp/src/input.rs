@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use trill_core::device::{ParamInfo, ParamKind};
 use trill_core::pitch::{parse_drum, parse_pitch};
 use trill_core::project::{AutomationPoint, Segment};
-use trill_core::{ControllerKind, Note};
+use trill_core::{Channel, ControllerKind, InstrumentProfile, Note};
 
 const DEFAULT_VELOCITY: u8 = 100;
 
@@ -29,8 +29,8 @@ impl JsonSchema for NoteInput {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "A note. Either an object {pitch, start, length, velocity?, how?} or, to save space in \
-                long lists, an array [pitch, start, length, velocity?, how?]. `pitch` is a MIDI number (60 = C4 = \
+            "description": "A note. Either an object {pitch, start, length, velocity?, how?, channel?} or, to save \
+                space in long lists, an array [pitch, start, length, velocity?, how?]. `pitch` is a MIDI number (60 = C4 = \
                 middle C), a note name (\"C4\", \"F#3\", \"Bb2\") or a name the track gives a key: on a drum track \
                 a drum of its kit (\"kick\", \"snare\", \"closed_hat\", \"china\"; get_instrument_profile lists \
                 them), on a guitar or bass one of its noises (\"chk\", \"scrape\"). `start` and `length` are in \
@@ -38,7 +38,11 @@ impl JsonSchema for NoteInput {
                 (default 100). `how` is how the instrument plays the note, by the name of one of the track's \
                 articulations (\"palm_mute\", \"muted\", \"hammer\", \"slide\", \"harmonic\"; get_project lists \
                 them): the keyswitch is pressed for you just before the note, and the velocity is fitted where \
-                velocity decides. Never place a keyswitch as a note yourself.",
+                velocity decides. Never place a keyswitch as a note yourself. `channel` is the MIDI channel the \
+                note is on, only for an instrument that gives its channels meanings of their own \
+                (get_instrument_profile lists them under `channels`): a number from 1 to 16 or the instrument's \
+                name for it (\"pedalboard\"). Leave it out otherwise. An array has no place for it: give \
+                `channel` on the call, for all its notes.",
             "anyOf": [
                 {
                     "type": "object",
@@ -47,7 +51,8 @@ impl JsonSchema for NoteInput {
                         "start": { "type": "number", "minimum": 0 },
                         "length": { "type": "number", "exclusiveMinimum": 0 },
                         "velocity": { "type": "integer", "minimum": 1, "maximum": 127 },
-                        "how": { "type": "string" }
+                        "how": { "type": "string" },
+                        "channel": { "type": ["integer", "string"] }
                     },
                     "required": ["pitch", "start", "length"]
                 },
@@ -60,6 +65,71 @@ impl JsonSchema for NoteInput {
             ]
         })
     }
+}
+
+/// A MIDI channel, given as its number or as the track's instrument
+/// calls it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(transparent)]
+pub struct ChannelInput(pub Value);
+
+impl JsonSchema for ChannelInput {
+    fn schema_name() -> Cow<'static, str> {
+        "Channel".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "A MIDI channel, for an instrument that gives its channels meanings of their own \
+                (get_instrument_profile lists them under `channels`: an organ's pedalboard, a guitar's strings): \
+                the number, 1 to 16, or the instrument's name for it (\"pedalboard\", \"string_3\"). Leave it out \
+                for every other instrument: all its channels are the one instrument, and everything belongs on \
+                the first.",
+            "type": ["integer", "string"]
+        })
+    }
+}
+
+/// Reads a channel: a number from 1 to 16, or the name `profile` gives
+/// one.
+pub fn parse_channel(value: &Value, profile: &InstrumentProfile) -> Result<Channel, String> {
+    let numbered = |number: f64| {
+        let whole = (number.fract() == 0.0 && (1.0..=16.0).contains(&number)).then_some(number as u8);
+        whole
+            .and_then(Channel::new)
+            .ok_or_else(|| format!("channel {number} is not a MIDI channel: they are numbered 1 to 16"))
+    };
+    match value {
+        Value::Number(number) => numbered(number.as_f64().unwrap_or(f64::NAN)),
+        Value::String(text) => match text.trim().parse::<f64>() {
+            Ok(number) => numbered(number),
+            Err(_) => profile.named_channel(text).ok_or_else(|| {
+                let names: Vec<String> =
+                    profile.channels.keys().map(|channel| profile.channel_label(*channel)).collect();
+                match names.is_empty() {
+                    true => format!(
+                        "'{text}' is not a channel: this track's instrument names none of its channels, so every \
+                         channel plays the same instrument and `channel` is best left out. A channel is otherwise \
+                         a number from 1 to 16"
+                    ),
+                    false => format!(
+                        "'{text}' is not a channel of this track's instrument, which names: {}. Give one of those \
+                         names or a number from 1 to 16",
+                        names.join(", ")
+                    ),
+                }
+            }),
+        },
+        other => Err(format!("a channel is a number from 1 to 16 or the instrument's name for one, got {other}")),
+    }
+}
+
+/// How the channel of a note is read: by what the track's instrument
+/// calls its channels, and the channel of a note that says none.
+#[derive(Copy, Clone)]
+pub struct Channels<'a> {
+    pub profile: &'a InstrumentProfile,
+    pub unsaid: Channel,
 }
 
 /// A pitch given as a number or a name.
@@ -184,6 +254,7 @@ fn parse_note(
     value: &Value,
     named: &dyn Fn(&str) -> Option<u8>,
     expected: &str,
+    channels: Channels<'_>,
 ) -> Result<(Note, Option<String>), String> {
     let parse_pitch_value = |value: &Value| parse_pitch_with(value, named, expected);
     let said = |value: Option<&Value>| match value {
@@ -191,15 +262,20 @@ fn parse_note(
         Some(Value::String(how)) if !how.trim().is_empty() => Ok(Some(how.trim().to_string())),
         Some(other) => Err(format!("`how` must be the name of an articulation, got {other}")),
     };
-    let (pitch, start, length, velocity, how) = match value {
+    let (pitch, start, length, velocity, how, channel) = match value {
         Value::Object(fields) => {
             let field = |name: &str| fields.get(name).ok_or_else(|| format!("missing '{name}'"));
+            let channel = match fields.get("channel").filter(|channel| !channel.is_null()) {
+                Some(channel) => parse_channel(channel, channels.profile)?,
+                None => channels.unsaid,
+            };
             (
                 parse_pitch_value(field("pitch")?)?,
                 number(field("start")?, "start")?,
                 number(field("length")?, "length")?,
                 velocity(fields.get("velocity"))?,
                 said(fields.get("how").or_else(|| fields.get("articulation")))?,
+                channel,
             )
         }
         Value::Array(items) if (3..=5).contains(&items.len()) => {
@@ -214,14 +290,16 @@ fn parse_note(
                 number(&items[2], "length")?,
                 velocity(hit)?,
                 said(how)?,
+                channels.unsaid,
             )
         }
         _ => {
-            return Err("expected {pitch, start, length, velocity?, how?} or [pitch, start, length, velocity?, how?]"
+            return Err("expected {pitch, start, length, velocity?, how?, channel?} or \
+                        [pitch, start, length, velocity?, how?]"
                 .to_string());
         }
     };
-    Ok((Note { pitch, start, length, velocity }, how))
+    Ok((Note { pitch, start, length, velocity, channel }, how))
 }
 
 pub fn parse_notes(notes: &[NoteInput]) -> Result<Vec<Note>, String> {
@@ -235,7 +313,10 @@ pub fn parse_notes_with(
     named: &dyn Fn(&str) -> Option<u8>,
     expected: &str,
 ) -> Result<Vec<Note>, String> {
-    let (notes, how) = parse_played(notes, named, expected)?;
+    // Nothing here names a channel: what is played by hand is on the first.
+    let plain = InstrumentProfile::default();
+    let channels = Channels { profile: &plain, unsaid: Channel::FIRST };
+    let (notes, how) = parse_played(notes, named, expected, channels)?;
     match how.iter().position(Option::is_some) {
         Some(index) => Err(format!(
             "notes[{index}]: a note says how it is played only where it is written into a clip (create_clip, \
@@ -245,17 +326,19 @@ pub fn parse_notes_with(
     }
 }
 
-/// [`parse_notes_with`], for notes that may say how they are played: the
-/// notes, and in step with them the articulation each asks for.
+/// [`parse_notes_with`], for notes that may say how they are played and
+/// which channel they are on: the notes, and in step with them the
+/// articulation each asks for.
 pub fn parse_played(
     notes: &[NoteInput],
     named: &dyn Fn(&str) -> Option<u8>,
     expected: &str,
+    channels: Channels<'_>,
 ) -> Result<(Vec<Note>, Vec<Option<String>>), String> {
     let parsed: Result<Vec<(Note, Option<String>)>, String> = notes
         .iter()
         .enumerate()
-        .map(|(index, note)| parse_note(&note.0, named, expected).map_err(|e| format!("notes[{index}]: {e}")))
+        .map(|(index, note)| parse_note(&note.0, named, expected, channels).map_err(|e| format!("notes[{index}]: {e}")))
         .collect();
     Ok(parsed?.into_iter().unzip())
 }
@@ -526,9 +609,9 @@ mod tests {
             [67, 3, 1, 127],
         ]))
         .unwrap();
-        assert_eq!(parsed[0], Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100 });
-        assert_eq!(parsed[1], Note { pitch: 54, start: 1.5, length: 0.5, velocity: 64 });
-        assert_eq!(parsed[2], Note { pitch: 36, start: 2.0, length: 0.25, velocity: 100 });
+        assert_eq!(parsed[0], Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100, ..Default::default() });
+        assert_eq!(parsed[1], Note { pitch: 54, start: 1.5, length: 0.5, velocity: 64, ..Default::default() });
+        assert_eq!(parsed[2], Note { pitch: 36, start: 2.0, length: 0.25, velocity: 100, ..Default::default() });
         assert_eq!(parsed[3].velocity, 127);
     }
 

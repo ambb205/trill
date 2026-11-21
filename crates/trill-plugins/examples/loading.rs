@@ -238,9 +238,9 @@ fn watch_one(options: &Options, factory: &Vst3Factory, preset: Option<&PresetInf
         for (key, sounded) in options.keys.iter().zip(&mut sounding) {
             // 50 ms of the key, then let go and reset, with a block for the
             // reset to be acted on.
-            let on = [Event { offset: 0, kind: EventKind::NoteOn { pitch: *key, velocity: 100.0 / 127.0 } }];
+            let on = [Event::new(0, EventKind::NoteOn { pitch: *key, velocity: 100.0 / 127.0 })];
             let peak = run(&mut instance, &on, 10);
-            run(&mut instance, &[Event { offset: 0, kind: EventKind::NoteOff { pitch: *key } }], 1);
+            run(&mut instance, &[Event::new(0, EventKind::NoteOff { pitch: *key })], 1);
             if !options.ring {
                 instance.processor.reset();
                 run(&mut instance, &[], 1);
@@ -277,8 +277,11 @@ fn probe(options: &Options) -> Result<(), String> {
         Arc::new(CompositeFactory::new(vec![Box::new(BuiltinFactory), Box::new(factory.clone())]));
     let mut session =
         Session::new(devices, AudioBackend::Null { sample_rate: 48_000 }).map_err(|error| error.to_string())?;
-    let notes: Vec<ProbeNote> =
-        options.keys.iter().map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new() }).collect();
+    let notes: Vec<ProbeNote> = options
+        .keys
+        .iter()
+        .map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new(), ..Default::default() })
+        .collect();
     let probe = ProbeOptions { hold_seconds: options.hold, tail_seconds: options.tail, ..ProbeOptions::default() };
     for preset in options.rounds() {
         println!("{}", preset.unwrap_or("as it comes"));

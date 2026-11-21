@@ -10,6 +10,7 @@
 //! Built-in devices and hosted plugins (CLAP, VST3) both sit behind this API,
 //! so the engine never knows which one it is driving.
 
+use crate::channel::Channel;
 use crate::presets::{PresetInfo, PresetList};
 use crate::project::Device;
 use crate::time::TimeSignature;
@@ -404,6 +405,25 @@ pub struct Event {
     /// Sample offset from the start of the block.
     pub offset: u32,
     pub kind: EventKind,
+    /// The MIDI channel it is on: the first, unless the song says another
+    /// for an instrument that gives its channels meanings of their own. A
+    /// key comes up on the channel it went down on. A device that takes
+    /// all the channels as one instrument, as most do and every built-in
+    /// one does, need not look at it. [`EventKind::AllNotesOff`] lets go
+    /// of the notes of every channel, whichever it is said on.
+    pub channel: Channel,
+}
+
+impl Event {
+    /// An event on the first channel.
+    pub fn new(offset: u32, kind: EventKind) -> Self {
+        Self { offset, kind, channel: Channel::FIRST }
+    }
+
+    /// An event on `channel`.
+    pub fn on(channel: Channel, offset: u32, kind: EventKind) -> Self {
+        Self { offset, kind, channel }
+    }
 }
 
 /// The audio-thread half of a device.

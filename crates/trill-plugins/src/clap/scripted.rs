@@ -15,6 +15,7 @@
 //! timer while it exists, and has a "user" ([`act`]) who turns its knob,
 //! resizes it and closes it.
 
+use crate::notes::{Told, said};
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts, PluginAudioPortsImpl,
 };
@@ -99,10 +100,25 @@ pub(crate) mod kind {
     /// [`MONO_GAIN`] with a second input, mono, which it listens to: what
     /// is in it is added to what goes out, so that it can be seen there.
     pub(crate) const KEYED: u8 = 17;
+    /// An instrument whose note port takes CLAP notes and MIDI beside
+    /// them, as most do, and which says what arrived on which channel:
+    /// every note, choke, wheel, pressure and controller becomes one
+    /// sample at its frame that is [`said`](crate::notes::said) of it.
+    pub(crate) const CHANNELS: u8 = 18;
 
     /// Every kind without an editor that instantiates without delay.
-    pub(crate) const ALL: [u8; 9] =
-        [IMPULSE, MONO_GAIN, MIDI_IMPULSE, BARE, FAILS_INIT, FAILS_ACTIVATE, FAILS_START, FAILS_PROCESS, KEYED];
+    pub(crate) const ALL: [u8; 10] = [
+        IMPULSE,
+        MONO_GAIN,
+        MIDI_IMPULSE,
+        BARE,
+        FAILS_INIT,
+        FAILS_ACTIVATE,
+        FAILS_START,
+        FAILS_PROCESS,
+        KEYED,
+        CHANNELS,
+    ];
     /// Every kind with an editor.
     pub(crate) const EDITORS: [u8; 5] =
         [EDITOR, FIXED_EDITOR, FAILS_EDITOR_CREATE, FAILS_EDITOR_ATTACH, FLOATING_EDITOR];
@@ -128,6 +144,7 @@ pub(crate) fn id(kind: u8) -> &'static str {
         kind::LATE_PRESETS => "test.late-presets",
         kind::BROKEN_PRESETS => "test.broken-presets",
         kind::KEYED => "test.keyed",
+        kind::CHANNELS => "test.channels",
         _ => "test.slow-init",
     }
 }
@@ -141,7 +158,7 @@ fn has_presets(kind: u8) -> bool {
 }
 
 fn is_instrument(kind: u8) -> bool {
-    matches!(kind, kind::IMPULSE | kind::MIDI_IMPULSE) || has_presets(kind)
+    matches!(kind, kind::IMPULSE | kind::MIDI_IMPULSE | kind::CHANNELS) || has_presets(kind)
 }
 
 fn has_input(kind: u8) -> bool {
@@ -173,6 +190,7 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
     static PRESETS: EntryDescriptor = clack_entry!(presets::PresetsEntry<false>);
     static BROKEN_PRESETS: EntryDescriptor = clack_entry!(presets::PresetsEntry<true>);
     static KEYED: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::KEYED }>>);
+    static CHANNELS: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::CHANNELS }>>);
     match kind {
         kind::IMPULSE => &IMPULSE,
         kind::MONO_GAIN => &MONO_GAIN,
@@ -190,6 +208,7 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
         kind::PRESETS | kind::LATE_PRESETS => &PRESETS,
         kind::BROKEN_PRESETS => &BROKEN_PRESETS,
         kind::KEYED => &KEYED,
+        kind::CHANNELS => &CHANNELS,
         _ => &SLOW_INIT,
     }
 }
@@ -806,6 +825,7 @@ impl<const KIND: u8> PluginNotePortsImpl for MainThread<'_, KIND> {
     fn get(&self, index: u32, _is_input: bool, writer: &mut NotePortInfoWriter) {
         let (dialects, preferred) = match KIND {
             kind::MIDI_IMPULSE => (NoteDialects::MIDI, NoteDialect::Midi),
+            kind::CHANNELS => (NoteDialects::CLAP | NoteDialects::MIDI, NoteDialect::Clap),
             _ => (NoteDialects::CLAP, NoteDialect::Clap),
         };
         if index == 0 {
@@ -949,6 +969,33 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
         for event in events.input {
             let Some(event) = event.as_core_event() else { continue };
             let gain = shared.get(GAIN) as f32;
+            if KIND == kind::CHANNELS {
+                // What it was and the channel it came on, and nothing else.
+                let of_note = |pckn: Pckn| pckn.channel.into_specific().map_or(0, |channel| channel as u8 + 1);
+                let (time, sample) = match event {
+                    CoreEventSpace::NoteOn(note) => (note.header().time(), said(Told::NoteOn, of_note(note.pckn()))),
+                    CoreEventSpace::NoteOff(note) => (note.header().time(), said(Told::NoteOff, of_note(note.pckn()))),
+                    CoreEventSpace::NoteChoke(note) => (note.header().time(), said(Told::Choke, of_note(note.pckn()))),
+                    CoreEventSpace::Midi(midi) => {
+                        let [status, data, _] = midi.data();
+                        let what = match (status & 0xF0, data) {
+                            (0x90, _) => Told::NoteOn,
+                            (0x80, _) => Told::NoteOff,
+                            (0xE0, _) => Told::Wheel,
+                            (0xD0, _) => Told::Pressure,
+                            (0xB0, 120) => Told::AllSoundOff,
+                            (0xB0, _) => Told::Controller,
+                            _ => continue,
+                        };
+                        (midi.header().time(), said(what, (status & 0x0F) + 1))
+                    }
+                    _ => continue,
+                };
+                if let Some(out) = out.get_mut(time as usize) {
+                    *out += sample;
+                }
+                continue;
+            }
             let (time, sample) = match event {
                 CoreEventSpace::ParamValue(_) => {
                     shared.apply(&InputEvents::from_buffer(&event_as_buffer(event)));

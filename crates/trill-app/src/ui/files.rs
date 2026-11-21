@@ -852,7 +852,8 @@ mod tests {
 
     /// A two-part MIDI file: a melody and a drum pattern.
     fn midi_song() -> MidiFile {
-        let note = |pitch: u8, start: f64| trill_core::Note { pitch, start, length: 0.5, velocity: 100 };
+        let note =
+            |pitch: u8, start: f64| trill_core::Note { pitch, start, length: 0.5, velocity: 100, ..Default::default() };
         MidiFile {
             tempo: Some(100.0),
             time_signature: None,

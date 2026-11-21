@@ -64,7 +64,7 @@ fn play_from(
         let now: Vec<Event> = events
             .iter()
             .filter(|(frame, _)| (start..end).contains(frame))
-            .map(|(frame, kind)| Event { offset: (frame - start) as u32, kind: *kind })
+            .map(|(frame, kind)| Event::new((frame - start) as u32, *kind))
             .collect();
         player.process(&info, &now, &mut left[start..end], &mut right[start..end]);
         start = end;
@@ -225,7 +225,7 @@ fn a_take_at_random_is_a_matter_of_the_note_and_its_place_in_the_song() {
     for _ in 0..24 {
         let info = ProcessInfo { playing: false, ..info(SR) };
         let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
-        player.process(&info, &[Event { offset: 0, kind: on(62, 100) }], &mut left, &mut right);
+        player.process(&info, &[Event::new(0, on(62, 100))], &mut left, &mut right);
         standing.push((left[200] * 10.0).round() as u8);
     }
     standing.dedup();
@@ -855,7 +855,7 @@ fn a_device_with_nothing_loaded_is_silent_and_one_whose_instrument_is_gone_says_
     let (mut processor, mut controller) = make(Some(&gone), Some(&source), Purpose::Playing).unwrap();
     processor.prepare(SR, 512);
     let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
-    processor.process(&info(SR), &[Event { offset: 0, kind: on(60, 100) }], &mut left, &mut right);
+    processor.process(&info(SR), &[Event::new(0, on(60, 100))], &mut left, &mut right);
     assert_eq!(peak(&left), 0.0);
     assert_eq!(controller.save_state(), Some(gone.clone()), "its state is handed back as it was");
     assert!(controller.sampled().is_none() && controller.reading().is_none());

@@ -39,7 +39,7 @@ const DRUMS: &str = "builtin:drumkit";
 const RATE: u32 = 48_000;
 
 fn n(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
-    Note { pitch, start, length, velocity }
+    Note { pitch, start, length, velocity, ..Default::default() }
 }
 
 fn line(notes: &[(u8, f64, f64, u8)]) -> Vec<Note> {

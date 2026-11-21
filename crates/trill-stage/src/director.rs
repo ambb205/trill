@@ -586,6 +586,7 @@ mod tests {
                         start: index as f64 * step,
                         length: step * 0.9,
                         velocity: 100,
+                        ..Default::default()
                     });
                 }
             }
@@ -809,7 +810,7 @@ mod tests {
         project
             .clip_mut(clip)
             .unwrap()
-            .add_notes(&[Note { pitch: 48, start: 0.0, length: 64.0, velocity: 80 }])
+            .add_notes(&[Note { pitch: 48, start: 0.0, length: 64.0, velocity: 80, ..Default::default() }])
             .unwrap();
         let score = Score::read(&project);
         let plan = Plan::direct(&score);

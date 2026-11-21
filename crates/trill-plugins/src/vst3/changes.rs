@@ -286,8 +286,9 @@ pub(crate) struct BlockParams {
     listed: Vec<(usize, Mapping)>,
     links: Arc<ParamLinks>,
     pending: Pending,
-    /// The parameters that stand for MIDI's "all sound off".
-    silencing: Vec<ParamID>,
+    /// The parameters that stand for MIDI's "all sound off", each with
+    /// the channel it is for, as a plugin counts them from 0.
+    silencing: Vec<(u8, ParamID)>,
     input: ComWrapper<ParamChanges>,
     output: ComWrapper<ParamChanges>,
 }
@@ -295,7 +296,7 @@ pub(crate) struct BlockParams {
 impl BlockParams {
     /// `listed` are the device's parameters in its order; `silencing` the
     /// parameters that silence the plugin when set.
-    pub(crate) fn new(listed: &[ParamSpec], links: Arc<ParamLinks>, silencing: Vec<ParamID>) -> Self {
+    pub(crate) fn new(listed: &[ParamSpec], links: Arc<ParamLinks>, silencing: Vec<(u8, ParamID)>) -> Self {
         let slots = links.len();
         Self {
             listed: listed.iter().map(|spec| (spec.slot, spec.mapping)).collect(),
@@ -331,8 +332,10 @@ impl BlockParams {
     /// Builds the parameter changes of the next block. `controls` are the
     /// parameters the block's MIDI controllers set: parameter, frame of
     /// the block and normalized value, in order of frame. `silence` adds
-    /// the plugin's "all sound off".
-    pub(crate) fn fill(&mut self, silence: bool, controls: &[(ParamID, u32, f64)]) {
+    /// the plugin's "all sound off": on its first channel, and on every
+    /// other one that has a bit in it (the channels the plugin was ever
+    /// told anything on).
+    pub(crate) fn fill(&mut self, silence: Option<u16>, controls: &[(ParamID, u32, f64)]) {
         self.input.clear();
         self.output.clear();
         // What the user changed in the plugin's own editor since the last
@@ -353,9 +356,11 @@ impl BlockParams {
                 self.links.to_controller.post(slot, value);
             }
         }
-        if silence {
-            for &id in &self.silencing {
-                self.input.push(id, 0.0);
+        if let Some(spoken) = silence {
+            for &(channel, id) in &self.silencing {
+                if channel == 0 || spoken & (1 << channel) != 0 {
+                    self.input.push(id, 0.0);
+                }
             }
         }
     }
@@ -525,7 +530,7 @@ mod tests {
     fn feed() -> (BlockParams, Arc<ParamLinks>) {
         let links = Arc::new(ParamLinks::new(vec![10, 20, 30, 40]));
         let listed = [spec(20, 1, 0), spec(40, 3, 4)];
-        (BlockParams::new(&listed, links.clone(), vec![777]), links)
+        (BlockParams::new(&listed, links.clone(), vec![(0, 777), (5, 778), (7, 779)]), links)
     }
 
     /// The block's input changes as the plugin reads them.
@@ -556,12 +561,12 @@ mod tests {
         feed.set(2, 1.0); // out of range: ignored
         feed.set(0, f64::NAN); // not a value: ignored
 
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         assert_eq!(sent(&feed), [(40, 0.75), (20, 0.9)], "in the order they were first set");
         assert_eq!(posted(&links.to_controller), [(1, 0.9), (3, 0.75)]);
 
         // Sent once: the next block has no changes.
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         assert_eq!(sent(&feed), []);
         assert_eq!(posted(&links.to_controller), []);
     }
@@ -572,14 +577,14 @@ mod tests {
         links.to_processor.post(0, 0.25); // a parameter the device does not even list
         links.to_processor.post(3, 0.5);
         feed.set(0, 0.6);
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         assert_eq!(sent(&feed), [(20, 0.6), (10, 0.25), (40, 0.5)]);
         assert_eq!(posted(&links.to_controller), [(1, 0.6)], "the controller already has its own edits");
 
         // An edit and a set value for the same parameter make one change.
         links.to_processor.post(1, 0.3);
         feed.set(0, 0.7);
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         assert_eq!(sent(&feed), [(20, 0.3)]);
     }
 
@@ -587,16 +592,20 @@ mod tests {
     fn silencing_sets_the_all_sound_off_parameters() {
         let (mut feed, _links) = feed();
         feed.set(0, 0.5);
-        feed.fill(true, &[]);
+        feed.fill(Some(1), &[]);
         assert_eq!(sent(&feed), [(20, 0.5), (777, 0.0)]);
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         assert_eq!(sent(&feed), []);
+        // On the first channel always, and on every other one that was
+        // spoken on: here the sixth, and not the eighth.
+        feed.fill(Some(1 << 5), &[]);
+        assert_eq!(sent(&feed), [(777, 0.0), (778, 0.0)]);
     }
 
     #[test]
     fn what_the_plugin_changes_by_itself_is_told_to_the_controller() {
         let (mut feed, links) = feed();
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         // SAFETY: the list is the feed's own, alive as long as it is.
         let output = unsafe { ComRef::from_raw(feed.lists().1) }.expect("an output list").to_com_ptr();
         add(&output, 30, 0, 0.1);
@@ -608,7 +617,7 @@ mod tests {
         assert_eq!(posted(&links.to_controller), [(0, 1.0), (2, 0.4)]);
 
         // The next block starts with an empty output list.
-        feed.fill(false, &[]);
+        feed.fill(None, &[]);
         feed.collect();
         assert_eq!(posted(&links.to_controller), []);
     }
@@ -618,7 +627,7 @@ mod tests {
         let links = Arc::new(ParamLinks::new(Vec::new()));
         let mut feed = BlockParams::new(&[], links, Vec::new());
         feed.set(0, 1.0);
-        feed.fill(true, &[]);
+        feed.fill(Some(1), &[]);
         let (input, output) = feed.lists();
         assert!(!input.is_null() && !output.is_null());
         assert_eq!(sent(&feed), []);

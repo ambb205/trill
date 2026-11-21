@@ -169,6 +169,7 @@ impl Arpeggio {
                     start,
                     length: (rate * self.gate).max(MIN_LENGTH),
                     velocity: clamp_velocity(self.dynamics.at(start, progression.signature)),
+                    ..Default::default()
                 });
             }
         }

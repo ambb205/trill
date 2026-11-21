@@ -519,6 +519,7 @@ pub fn comp(progression: &Progression, voicings: &[Option<Voicing>], comping: &C
                 start: strike.start + delay,
                 length: (sounding - delay).max(MIN_LENGTH),
                 velocity: strike.level.velocity(base + balance),
+                ..Default::default()
             });
         }
     }

@@ -74,7 +74,9 @@ impl<'a> Chip<'a> {
 
     /// The width the chip needs for its label.
     pub fn width(&self, ui: &Ui, theme: &Theme) -> f32 {
-        let dot = if self.dot.is_some() { theme.metric.dot + 5.0 } else { 0.0 };
+        // (A point more than the dot and its gap: the dot lands on whole
+        // pixels, which can take one from the label.)
+        let dot = if self.dot.is_some() { theme.metric.dot + 6.0 } else { 0.0 };
         (text::width(ui.painter(), theme.text.micro, self.label) + dot + 2.0 * theme.metric.chip_pad + 2.0).ceil()
     }
 }
@@ -237,7 +239,10 @@ mod tests {
             let long = Chip::new("Ping Pong", false).width(ui, theme);
             let dotted = Chip::new("M", false).dot(theme.ok).width(ui, theme);
             assert!(long > short + 30.0);
-            assert_eq!(dotted, short + 10.0);
+            // The dot, its gap, and the point the dot can take from the
+            // label by landing on whole pixels: without it a label that
+            // fits to the point is cut short with an ellipsis.
+            assert_eq!(dotted, short + 11.0);
             assert_eq!(short.fract(), 0.0, "widths are whole pixels");
             assert_eq!(chip_row_width(ui, theme, &["M", "Ping Pong"]), short + long + 2.0);
             assert_eq!(chip_row_width(ui, theme, &[]), 0.0);

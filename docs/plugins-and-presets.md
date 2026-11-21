@@ -81,6 +81,28 @@ the sound of the track that is shown, dragging one onto a track does the same th
 it gets a track of its own. On the installed plugins, on demand: an Ample guitar through Archetype Tim Henson,
 saved in one song and given to a track of another, renders to the same samples in both.
 
+**MIDI channels**: a plugin is told each note, wheel, pressure and controller on the channel the song has it on,
+in both formats. A CLAP note says its channel, and what a note port takes as MIDI carries it in the message. A
+VST3 note says its channel, and a controller is the parameter the plugin names for that controller *on that
+channel*: the plugin is asked once, when it is made (never on an audio thread), for every controller, the
+pressure and the wheel on each channel its event bus has. A plugin built with JUCE, as the Consort collection is,
+names one for each of sixteen channels. A key comes up on the channel it went down on; a pedal that is worked out
+for a plugin that takes none holds the keys of its own channel; and silencing a plugin lets go of every key on
+its own channel and tells the first channel, and every other one anything was ever said on, that all sound is
+off (as MIDI to a CLAP port that takes it, through the parameter a VST3 plugin names for it on that channel).
+
+*A channel the plugin has not got is its first.* A song may say more channels than a VST3 plugin's event bus has
+(many say they have one). Whatever is on such a channel, notes and controllers alike, goes to the plugin on its
+first: nothing is left out, the plugin is never handed a channel it said it has not got, and such a plugin plays
+a song that uses channels as an instrument that listens to every channel would. A controller the plugin names a
+parameter for on its first channel only is set there whatever channel the song has it on. Nothing in the reply of
+a tool says how many channels a plugin has: what a channel means is the instrument's to say, in its profile.
+
+The host's fixed room was sized for one channel and is now sized for sixteen: a block may set 128 parameters
+through controllers (it was 32) and 1024 values of them (it was 256), and a silence may let go of every key of
+every channel. A guitar with a string to a channel moving the wheel and the pressure of six strings all through a
+block of 512 frames is 192 values on 12 parameters.
+
 **What a plugin costs when nothing goes into it**: every device of a song runs all the time, so that a track
 is there the moment a note is played on it or it is unmuted. Trill tells a plugin of every block whose input is
 nothing but silence, in the way its format has for that (a VST3 bus's silence flags, a CLAP channel that is

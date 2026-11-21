@@ -994,6 +994,7 @@ fn flatten_notes(clip: &Clip, out: &mut Vec<NoteEvent>) {
         end: note.end(),
         pitch: note.pitch,
         velocity: note.velocity,
+        channel: note.channel,
     }));
 }
 
@@ -1013,9 +1014,9 @@ mod tests {
         let clip = project.add_midi_clip(track, "c", 8.0, 5.0).unwrap();
         let c = project.clip_mut(clip).unwrap();
         c.add_notes(&[
-            Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100 },
-            Note { pitch: 62, start: 1.5, length: 4.0, velocity: 100 },
-            Note { pitch: 64, start: 6.0, length: 1.0, velocity: 100 },
+            Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100, ..Default::default() },
+            Note { pitch: 62, start: 1.5, length: 4.0, velocity: 100, ..Default::default() },
+            Note { pitch: 64, start: 6.0, length: 1.0, velocity: 100, ..Default::default() },
         ])
         .unwrap();
 

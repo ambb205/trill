@@ -12,9 +12,9 @@
 use super::text;
 use crate::param_text::{self, Values};
 use std::collections::{HashMap, HashSet};
-use trill_core::ControllerKind;
 use trill_core::device::ControllerSupport;
 use trill_core::device::{ParamInfo, ParamKind};
+use trill_core::{Channel, ControllerKind};
 use vst3::ComPtr;
 use vst3::Steinberg::Vst::ControllerNumbers_::{kCtrlAllNotesOff, kCtrlAllSoundsOff};
 use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsReadOnly};
@@ -415,31 +415,74 @@ pub(crate) const AFTERTOUCH: u8 = 128;
 pub(crate) const PITCH_BEND: u8 = 129;
 /// The most controllers kept: every one a plugin could name.
 const MIDI_CONTROLLERS: u8 = 120;
+/// How many numbers there are to ask a plugin about on each channel: the
+/// controllers, pressure and the wheel.
+const NUMBERS: usize = PITCH_BEND as usize + 1;
+/// What the table holds where the plugin named no parameter: the id VST3
+/// keeps for "no parameter".
+const NO_PARAM: ParamID = ParamID::MAX;
 
 /// The parameters through which the plugin takes what a keyboard sends
-/// beside notes: the pedal, the wheels, any other controller.
+/// beside notes: the pedal, the wheels, any other controller, on each MIDI
+/// channel its event bus has.
 ///
 /// A VST3 plugin is not sent MIDI controllers. One that understands them
-/// names a parameter for each, and the host sets that parameter instead.
+/// names a parameter for each, by channel, and the host sets that
+/// parameter instead. The plugin is asked once, when it is made, on the
+/// thread plugins are made on: the audio thread looks the answer up.
+///
+/// **A channel the plugin has not got is its first.** A song may say more
+/// channels than a plugin's event bus has (many say one). Whatever is on
+/// such a channel, notes and controllers alike, goes to the plugin on its
+/// first, as an instrument that listens to every channel takes it:
+/// nothing is left out, and the plugin is never handed a channel it said
+/// it has not got. A controller the plugin names a parameter for on its
+/// first channel only is set there whatever channel the song has it on,
+/// for the same reason.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MidiParams {
-    /// Controller number and the parameter that stands for it.
-    assigned: Vec<(u8, ParamID)>,
+    /// How many channels the plugin's event bus has: none stands for one.
+    channels: usize,
+    /// The parameter for each number of each of those channels, a channel
+    /// after the other, [`NO_PARAM`] where there is none. Empty for a
+    /// plugin that names none at all.
+    table: Vec<ParamID>,
 }
 
 impl MidiParams {
-    /// The parameter that stands for `controller`, if the plugin has one.
-    pub(crate) fn param(&self, controller: u8) -> Option<ParamID> {
-        self.assigned.iter().find(|(number, _)| *number == controller).map(|(_, id)| *id)
+    /// A plugin that names no parameter, whose event bus has `channels`
+    /// channels.
+    pub(crate) fn plain(channels: usize) -> Self {
+        Self { channels: channels.clamp(1, Channel::COUNT), table: Vec::new() }
     }
 
-    /// The controllers the plugin has named a parameter for, with the
-    /// sustain pedal, which the host works out for a plugin that has not.
+    /// The channel the plugin is told of what the song has on `channel`:
+    /// that one where its event bus has it, and its first where not.
+    pub(crate) fn channel(&self, channel: Channel) -> Channel {
+        if channel.index() < self.channels { channel } else { Channel::FIRST }
+    }
+
+    /// The parameter that stands for `controller` on `channel`, if the
+    /// plugin has one: the one it names for that channel, or else the one
+    /// it names for its first.
+    pub(crate) fn param(&self, channel: Channel, controller: u8) -> Option<ParamID> {
+        let named = |channel: Channel| {
+            let at = channel.index() * NUMBERS + usize::from(controller);
+            self.table.get(at).copied().filter(|id| *id != NO_PARAM)
+        };
+        if usize::from(controller) >= NUMBERS {
+            return None;
+        }
+        named(self.channel(channel)).or_else(|| named(Channel::FIRST))
+    }
+
+    /// The controllers the plugin has named a parameter for on its first
+    /// channel, with the sustain pedal, which the host works out for a
+    /// plugin that has not.
     pub(crate) fn support(&self) -> ControllerSupport {
-        let mut kinds: Vec<ControllerKind> = self
-            .assigned
-            .iter()
-            .filter_map(|(number, _)| match *number {
+        let mut kinds: Vec<ControllerKind> = (0..NUMBERS as u8)
+            .filter(|number| self.param(Channel::FIRST, *number).is_some())
+            .filter_map(|number| match number {
                 AFTERTOUCH => Some(ControllerKind::Pressure),
                 PITCH_BEND => Some(ControllerKind::PitchBend),
                 number => ControllerKind::numbered(number),
@@ -451,27 +494,50 @@ impl MidiParams {
         ControllerSupport::Listed(kinds)
     }
 
+    /// A plugin with one channel that names these parameters: controller
+    /// number and parameter.
     #[cfg(test)]
     pub(crate) fn of(assigned: &[(u8, ParamID)]) -> Self {
-        Self { assigned: assigned.to_vec() }
+        let on_first: Vec<(u8, u8, ParamID)> = assigned.iter().map(|(number, id)| (1, *number, *id)).collect();
+        Self::on_channels(1, &on_first)
+    }
+
+    /// A plugin whose event bus has `channels` channels and that names
+    /// these parameters: the channel as a person calls it, the controller
+    /// number and the parameter.
+    #[cfg(test)]
+    pub(crate) fn on_channels(channels: usize, assigned: &[(u8, u8, ParamID)]) -> Self {
+        let mut table = vec![NO_PARAM; channels * NUMBERS];
+        for &(channel, number, id) in assigned {
+            table[(usize::from(channel) - 1) * NUMBERS + usize::from(number)] = id;
+        }
+        Self { channels, table }
     }
 }
 
-/// Asks the plugin which parameters stand for the MIDI controllers and the
-/// pitch wheel, on the first channel of its first event bus.
-pub(crate) fn midi_params(controller: &ComPtr<IEditController>) -> MidiParams {
-    let Some(mapping) = controller.cast::<IMidiMapping>() else { return MidiParams::default() };
-    let assigned = (0..MIDI_CONTROLLERS)
-        .chain([AFTERTOUCH, PITCH_BEND])
-        .filter_map(|number| {
+/// Asks the plugin which parameters stand for the MIDI controllers,
+/// pressure and the pitch wheel, on each of the `channels` channels of its
+/// first event bus. Called where the plugin is made, never on an audio
+/// thread.
+pub(crate) fn midi_params(controller: &ComPtr<IEditController>, channels: usize) -> MidiParams {
+    let plain = MidiParams::plain(channels);
+    let Some(mapping) = controller.cast::<IMidiMapping>() else { return plain };
+    let mut table = vec![NO_PARAM; plain.channels * NUMBERS];
+    let mut named = false;
+    for channel in 0..plain.channels {
+        for number in (0..MIDI_CONTROLLERS).chain([AFTERTOUCH, PITCH_BEND]) {
             let mut id: ParamID = 0;
             // SAFETY: `mapping` is an interface of the live edit
             // controller, used on the plugin main thread; `id` is a local.
-            let result = unsafe { mapping.getMidiControllerAssignment(0, 0, CtrlNumber::from(number), &mut id) };
-            (result == kResultOk).then_some((number, id))
-        })
-        .collect();
-    MidiParams { assigned }
+            let result =
+                unsafe { mapping.getMidiControllerAssignment(0, channel as i16, CtrlNumber::from(number), &mut id) };
+            if result == kResultOk && id != NO_PARAM {
+                table[channel * NUMBERS + usize::from(number)] = id;
+                named = true;
+            }
+        }
+    }
+    if named { MidiParams { table, ..plain } } else { plain }
 }
 
 /// The parameters through which the plugin takes MIDI's "all sound off"
@@ -480,18 +546,28 @@ pub(crate) fn midi_params(controller: &ComPtr<IEditController>) -> MidiParams {
 /// A VST3 plugin is not sent MIDI controllers. One that understands them
 /// names a parameter for each, and the host sets that parameter instead.
 /// These two are how a host asks a plugin to fall silent.
-pub(crate) fn silencing_params(controller: &ComPtr<IEditController>) -> Vec<ParamID> {
+///
+/// They are asked for on each of the `channels` channels of the plugin's
+/// event bus, and each is returned with its channel, as a plugin counts
+/// them from 0: a plugin that keeps its channels apart is told on every
+/// channel a song spoke on. A parameter that stands for more than one
+/// channel is listed once, under the first of them.
+pub(crate) fn silencing_params(controller: &ComPtr<IEditController>, channels: usize) -> Vec<(u8, ParamID)> {
     let Some(mapping) = controller.cast::<IMidiMapping>() else { return Vec::new() };
-    [kCtrlAllSoundsOff, kCtrlAllNotesOff]
-        .into_iter()
-        .filter_map(|controller_number| {
+    let mut found: Vec<(u8, ParamID)> = Vec::new();
+    for channel in 0..channels.clamp(1, Channel::COUNT) {
+        for number in [kCtrlAllSoundsOff, kCtrlAllNotesOff] {
             let mut id: ParamID = 0;
             // SAFETY: `mapping` is an interface of the live edit
             // controller, used on the plugin main thread; `id` is a local.
-            let result = unsafe { mapping.getMidiControllerAssignment(0, 0, controller_number as CtrlNumber, &mut id) };
-            (result == kResultOk).then_some(id)
-        })
-        .collect()
+            let result =
+                unsafe { mapping.getMidiControllerAssignment(0, channel as i16, number as CtrlNumber, &mut id) };
+            if result == kResultOk && !found.iter().any(|(_, known)| *known == id) {
+                found.push((channel as u8, id));
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -665,6 +741,29 @@ mod tests {
         let values = [(20, 100.0), (99, 0.5), (10, 0.25), (10, f64::NAN), (20, 2.6)];
         assert_eq!(resolve_values(&specs, &values), [(1, 4.0), (0, 0.25), (1, 3.0)]);
         assert!(resolve_values(&specs, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_parameter_is_looked_up_by_channel_and_a_channel_the_plugin_has_not_got_is_its_first() {
+        let channel = |number: u8| Channel::new(number).unwrap();
+        // Eight channels; a wheel on the first and the sixth, a pedal on
+        // the first only.
+        let midi = MidiParams::on_channels(8, &[(1, PITCH_BEND, 100), (6, PITCH_BEND, 600), (1, 64, 164)]);
+        assert_eq!(midi.param(channel(1), PITCH_BEND), Some(100));
+        assert_eq!(midi.param(channel(6), PITCH_BEND), Some(600));
+        assert_eq!(midi.param(channel(3), PITCH_BEND), Some(100), "none of its own: the first's");
+        assert_eq!(midi.param(channel(6), 64), Some(164));
+        assert_eq!(midi.param(channel(6), 11), None);
+        assert_eq!(midi.param(channel(6), 200), None, "no such controller");
+        // A channel past the bus's last is the first, for notes and for
+        // what is set.
+        assert_eq!((midi.channel(channel(8)), midi.channel(channel(9))), (channel(8), channel(1)));
+        assert_eq!(midi.param(channel(14), PITCH_BEND), Some(100));
+        // A plugin that says nothing has one channel and no parameters.
+        let plain = MidiParams::default();
+        assert_eq!((plain.channel(channel(2)), plain.param(channel(1), 64)), (channel(1), None));
+        assert_eq!(MidiParams::plain(40).channel(channel(16)), channel(16));
+        assert_eq!(MidiParams::plain(0).channel(channel(2)), channel(1));
     }
 
     #[test]

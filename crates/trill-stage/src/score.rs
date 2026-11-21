@@ -630,7 +630,7 @@ mod tests {
     use trill_core::{Articulation, InstrumentProfile};
 
     fn note(pitch: u8, start: Beats, length: Beats) -> Note {
-        Note { pitch, start, length, velocity: 100 }
+        Note { pitch, start, length, velocity: 100, ..Default::default() }
     }
 
     /// A track with one clip from `start`, `length` beats long, playing `notes`.

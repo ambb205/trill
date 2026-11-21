@@ -483,7 +483,13 @@ mod tests {
         let mut project = Project::new("Filmed");
         let line = |pitch: u8, beats: u32| -> Vec<Note> {
             (0..beats * 2)
-                .map(|n| Note { pitch: pitch + (n % 5) as u8, start: f64::from(n) * 0.5, length: 0.4, velocity: 100 })
+                .map(|n| Note {
+                    pitch: pitch + (n % 5) as u8,
+                    start: f64::from(n) * 0.5,
+                    length: 0.4,
+                    velocity: 100,
+                    ..Default::default()
+                })
                 .collect()
         };
         let bass = project.add_track("Bass");
@@ -627,8 +633,9 @@ mod tests {
         let mut project = Project::new("Changing");
         let bass = project.add_track("Bass");
         let clip = project.add_midi_clip(bass, "bass", 0.0, 23.0).unwrap();
-        let notes: Vec<Note> =
-            (0..46).map(|n| Note { pitch: 36, start: f64::from(n) * 0.5, length: 0.4, velocity: 100 }).collect();
+        let notes: Vec<Note> = (0..46)
+            .map(|n| Note { pitch: 36, start: f64::from(n) * 0.5, length: 0.4, velocity: 100, ..Default::default() })
+            .collect();
         project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
         project.set_time_signature_at(8.0, 7, 8).unwrap();
         project.set_tempo_at(8.0, 140.0, false).unwrap();

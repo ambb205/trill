@@ -9,6 +9,7 @@
 mod assistant;
 mod audio;
 mod automation;
+mod channels;
 mod clips;
 mod controllers;
 mod editors;
@@ -586,7 +587,7 @@ fn three_tracks(session: &mut Session) -> ([TrackId; 3], [ClipId; 3]) {
     session
         .edit(|project| {
             let tracks = [project.add_track("One"), project.add_track("Two"), project.add_track("Three")];
-            let note = [Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 }];
+            let note = [Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100, ..Default::default() }];
             let mut clips = Vec::new();
             for (track, name, start) in [(tracks[0], "A", 8.0), (tracks[0], "B", 16.0), (tracks[1], "C", 8.0)] {
                 let clip = project.add_midi_clip(track, name, start, 4.0)?;
@@ -612,7 +613,13 @@ fn two_tracks(session: &mut Session) -> (TrackId, TrackId, ClipId) {
             let first = project.add_track("One");
             let second = project.add_track("Two");
             let clip = project.add_midi_clip(first, "Clip", 8.0, 4.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 }])?;
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 60,
+                start: 1.0,
+                length: 1.0,
+                velocity: 100,
+                ..Default::default()
+            }])?;
             Ok((first, second, clip))
         })
         .unwrap()
@@ -891,13 +898,16 @@ fn the_piano_roll_adds_moves_and_deletes_notes() {
 
     // A click on empty grid adds a sixteenth at the grid cell under it.
     harness.click(harness.note_cell(2.3, 64));
-    let added = Note { pitch: 64, start: 2.25, length: 0.25, velocity: 100 };
-    assert_eq!(notes(&harness), [Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 }, added]);
+    let added = Note { pitch: 64, start: 2.25, length: 0.25, velocity: 100, ..Default::default() };
+    assert_eq!(
+        notes(&harness),
+        [Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100, ..Default::default() }, added]
+    );
     assert_eq!(harness.app.state().selected_notes, [added]);
 
     // Drag the existing note up a fourth and half a beat later.
     harness.drag(harness.note_cell(1.3, 60), harness.note_cell(1.8, 65));
-    let moved = Note { pitch: 65, start: 1.5, length: 1.0, velocity: 100 };
+    let moved = Note { pitch: 65, start: 1.5, length: 1.0, velocity: 100, ..Default::default() };
     assert_eq!(notes(&harness), [moved, added]);
     assert_eq!(harness.app.state().selected_notes, [moved]);
     assert_eq!(harness.undo_depth(), before + 2, "one step for the click, one for the drag");
@@ -938,7 +948,7 @@ fn dragging_a_velocity_stem_changes_the_note_as_one_undo_step() {
         .session
         .lock()
         .edit(|project| {
-            let more = [Note { pitch: 64, start: 2.0, length: 1.0, velocity: 80 }];
+            let more = [Note { pitch: 64, start: 2.0, length: 1.0, velocity: 80, ..Default::default() }];
             project.clip_mut(clip)?.add_notes(&more)
         })
         .unwrap();
@@ -976,7 +986,13 @@ fn the_clip_sidebar_sets_grid_velocity_and_quantizes() {
         .session
         .lock()
         .edit(|project| {
-            project.clip_mut(clip)?.set_notes(vec![Note { pitch: 60, start: 1.1, length: 1.0, velocity: 100 }])
+            project.clip_mut(clip)?.set_notes(vec![Note {
+                pitch: 60,
+                start: 1.1,
+                length: 1.0,
+                velocity: 100,
+                ..Default::default()
+            }])
         })
         .unwrap();
     harness.click(harness.lane(10.0, 0));

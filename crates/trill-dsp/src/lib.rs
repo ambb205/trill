@@ -661,11 +661,11 @@ mod tests {
     }
 
     fn note_on(pitch: u8) -> Vec<Event> {
-        vec![Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity: 0.8 } }]
+        vec![Event::new(0, EventKind::NoteOn { pitch, velocity: 0.8 })]
     }
 
     fn note_off(pitch: u8) -> Vec<Event> {
-        vec![Event { offset: 0, kind: EventKind::NoteOff { pitch } }]
+        vec![Event::new(0, EventKind::NoteOff { pitch })]
     }
 
     #[test]
@@ -759,13 +759,13 @@ mod tests {
                 |i| if instrument { 0.0 } else { noise(i) * 0.5 },
                 |block| match block % 40 {
                     0 => vec![
-                        Event { offset: 0, kind: EventKind::NoteOn { pitch: 36, velocity: 1.0 } },
-                        Event { offset: 10, kind: EventKind::NoteOn { pitch: 60, velocity: 1.0 } },
-                        Event { offset: 100, kind: EventKind::NoteOn { pitch: 42, velocity: 0.7 } },
+                        Event::new(0, EventKind::NoteOn { pitch: 36, velocity: 1.0 }),
+                        Event::new(10, EventKind::NoteOn { pitch: 60, velocity: 1.0 }),
+                        Event::new(100, EventKind::NoteOn { pitch: 42, velocity: 0.7 }),
                     ],
                     20 => vec![
-                        Event { offset: 5, kind: EventKind::NoteOff { pitch: 36 } },
-                        Event { offset: 5, kind: EventKind::NoteOff { pitch: 60 } },
+                        Event::new(5, EventKind::NoteOff { pitch: 36 }),
+                        Event::new(5, EventKind::NoteOff { pitch: 60 }),
                     ],
                     _ => vec![],
                 },

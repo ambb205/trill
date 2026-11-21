@@ -41,6 +41,8 @@ pub struct Seen {
     pub device: DeviceId,
     pub frame: u64,
     pub kind: EventKind,
+    /// The MIDI channel it was told it on.
+    pub channel: trill_core::Channel,
 }
 
 /// What the probes of a rig have in common.
@@ -69,6 +71,12 @@ impl ProbeLog {
     pub fn events(&self) -> Vec<(u64, EventKind)> {
         self.take().into_iter().map(|seen| (seen.frame, seen.kind)).collect()
     }
+
+    /// What was seen since the last call, with the channel each thing was
+    /// said on, as a person counts them: `(frame, channel, kind)`.
+    pub fn events_on(&self) -> Vec<(u64, u8, EventKind)> {
+        self.take().into_iter().map(|seen| (seen.frame, seen.channel.number(), seen.kind)).collect()
+    }
 }
 
 struct Probe {
@@ -94,7 +102,8 @@ impl DeviceProcessor for Probe {
         if !events.is_empty() {
             let mut seen = self.log.seen.lock();
             for event in events {
-                seen.push(Seen { device: self.device, frame: self.frames + event.offset as u64, kind: event.kind });
+                let frame = self.frames + event.offset as u64;
+                seen.push(Seen { device: self.device, frame, kind: event.kind, channel: event.channel });
             }
         }
         self.frames += left.len() as u64;

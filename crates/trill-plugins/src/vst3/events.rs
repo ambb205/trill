@@ -6,8 +6,9 @@
 use super::com::{interface, write_out};
 use super::params::{AFTERTOUCH, MidiParams, PITCH_BEND};
 use crate::exclusive::Exclusive;
-use crate::notes::{HeldKeys, events_in_part};
-use trill_core::device::{self, EventKind, MAX_EVENTS_PER_BLOCK, Pedal, ProcessInfo};
+use crate::notes::{HeldKeys, Pedals, events_in_part};
+use trill_core::Channel;
+use trill_core::device::{self, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_ as flags;
 use vst3::Steinberg::Vst::{
@@ -17,9 +18,9 @@ use vst3::Steinberg::Vst::{
 use vst3::Steinberg::{int32, kInvalidArgument, kResultFalse, kResultOk, tresult};
 use vst3::{Class, ComWrapper};
 
-/// Notes go to the plugin's first event bus, on its first channel.
+/// Notes go to the plugin's first event bus, each on the channel the song
+/// has it on where the bus has that channel ([`MidiParams::channel`]).
 const NOTE_BUS: int32 = 0;
-const NOTE_CHANNEL: i16 = 0;
 /// The engine addresses notes by key; VST3's note ids are left unset.
 const NO_NOTE_ID: int32 = -1;
 /// The quietest note-on sent. Frameworks that turn VST3 events into MIDI
@@ -28,14 +29,20 @@ const MIN_VELOCITY: f32 = 1.0 / 127.0;
 /// Most note events delivered to a plugin in one block; more are dropped.
 /// The engine never passes more.
 const MAX_NOTE_EVENTS: usize = MAX_EVENTS_PER_BLOCK;
-/// Events needed to silence a plugin on top of that: a note-off per key.
-const MAX_SILENCE_EVENTS: usize = 128;
-/// How many parameters the controllers of one block may set between them.
-pub(crate) const MAX_CONTROLS: usize = 32;
-/// How many times, all told, the controllers of one block may set them: a
-/// handful of controllers moving all through a block. One that finds no
-/// room still has its last value kept, in place of its one before.
-const MAX_CONTROL_POINTS: usize = 256;
+/// Events needed to silence a plugin on top of that: a note-off per key
+/// of each channel.
+const MAX_SILENCE_EVENTS: usize = 128 * Channel::COUNT;
+/// How many parameters the controllers of one block may set between them:
+/// the wheel, the pressure and six more on every channel. (A guitar that
+/// has a string to a channel moves the wheel and the pressure of six at
+/// once, with what its first channel has beside.)
+pub(crate) const MAX_CONTROLS: usize = 8 * Channel::COUNT;
+/// How many times, all told, the controllers of one block may set them:
+/// the wheel and the pressure of every channel moving all through a block
+/// of 512 frames, which is sixteen values each, and as much again. One
+/// that finds no room still has its last value kept, in place of its one
+/// before.
+const MAX_CONTROL_POINTS: usize = 1024;
 
 /// The events of one block, in the order they were added: the host's
 /// implementation of `IEventList`.
@@ -81,10 +88,10 @@ impl Queue<'_> {
     }
 
     /// `velocity` is 0..=1; `position` is the event's place in the song.
-    fn note_on(&mut self, time: u32, position: f64, key: u8, velocity: f32) {
+    fn note_on(&mut self, time: u32, position: f64, channel: Channel, key: u8, velocity: f32) {
         let velocity = if velocity.is_finite() { velocity.clamp(MIN_VELOCITY, 1.0) } else { 1.0 };
         let note = NoteOnEvent {
-            channel: NOTE_CHANNEL,
+            channel: channel.index() as i16,
             pitch: i16::from(key.min(127)),
             tuning: 0.0,
             velocity,
@@ -94,9 +101,9 @@ impl Queue<'_> {
         self.push(event(time, position, kNoteOnEvent as u16, Event__type0 { noteOn: note }));
     }
 
-    fn note_off(&mut self, time: u32, position: f64, key: u8) {
+    fn note_off(&mut self, time: u32, position: f64, channel: Channel, key: u8) {
         let note = NoteOffEvent {
-            channel: NOTE_CHANNEL,
+            channel: channel.index() as i16,
             pitch: i16::from(key.min(127)),
             velocity: 0.0,
             noteId: NO_NOTE_ID,
@@ -159,11 +166,15 @@ pub(crate) struct BlockEvents {
     held: HeldKeys,
     silence: bool,
     list: ComWrapper<EventList>,
-    /// The parameters that stand for MIDI controllers.
+    /// The parameters that stand for MIDI controllers on each channel,
+    /// and which channels the plugin has.
     midi: MidiParams,
-    /// The sustain pedal, worked out here for a plugin that has no
-    /// parameter for it.
-    pedal: Pedal,
+    /// The sustain pedal of each channel, worked out here for a plugin
+    /// that has no parameter for it.
+    pedals: Pedals,
+    /// The channels the plugin was ever told anything on, a bit each: the
+    /// ones a silence has to reach.
+    spoken: u16,
     /// What the controllers of the block last filled set: parameter, frame
     /// and normalized value, in the order they were set. Never grows.
     controls: Vec<(ParamID, u32, f64)>,
@@ -177,7 +188,8 @@ impl BlockEvents {
             silence: false,
             list: EventList::with_capacity(MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
             midi,
-            pedal: Pedal::default(),
+            pedals: Pedals::default(),
+            spoken: 0,
             controls: Vec::with_capacity(MAX_CONTROL_POINTS),
         }
     }
@@ -186,6 +198,12 @@ impl BlockEvents {
     /// with the frame it was set at, for the block's parameter changes.
     pub(crate) fn controls(&self) -> &[(ParamID, u32, f64)] {
         &self.controls
+    }
+
+    /// The channels the plugin was ever told anything on, a bit each, as
+    /// the plugin counts them from 0.
+    pub(crate) fn spoken(&self) -> u16 {
+        self.spoken
     }
 
     /// The list to pass to `process`. It is the same one for every block.
@@ -202,7 +220,7 @@ impl BlockEvents {
     /// and with it every voice has ended.
     pub(crate) fn forget_notes(&mut self) {
         self.held.take().for_each(drop);
-        self.pedal.clear();
+        self.pedals.clear();
         self.silence = false;
     }
 
@@ -218,20 +236,25 @@ impl BlockEvents {
         events: &[device::Event],
         (start, frames, total): (usize, usize, usize),
     ) -> bool {
-        let Self { takes_notes, held, silence, list, midi, pedal, controls } = self;
+        let Self { takes_notes, held, silence, list, midi, pedals, spoken, controls } = self;
         controls.clear();
         // Every value a controller took in the block is sent, at its frame:
         // a plugin follows a swell as the slope it is. Where there is no
         // room, or two fall on one frame, the later takes the earlier's
         // place.
         let mut set = |id: ParamID, time: u32, value: f64| {
-            let last = controls.iter().rposition(|(known, ..)| *known == id);
-            match last {
-                Some(index) if controls[index].1 == time || controls.len() >= controls.capacity() => {
-                    controls[index] = (id, controls[index].1.max(time), value);
+            // The events come in the order of their frames, so one of this
+            // parameter on this very frame is among the last that were set.
+            let mut latest = controls.iter().rev().take_while(|(_, at, _)| *at >= time);
+            let here = latest.position(|(known, ..)| *known == id).map(|back| controls.len() - 1 - back);
+            match here {
+                Some(index) => controls[index].2 = value,
+                None if controls.len() < controls.capacity() => controls.push((id, time, value)),
+                None => {
+                    if let Some(index) = controls.iter().rposition(|(known, ..)| *known == id) {
+                        controls[index] = (id, controls[index].1.max(time), value);
+                    }
                 }
-                _ if controls.len() < controls.capacity() => controls.push((id, time, value)),
-                _ => {}
             }
         };
         let filled = list.edit(|queue| {
@@ -246,54 +269,60 @@ impl BlockEvents {
             // is release every key it knows to be down.
             let silencing = std::mem::take(silence);
             if silencing {
-                for key in held.take() {
-                    queue.note_off(0, position(0), key);
+                for (channel, key) in held.take() {
+                    queue.note_off(0, position(0), channel, key);
                 }
             }
-            for (time, kind) in events_in_part(events, start, frames, total) {
+            for (time, channel, kind) in events_in_part(events, start, frames, total) {
+                // The channel the plugin has for it: everything below is
+                // kept by what the plugin was told.
+                let channel = midi.channel(channel);
+                *spoken |= 1 << channel.index();
                 match kind {
                     EventKind::NoteOn { pitch, velocity } => {
-                        pedal.key_down(pitch);
-                        held.press(pitch);
-                        queue.note_on(time, position(time), pitch, velocity);
+                        pedals.of(channel).key_down(pitch);
+                        held.press(channel, pitch);
+                        queue.note_on(time, position(time), channel, pitch, velocity);
                     }
                     EventKind::NoteOff { pitch } => {
                         // A plugin with a parameter for the pedal works it
                         // itself. For one without, the key stays down
-                        // until the pedal comes up.
-                        if midi.param(device::CONTROLLER_SUSTAIN).is_some() || pedal.key_up(pitch) {
-                            held.release(pitch);
-                            queue.note_off(time, position(time), pitch);
+                        // until the pedal of its channel comes up.
+                        let has_pedal = midi.param(channel, device::CONTROLLER_SUSTAIN).is_some();
+                        if has_pedal || pedals.of(channel).key_up(pitch) {
+                            held.release(channel, pitch);
+                            queue.note_off(time, position(time), channel, pitch);
                         }
                     }
+                    // Every note of every channel, whichever it is said on.
                     EventKind::AllNotesOff => {
-                        pedal.clear();
-                        for key in held.take() {
-                            queue.note_off(time, position(time), key);
+                        pedals.clear();
+                        for (channel, key) in held.take() {
+                            queue.note_off(time, position(time), channel, key);
                         }
                     }
                     EventKind::PitchBend { value } => {
-                        if let Some(id) = midi.param(PITCH_BEND) {
+                        if let Some(id) = midi.param(channel, PITCH_BEND) {
                             let value = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
                             set(id, time, (f64::from(value) + 1.0) * 0.5);
                         }
                     }
                     EventKind::ChannelPressure { value } => {
-                        if let Some(id) = midi.param(AFTERTOUCH) {
+                        if let Some(id) = midi.param(channel, AFTERTOUCH) {
                             let value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
                             set(id, time, f64::from(value));
                         }
                     }
-                    EventKind::Control { controller, value } => match midi.param(controller) {
+                    EventKind::Control { controller, value } => match midi.param(channel, controller) {
                         Some(id) => {
                             let value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
                             set(id, time, f64::from(value));
                         }
                         None => {
                             if let Some(down) = kind.sustain() {
-                                for key in pedal.set(down) {
-                                    held.release(key);
-                                    queue.note_off(time, position(time), key);
+                                for key in pedals.of(channel).set(down) {
+                                    held.release(channel, key);
+                                    queue.note_off(time, position(time), channel, key);
                                 }
                             }
                         }
@@ -389,11 +418,11 @@ mod tests {
     }
 
     fn on(offset: u32, pitch: u8) -> device::Event {
-        device::Event { offset, kind: EventKind::NoteOn { pitch, velocity: 1.0 } }
+        device::Event::new(offset, EventKind::NoteOn { pitch, velocity: 1.0 })
     }
 
     fn off(offset: u32, pitch: u8) -> device::Event {
-        device::Event { offset, kind: EventKind::NoteOff { pitch } }
+        device::Event::new(offset, EventKind::NoteOff { pitch })
     }
 
     /// The list the way a plugin reads it: each event as
@@ -432,7 +461,7 @@ mod tests {
     #[test]
     fn notes_become_vst3_events_at_their_offsets() {
         let mut feed = BlockEvents::new(true, MidiParams::default());
-        let quiet = device::Event { offset: 9, kind: EventKind::NoteOn { pitch: 200, velocity: 0.0001 } };
+        let quiet = device::Event::new(9, EventKind::NoteOn { pitch: 200, velocity: 0.0001 });
         let events = [on(3, 60), off(7, 60), quiet];
         assert_eq!(
             fill(&mut feed, &events),
@@ -469,7 +498,7 @@ mod tests {
         let mut feed = BlockEvents::new(true, MidiParams::default());
         fill(&mut feed, &[on(0, 60), on(0, 64), on(1, 67), off(2, 64)]);
 
-        let flush = device::Event { offset: 9, kind: EventKind::AllNotesOff };
+        let flush = device::Event::new(9, EventKind::AllNotesOff);
         assert_eq!(
             fill(&mut feed, &[flush, on(9, 72)]),
             [(9, "off", 60, 0.0), (9, "off", 67, 0.0), (9, "on", 72, 1.0)]
@@ -485,7 +514,7 @@ mod tests {
         // pitch wheel, and none for the expression pedal.
         let midi = MidiParams::of(&[(64, 9_064), (1, 9_001), (PITCH_BEND, 9_129)]);
         let mut feed = BlockEvents::new(true, midi);
-        let at = |offset: u32, kind: EventKind| device::Event { offset, kind };
+        let at = |offset: u32, kind: EventKind| device::Event::new(offset, kind);
         let events = [
             on(0, 60),
             at(1, EventKind::Control { controller: 64, value: 1.0 }),
@@ -517,11 +546,10 @@ mod tests {
     #[test]
     fn the_pedal_is_worked_out_for_a_plugin_that_has_no_parameter_for_it() {
         let mut feed = BlockEvents::new(true, MidiParams::default());
-        let pedal = |offset: u32, down: bool| device::Event {
-            offset,
-            kind: EventKind::Control { controller: 64, value: if down { 1.0 } else { 0.0 } },
+        let pedal = |offset: u32, down: bool| {
+            device::Event::new(offset, EventKind::Control { controller: 64, value: if down { 1.0 } else { 0.0 } })
         };
-        let bend = device::Event { offset: 3, kind: EventKind::PitchBend { value: 0.5 } };
+        let bend = device::Event::new(3, EventKind::PitchBend { value: 0.5 });
         assert_eq!(
             fill(&mut feed, &[on(0, 60), on(0, 64), pedal(1, true), off(2, 60), bend, on(4, 67)]),
             [(0, "on", 60, 1.0), (0, "on", 64, 1.0), (4, "on", 67, 1.0)],
@@ -534,10 +562,118 @@ mod tests {
         );
         // All notes off ends what the pedal holds, and leaves it down.
         fill(&mut feed, &[pedal(0, true), off(1, 67)]);
-        let flush = device::Event { offset: 2, kind: EventKind::AllNotesOff };
+        let flush = device::Event::new(2, EventKind::AllNotesOff);
         assert_eq!(fill(&mut feed, &[flush]), [(2, "off", 67, 0.0)]);
         assert_eq!(fill(&mut feed, &[on(0, 72), off(1, 72)]), [(0, "on", 72, 1.0)], "still down");
         assert_eq!(fill(&mut feed, &[pedal(0, false)]), [(0, "off", 72, 0.0)]);
+    }
+
+    /// The list as a plugin reads it, with the channel of each note:
+    /// `(sample offset, "on" or "off", channel as the plugin counts, pitch)`.
+    fn by_channel(feed: &BlockEvents) -> Vec<(i32, &'static str, i16, i16)> {
+        // SAFETY: as in `listing`.
+        unsafe {
+            let list = vst3::ComRef::from_raw(feed.list()).expect("a list");
+            (0..list.getEventCount())
+                .map(|index| {
+                    let mut event: Event = std::mem::zeroed();
+                    assert_eq!(list.getEvent(index, &mut event), kResultOk);
+                    if u32::from(event.r#type) == kNoteOnEvent as u32 {
+                        let note = event.__field0.noteOn;
+                        (event.sampleOffset, "on", note.channel, note.pitch)
+                    } else {
+                        let note = event.__field0.noteOff;
+                        (event.sampleOffset, "off", note.channel, note.pitch)
+                    }
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_note_a_wheel_and_a_pedal_go_to_the_plugin_on_the_channel_they_are_on() {
+        let channel = |number: u8| Channel::new(number).unwrap();
+        let (second, sixth, twelfth) = (channel(2), channel(6), channel(12));
+        // A plugin whose event bus has eight channels, with a parameter
+        // for the wheel and the pressure of each of the first six, and
+        // none for the pedal.
+        let mut named = Vec::new();
+        for number in 1..=6u8 {
+            named.push((number, PITCH_BEND, 1_000 + u32::from(number)));
+            named.push((number, AFTERTOUCH, 2_000 + u32::from(number)));
+        }
+        let mut feed = BlockEvents::new(true, MidiParams::on_channels(8, &named));
+        let down = |channel, offset| device::Event::on(channel, offset, EventKind::NoteOn { pitch: 40, velocity: 1.0 });
+        let up = |channel, offset| device::Event::on(channel, offset, EventKind::NoteOff { pitch: 40 });
+        let pedal =
+            |channel, offset, value| device::Event::on(channel, offset, EventKind::Control { controller: 64, value });
+        let events = [
+            down(sixth, 0),
+            down(second, 0),
+            down(Channel::FIRST, 0),
+            device::Event::on(sixth, 1, EventKind::PitchBend { value: 1.0 }),
+            device::Event::on(second, 1, EventKind::PitchBend { value: -1.0 }),
+            device::Event::on(sixth, 2, EventKind::ChannelPressure { value: 0.5 }),
+            pedal(second, 3, 1.0),
+            up(sixth, 4),
+            up(second, 5),
+            up(Channel::FIRST, 6),
+        ];
+        feed.fill(&info(true, 0.0), &events, (0, 64, 64));
+        assert_eq!(
+            by_channel(&feed),
+            [(0, "on", 5, 40), (0, "on", 1, 40), (0, "on", 0, 40), (4, "off", 5, 40), (6, "off", 0, 40)],
+            "one key on three channels is three notes; the second's pedal holds the second's and no other"
+        );
+        assert_eq!(feed.controls(), [(1_006, 1, 1.0), (1_002, 1, 0.0), (2_006, 2, 0.5)], "each channel's own");
+        feed.fill(&info(true, 0.0), &[pedal(second, 9, 0.0)], (0, 64, 64));
+        assert_eq!(by_channel(&feed), [(9, "off", 1, 40)]);
+
+        // A channel the bus has not got is the plugin's first: the note,
+        // its key coming up, and what its wheel sets.
+        let wheel = device::Event::on(twelfth, 2, EventKind::PitchBend { value: 1.0 });
+        feed.fill(&info(true, 0.0), &[down(twelfth, 0), down(sixth, 1), wheel, up(twelfth, 3)], (0, 64, 64));
+        assert_eq!(by_channel(&feed), [(0, "on", 0, 40), (1, "on", 5, 40), (3, "off", 0, 40)]);
+        assert_eq!(feed.controls(), [(1_001, 2, 1.0)]);
+        // "All notes off" on any channel lets go of every channel's, and
+        // a silence does the same.
+        feed.fill(
+            &info(true, 0.0),
+            &[down(second, 0), device::Event::on(sixth, 5, EventKind::AllNotesOff)],
+            (0, 64, 64),
+        );
+        assert_eq!(by_channel(&feed), [(0, "on", 1, 40), (5, "off", 1, 40), (5, "off", 5, 40)]);
+        feed.fill(&info(true, 0.0), &[down(second, 0), down(sixth, 0)], (0, 64, 64));
+        feed.silence();
+        feed.fill(&info(true, 0.0), &[], (0, 64, 64));
+        assert_eq!(by_channel(&feed), [(0, "off", 1, 40), (0, "off", 5, 40)]);
+
+        // Six strings moving the wheel and the pressure all through a
+        // block, with two controllers on the first channel beside: every
+        // value of every one has its place.
+        let mut named = named.clone();
+        named.extend([(1, 1, 3_001), (1, 11, 3_011)]);
+        let mut feed = BlockEvents::new(true, MidiParams::on_channels(16, &named));
+        let mut moving = Vec::new();
+        for step in 0..16u32 {
+            let value = step as f32 / 16.0;
+            for string in 1..=6u8 {
+                moving.push(device::Event::on(channel(string), step * 32, EventKind::PitchBend { value }));
+                moving.push(device::Event::on(channel(string), step * 32, EventKind::ChannelPressure { value }));
+            }
+            moving.push(device::Event::new(step * 32, EventKind::Control { controller: 1, value }));
+            moving.push(device::Event::new(step * 32, EventKind::Control { controller: 11, value }));
+        }
+        feed.fill(&info(true, 0.0), &moving, (0, 512, 512));
+        assert_eq!(feed.controls().len(), 16 * 14);
+        let mut parameters: Vec<ParamID> = feed.controls().iter().map(|control| control.0).collect();
+        parameters.sort_unstable();
+        parameters.dedup();
+        assert_eq!(parameters.len(), 14);
+        assert!(parameters.len() <= MAX_CONTROLS);
+        let sixth_wheel: Vec<u32> =
+            feed.controls().iter().filter(|control| control.0 == 1_006).map(|control| control.1).collect();
+        assert_eq!(sixth_wheel, (0..16).map(|step| step * 32).collect::<Vec<u32>>());
     }
 
     #[test]
@@ -553,7 +689,7 @@ mod tests {
         // After deactivation there is nothing left to silence or release.
         feed.silence();
         feed.forget_notes();
-        let flush = device::Event { offset: 0, kind: EventKind::AllNotesOff };
+        let flush = device::Event::new(0, EventKind::AllNotesOff);
         assert!(!feed.fill(&info(true, 0.0), &[flush], (0, 64, 64)));
         assert_eq!(listing(feed.list()), []);
     }
@@ -586,7 +722,7 @@ mod tests {
         let storage = list.events.try_with(|events| events.as_ptr()).unwrap();
         list.edit(|queue| {
             for key in 0..10 {
-                queue.note_on(0, 0.0, key, 1.0);
+                queue.note_on(0, 0.0, Channel::FIRST, key, 1.0);
             }
         });
         let (length, address) = list.events.try_with(|events| (events.len(), events.as_ptr())).unwrap();
@@ -680,7 +816,7 @@ mod tests {
     fn a_swell_and_the_pressure_on_the_keys_are_set_where_they_happen() {
         let midi = MidiParams::of(&[(11, 9_011), (AFTERTOUCH, 9_128)]);
         let mut feed = BlockEvents::new(true, midi);
-        let at = |offset: u32, kind: EventKind| device::Event { offset, kind };
+        let at = |offset: u32, kind: EventKind| device::Event::new(offset, kind);
         // Expression as the engine sends a clip's curve: a value every 32
         // frames. All of them reach the plugin, each at its frame.
         let mut events: Vec<device::Event> = (0..16)
@@ -703,12 +839,21 @@ mod tests {
 
         // More movement than there is room for: the newest value takes the
         // place of the one before it, and the last is never lost.
-        let flood: Vec<device::Event> = (0..400)
-            .map(|frame| at(frame, EventKind::Control { controller: 11, value: frame as f32 / 400.0 }))
+        let flood: Vec<device::Event> = (0..1400)
+            .map(|frame| at(frame, EventKind::Control { controller: 11, value: frame as f32 / 1400.0 }))
             .collect();
-        feed.fill(&info(true, 0.0), &flood, (0, 512, 512));
+        feed.fill(&info(true, 0.0), &flood, (0, 2048, 2048));
         assert_eq!(feed.controls().len(), MAX_CONTROL_POINTS);
-        assert_eq!(feed.controls().last(), Some(&(9_011, 399, f64::from(399.0f32 / 400.0))));
+        assert_eq!(feed.controls().last(), Some(&(9_011, 1399, f64::from(1399.0f32 / 1400.0))));
+        // Two words on one frame are one point, the later one, whatever
+        // was set between them.
+        let twice = [
+            at(7, EventKind::Control { controller: 11, value: 0.25 }),
+            at(7, EventKind::ChannelPressure { value: 1.0 }),
+            at(7, EventKind::Control { controller: 11, value: 0.75 }),
+        ];
+        feed.fill(&info(true, 0.0), &twice, (0, 512, 512));
+        assert_eq!(feed.controls(), [(9_011, 7, 0.75), (9_128, 7, 1.0)]);
         // A plugin without a parameter for pressure is not sent it.
         let mut plain = BlockEvents::new(true, MidiParams::default());
         plain.fill(&info(true, 0.0), &events, (0, 512, 512));

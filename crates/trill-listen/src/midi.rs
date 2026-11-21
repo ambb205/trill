@@ -39,7 +39,13 @@ pub fn file(notes: &[TimedNote], grid: &Grid, origin: f64, name: &str, drums: bo
             }
             let start = start.max(0.0);
             let end = (grid.beat_at(note.end) - zero).max(start + SHORTEST);
-            Note { pitch: note.note.min(127), start, length: end - start, velocity: note.velocity.clamp(1, 127) }
+            Note {
+                pitch: note.note.min(127),
+                start,
+                length: end - start,
+                velocity: note.velocity.clamp(1, 127),
+                ..Default::default()
+            }
         })
         .collect();
     written.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));

@@ -1,7 +1,7 @@
 //! Tool arguments. Field docs become the JSON-schema descriptions the model
 //! reads, so they are written for that audience.
 
-use crate::input::{ControllerPointInput, NoteInput, PitchInput, PointInput};
+use crate::input::{ChannelInput, ControllerPointInput, NoteInput, PitchInput, PointInput};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
@@ -247,6 +247,9 @@ pub struct CreateClipRequest {
     /// Controller curves to put in the clip with the notes, by controller, as set_controllers takes them:
     /// {"expression": [[0, 50], [4, 110]], "sustain": [[0, 127], [3.5, 0]]}.
     pub controllers: Option<BTreeMap<String, Vec<ControllerPointInput>>>,
+    /// The MIDI channel of every note here that says none, and of `controllers`. Only for an instrument that
+    /// names its channels (get_instrument_profile: `channels`); leave it out otherwise.
+    pub channel: Option<ChannelInput>,
 }
 
 /// How an audio clip follows the project tempo.
@@ -356,6 +359,9 @@ pub struct NotesRequest {
     /// Clip id.
     pub clip: u64,
     pub notes: Vec<NoteInput>,
+    /// The MIDI channel of every note here that says none. Only for an instrument that names its channels
+    /// (get_instrument_profile: `channels`); leave it out otherwise.
+    pub channel: Option<ChannelInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -365,6 +371,8 @@ pub struct GetControllersRequest {
     /// Read only this controller: a name ("expression", "mod_wheel", "pitch_bend", "sustain", "breath",
     /// "pressure", "volume") or a controller number. Omit for all the clip has.
     pub controller: Option<String>,
+    /// Read only the curves of this MIDI channel. Omit for those of every channel the clip uses.
+    pub channel: Option<ChannelInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -376,6 +384,11 @@ pub struct SetControllersRequest {
     /// clip's curve for that controller; an empty list removes it; controllers not named are left alone.
     /// For example {"expression": [[0, 40], [3, 110, 0.4], [4, 70]], "sustain": [[0, 127], [3.5, 0]]}.
     pub controllers: BTreeMap<String, Vec<ControllerPointInput>>,
+    /// The MIDI channel these curves are on: a clip keeps a curve for each controller on each channel, and a
+    /// wheel on a channel moves that channel's notes (one string of a guitar that has a string to a channel).
+    /// Only for an instrument that names its channels (get_instrument_profile: `channels`); leave it out
+    /// otherwise, and the curves are on the first, where every other instrument listens.
+    pub channel: Option<ChannelInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -388,6 +401,8 @@ pub struct RemoveNotesRequest {
     pub end: Option<f64>,
     /// Only notes of this pitch.
     pub pitch: Option<PitchInput>,
+    /// Only notes on this MIDI channel.
+    pub channel: Option<ChannelInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -398,6 +413,16 @@ pub struct TransformNotesRequest {
     pub start: Option<f64>,
     /// Only notes starting before this beat (relative to the clip).
     pub end: Option<f64>,
+    /// Only notes at or above this pitch.
+    pub lowest: Option<PitchInput>,
+    /// Only notes at or below this pitch.
+    pub highest: Option<PitchInput>,
+    /// Only notes on this MIDI channel.
+    pub channel: Option<ChannelInput>,
+    /// Put the notes on this MIDI channel: on an organ, the notes under a pitch onto its pedalboard
+    /// ({"highest": "B2", "to_channel": "pedalboard"}). Only for an instrument that names its channels
+    /// (get_instrument_profile: `channels`).
+    pub to_channel: Option<ChannelInput>,
     /// Semitones to shift pitch by.
     pub transpose: Option<i32>,
     /// Beats to move notes by (negative = earlier).

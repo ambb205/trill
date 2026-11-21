@@ -414,7 +414,13 @@ fn answer(id: &str, tool: &str, result: Result<&str, &str>) -> Event {
 fn write_bass_intro(assistant: &Assistant, bass: TrackId) -> Option<ClipId> {
     let roots = [33u8, 29, 36, 31];
     let notes: Vec<Note> = (0..64)
-        .map(|step| Note { pitch: roots[step / 16], start: step as f64 * 0.5, length: 0.4, velocity: 92 })
+        .map(|step| Note {
+            pitch: roots[step / 16],
+            start: step as f64 * 0.5,
+            length: 0.4,
+            velocity: 92,
+            ..Default::default()
+        })
         .collect();
     let edit = |project: &mut Project| {
         let clip = project.add_midi_clip(bass, "Bass intro", 0.0, 32.0)?;
@@ -433,8 +439,15 @@ fn write_bass_intro(assistant: &Assistant, bass: TrackId) -> Option<ClipId> {
 /// What the script's `add_notes` call does: hats on the sixteenths between
 /// the ones already there.
 fn busier_hats(assistant: &Assistant, clip: ClipId) {
-    let notes: Vec<Note> =
-        (0..32).map(|step| Note { pitch: 42, start: step as f64 * 0.5 + 0.25, length: 0.2, velocity: 70 }).collect();
+    let notes: Vec<Note> = (0..32)
+        .map(|step| Note {
+            pitch: 42,
+            start: step as f64 * 0.5 + 0.25,
+            length: 0.2,
+            velocity: 70,
+            ..Default::default()
+        })
+        .collect();
     if let Err(error) = assistant.session.lock().edit(|project| project.clip_mut(clip)?.add_notes(&notes)) {
         log::warn!("the scene could not write its hats: {error}");
     }

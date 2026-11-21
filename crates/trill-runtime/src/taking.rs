@@ -1336,7 +1336,7 @@ mod tests {
 
     #[test]
     fn a_groove_is_written_on_the_keys_the_kit_has_and_a_drum_it_lacks_is_left_out_and_named() {
-        let hit = |pitch: u8, start: f64| Note { pitch, start, length: 0.25, velocity: 100 };
+        let hit = |pitch: u8, start: f64| Note { pitch, start, length: 0.25, velocity: 100, ..Default::default() };
         let groove = vec![hit(36, 0.0), hit(42, 0.5), hit(38, 1.0), hit(42, 1.5)];
         // A kit that says what is on its keys: a kick on C3, a snare on D3, and no hat.
         let mut kit = trill_core::InstrumentProfile { whole: true, ..Default::default() };

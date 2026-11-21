@@ -102,6 +102,16 @@ pub(crate) mod kind {
     /// The host is told to leave such a plugin alone for a while
     /// ([`super::super::quirks`]).
     pub(crate) const SETS_UP_BEHIND: u8 = 14;
+    /// An instrument whose event bus has
+    /// [`CHANNELS_ON_BUS`](super::CHANNELS_ON_BUS) channels, and which
+    /// says what arrived on which: every note becomes one sample at its
+    /// frame that is [`said`](crate::notes::said) of it, and so does every
+    /// value of a parameter it named for a MIDI controller. It names one
+    /// for the pitch wheel, the pressure and the mod wheel on each of its
+    /// channels ([`channel_param`](super::channel_param)), one for the
+    /// expression pedal on its first only, one for "all sound off" on
+    /// each, and none for the sustain pedal.
+    pub(crate) const CHANNELS: u8 = 15;
 
     /// Plugins that keep whatever state they are handed and give it back,
     /// under the class ids of plugins whose vendors keep presets in files
@@ -116,7 +126,7 @@ pub(crate) mod kind {
     pub(crate) const KEEPS_ARCHETYPE: u8 = 23;
     pub(crate) const KEEPERS: [u8; 4] = [KEEPS_SERUM, KEEPS_AMPLE, KEEPS_SUPERIOR, KEEPS_ARCHETYPE];
 
-    pub(crate) const ALL: [u8; 15] = [
+    pub(crate) const ALL: [u8; 16] = [
         IMPULSE,
         MONO_GAIN,
         STEREO_GAIN,
@@ -132,7 +142,35 @@ pub(crate) mod kind {
         FAILS_ATTACH,
         ASKS_WHEN_ATTACHED,
         SETS_UP_BEHIND,
+        CHANNELS,
     ];
+}
+
+/// How many channels the event bus of a [`kind::CHANNELS`] plugin has.
+pub(crate) const CHANNELS_ON_BUS: int32 = 8;
+const CHANNEL_PARAMS: ParamID = 100_000;
+const NUMBERS_A_CHANNEL: ParamID = 130;
+
+/// The parameter a [`kind::CHANNELS`] plugin names for `controller` (as
+/// VST3 numbers them: 128 the pressure, 129 the wheel) on the channel it
+/// counts as `channel`, from 0.
+pub(crate) fn channel_param(channel: u8, controller: u8) -> ParamID {
+    CHANNEL_PARAMS + ParamID::from(channel) * NUMBERS_A_CHANNEL + ParamID::from(controller)
+}
+
+/// What a parameter of [`channel_param`] stands for: what the plugin says
+/// it was told, and the channel as a person calls it.
+fn of_channel_param(id: ParamID) -> Option<(crate::notes::Told, u8)> {
+    use crate::notes::Told;
+    let at = id.checked_sub(CHANNEL_PARAMS)?;
+    let (channel, controller) = (at / NUMBERS_A_CHANNEL, at % NUMBERS_A_CHANNEL);
+    let what = match controller {
+        120 => Told::AllSoundOff,
+        128 => Told::Pressure,
+        129 => Told::Wheel,
+        _ => Told::Controller,
+    };
+    (channel < CHANNELS_ON_BUS as ParamID).then_some((what, channel as u8 + 1))
 }
 
 /// How long a [`kind::SETS_UP_BEHIND`] plugin goes on working after it is
@@ -262,7 +300,7 @@ fn has_view(kind: u8) -> bool {
 }
 
 fn is_instrument(kind: u8) -> bool {
-    matches!(kind, kind::IMPULSE | kind::LOST_CONTROLLER)
+    matches!(kind, kind::IMPULSE | kind::LOST_CONTROLLER | kind::CHANNELS)
 }
 
 /// Whether the plugin's edit controller is a class of its own.
@@ -1320,6 +1358,9 @@ impl<const ROLE: u8> IComponentTrait for Object<ROLE> {
         bus.mediaType = media;
         bus.direction = direction;
         bus.channelCount = arrangement.count_ones() as int32;
+        if media == kEvent as MediaType && self.kind == kind::CHANNELS {
+            bus.channelCount = CHANNELS_ON_BUS;
+        }
         text::to_utf16(if index == 0 { "Main" } else { "Extra" }, &mut bus.name);
         bus.busType = if index == 0 { kMain } else { kAux } as BusType;
         bus.flags = if index == 0 { kDefaultActive as uint32 } else { 0 };
@@ -1499,11 +1540,24 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
 
             // Parameters first: they apply from the start of the block.
             let (mut gain_given, mut silenced) = (false, false);
+            // What a plugin that says its channels was told through the
+            // parameters it named for controllers: frame and sample.
+            let mut told: Vec<(int32, f32)> = Vec::new();
             if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
                 for index in 0..changes.getParameterCount() {
                     let Some(queue) = ComRef::from_raw(changes.getParameterData(index)) else { continue };
                     let (id, points) = (queue.getParameterId(), queue.getPointCount());
                     let (mut offset, mut value) = (0, 0.0);
+                    if self.kind == kind::CHANNELS
+                        && let Some((what, channel)) = of_channel_param(id)
+                    {
+                        for point in 0..points {
+                            if queue.getPoint(point, &mut offset, &mut value) == kResultOk {
+                                told.push((offset, crate::notes::said(what, channel)));
+                            }
+                        }
+                        continue;
+                    }
                     if points > 0 && queue.getPoint(points - 1, &mut offset, &mut value) == kResultOk {
                         observe(serial, |seen| seen.received.push((id, value, offset)));
                         Self::set_value(&self.processor_values, id, value);
@@ -1557,6 +1611,38 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
                 let Some(out) = channel(main_out, 0) else { return kResultOk };
                 let out = std::slice::from_raw_parts_mut(out, frames);
                 out.fill(0.0);
+                if self.kind == kind::CHANNELS {
+                    use crate::notes::{Told, said};
+                    for (offset, sample) in told {
+                        if let Some(out) = out.get_mut(offset as usize) {
+                            *out += sample;
+                        }
+                    }
+                    if silenced {
+                        out[0] += said(Told::AllSoundOff, 1);
+                    }
+                    if let Some(events) = ComRef::from_raw(data.inputEvents) {
+                        for index in 0..events.getEventCount() {
+                            let mut event: Event = std::mem::zeroed();
+                            if events.getEvent(index, &mut event) != kResultOk {
+                                continue;
+                            }
+                            let sample = match u32::from(event.r#type) {
+                                kind if kind == kNoteOnEvent as u32 => {
+                                    said(Told::NoteOn, event.__field0.noteOn.channel as u8 + 1)
+                                }
+                                kind if kind == kNoteOffEvent as u32 => {
+                                    said(Told::NoteOff, event.__field0.noteOff.channel as u8 + 1)
+                                }
+                                _ => continue,
+                            };
+                            if let Some(out) = out.get_mut(event.sampleOffset as usize) {
+                                *out += sample;
+                            }
+                        }
+                    }
+                    return kResultOk;
+                }
                 if silenced {
                     out[0] -= 0.125;
                 }
@@ -1981,7 +2067,8 @@ impl<const ROLE: u8> IUnitInfoTrait for Object<ROLE> {
 
 impl<const ROLE: u8> IMidiMappingTrait for Object<ROLE> {
     /// Only instruments take MIDI controllers, and of those only "all
-    /// sound off", on the first channel of the first bus.
+    /// sound off", on the first channel of the first bus. The one that
+    /// says its channels names more ([`kind::CHANNELS`]).
     unsafe fn getMidiControllerAssignment(
         &self,
         bus: int32,
@@ -1989,6 +2076,18 @@ impl<const ROLE: u8> IMidiMappingTrait for Object<ROLE> {
         controller: CtrlNumber,
         id: *mut ParamID,
     ) -> tresult {
+        if self.kind == kind::CHANNELS && bus == 0 && (0..CHANNELS_ON_BUS as int16).contains(&channel) {
+            // (Its first channel's "all sound off" is the one every scripted
+            // instrument names; each other channel has one of its own.)
+            let named = matches!(controller, 1 | 128 | 129)
+                || (controller == 11 && channel == 0)
+                || (controller == 120 && channel > 0);
+            if named {
+                // SAFETY: the host passes its own `ParamID`.
+                unsafe { *id = channel_param(channel as u8, controller as u8) };
+                return kResultOk;
+            }
+        }
         if !is_instrument(self.kind) || (bus, channel, controller) != (0, 0, 120) {
             return kResultFalse;
         }

@@ -19,6 +19,15 @@ the pedal going down as it is moved. A track whose instrument is given notes and
 marked on its header and in the lane's strip, with what to do about it (`--lane expression` opens the window with
 the lane on a controller).
 
+The Clip tab's sidebar has a *Channel* field under the velocity: the MIDI channel that is chosen. Drag it, or
+double-click and type. With notes selected it sets their channel, as one undo step; with none it is the channel
+new notes are drawn on. Either way the lane under the notes shows and edits the chosen channel's curve, and says
+which where it is not the first. Where a clip uses another channel than the first, or its track's instrument
+names its channels (an organ's pedalboard, a guitar's strings), every note carries its channel's number, the
+notes of the other channels stand back, the field says what the instrument calls the channel, and the foot of the
+sidebar lists the channels the clip uses. On every other clip nothing of channels is drawn but that field
+(`--channel 2` opens the window with that channel chosen).
+
 An automated control is not locked: drag it and it is yours. Its envelope is switched off, not lost, the mark in
 the control's corner turns into an outline, and a click on that mark (or on the switch of its lane) hands the
 control back to the envelope. That holds for a volume, a pan, a device's parameter and a send alike: a send's bar

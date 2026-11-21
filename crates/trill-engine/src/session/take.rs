@@ -377,6 +377,7 @@ impl Take {
                         start: begins - clip_start + offset,
                         length: (played.end - begins).max(SHORTEST_NOTE),
                         velocity: played.velocity,
+                        ..Default::default()
                     }
                 })
                 .collect();
@@ -1142,14 +1143,14 @@ mod tests {
         project
             .clip_mut(clip)
             .unwrap()
-            .add_notes(&[Note { pitch: 40, start: 1.0, length: 0.5, velocity: 90 }])
+            .add_notes(&[Note { pitch: 40, start: 1.0, length: 0.5, velocity: 90, ..Default::default() }])
             .unwrap();
         project.trim_clip_start(clip, 4.0).unwrap();
         assert_eq!(project.clip(clip).unwrap().midi().unwrap().start_offset, 2.0);
         project
             .clip_mut(clip)
             .unwrap()
-            .add_notes(&[Note { pitch: 41, start: 2.5, length: 0.5, velocity: 90 }])
+            .add_notes(&[Note { pitch: 41, start: 2.5, length: 0.5, velocity: 90, ..Default::default() }])
             .unwrap();
 
         take.handle(on(60, 5.0));

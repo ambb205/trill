@@ -65,11 +65,11 @@ fn block(instance: &mut DeviceInstance, frames: usize, events: &[Event], fill: f
 }
 
 fn on(offset: u32, velocity: f32) -> Event {
-    Event { offset, kind: EventKind::NoteOn { pitch: 60, velocity } }
+    Event::new(offset, EventKind::NoteOn { pitch: 60, velocity })
 }
 
 fn off(offset: u32) -> Event {
-    Event { offset, kind: EventKind::NoteOff { pitch: 60 } }
+    Event::new(offset, EventKind::NoteOff { pitch: 60 })
 }
 
 /// A block of silence with `samples` at the given frames.
@@ -279,11 +279,11 @@ fn a_plugin_that_only_takes_midi_gets_midi() {
 fn all_notes_off_and_reset_end_exactly_the_notes_that_are_down() {
     let factory = factory();
     let mut instance = create(&factory, &device(kind::IMPULSE));
-    let key = |offset, pitch| Event { offset, kind: EventKind::NoteOn { pitch, velocity: 1.0 } };
+    let key = |offset, pitch| Event::new(offset, EventKind::NoteOn { pitch, velocity: 1.0 });
     block(&mut instance, BLOCK, &[key(0, 60), key(0, 64), key(0, 67), off(1)], 0.0);
 
     // Two keys are down: two note-offs, at the event's frame.
-    let flush = Event { offset: 5, kind: EventKind::AllNotesOff };
+    let flush = Event::new(5, EventKind::AllNotesOff);
     let (left, _) = block(&mut instance, BLOCK, &[flush], 0.0);
     assert_eq!(left, impulses(BLOCK, &[(5, -1.0)]));
     let (left, _) = block(&mut instance, BLOCK, &[flush], 0.0);
@@ -581,7 +581,11 @@ fn the_engine_renders_a_plugin_note_on_its_exact_frame() {
     project.add_device(ChainRef::Track(track), uri(kind::IMPULSE), "Impulse", None).unwrap();
     let clip = project.add_midi_clip(track, "clip", 0.0, 4.0).unwrap();
     // Beat 1 to beat 2 at 120 BPM and 48 kHz: frames 24000 to 48000.
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 127 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 127, ..Default::default() }])
+        .unwrap();
 
     let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: 0.1, ..RenderOptions::default() };
     let out = render(&project, &factory, &options).unwrap();
@@ -591,4 +595,116 @@ fn the_engine_renders_a_plugin_note_on_its_exact_frame() {
     assert_eq!(sounding, [24_000, 48_000], "one sample for the note-on and one for the note-off");
     assert!(out.left[24_000] > 0.0 && out.left[48_000] < 0.0);
     assert_eq!(out.left, out.right);
+}
+
+// ---- channels -----------------------------------------------------------------
+
+#[test]
+fn a_plugin_is_told_each_note_wheel_and_controller_on_the_channel_it_is_on() {
+    use crate::notes::{Told, heard, said};
+    use trill_core::Channel;
+    let factory = factory();
+    let mut instance = create(&factory, &device(kind::CHANNELS));
+    let (second, sixth) = (Channel::new(2).unwrap(), Channel::new(6).unwrap());
+    let down = EventKind::NoteOn { pitch: 40, velocity: 1.0 };
+    let events = [
+        Event::on(sixth, 0, down),
+        Event::on(second, 1, down),
+        Event::new(2, down),
+        Event::on(sixth, 3, EventKind::PitchBend { value: 0.5 }),
+        Event::on(sixth, 4, EventKind::ChannelPressure { value: 0.5 }),
+        Event::on(second, 5, EventKind::Control { controller: 11, value: 0.5 }),
+        Event::on(sixth, 6, EventKind::NoteOff { pitch: 40 }),
+    ];
+    let (left, _) = block(&mut instance, BLOCK, &events, 0.0);
+    assert_eq!(
+        heard(&left),
+        [
+            (0, Told::NoteOn, 6),
+            (1, Told::NoteOn, 2),
+            (2, Told::NoteOn, 1),
+            (3, Told::Wheel, 6),
+            (4, Told::Pressure, 6),
+            (5, Told::Controller, 2),
+            (6, Told::NoteOff, 6),
+        ]
+    );
+    // A reset lets go of the two keys that are down, each on its own
+    // channel, chokes them, and tells every channel anything was said on
+    // that all sound is off: all of it on the block's first frame.
+    instance.processor.reset();
+    let (left, _) = block(&mut instance, BLOCK, &[], 0.0);
+    let told = [
+        said(Told::NoteOff, 1),
+        said(Told::Choke, 1),
+        said(Told::NoteOff, 2),
+        said(Told::Choke, 2),
+        said(Told::AllSoundOff, 1),
+        said(Told::AllSoundOff, 2),
+        said(Told::AllSoundOff, 6),
+    ];
+    assert_eq!(left[0], told.iter().fold(0.0, |sum, sample| sum + sample));
+    assert!(left[1..].iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn the_engine_plays_a_plugin_each_channel_of_a_song() {
+    use crate::notes::{Told, heard, said};
+    let project = song_on_two_channels(uri(kind::CHANNELS));
+    let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: 0.1, ..RenderOptions::default() };
+    let mut out = render(&project, &factory(), &options).unwrap();
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    // Where a song starts, its instrument is told where everything
+    // stands: the sixth channel's wheel and the second's pedal, each on
+    // its own channel, both on the first frame.
+    let first = said(Told::Wheel, 6) + said(Told::Controller, 2);
+    assert!((out.left[0] - first).abs() < 1e-4, "{} at the first frame", out.left[0]);
+    out.left[0] = 0.0;
+    let heard = heard(&out.left);
+    // A beat is 24000 frames. The keys: down and up on their own channels.
+    let notes: Vec<_> = heard.iter().filter(|(_, what, _)| matches!(what, Told::NoteOn | Told::NoteOff)).collect();
+    assert_eq!(
+        notes,
+        [
+            &(6_000, Told::NoteOn, 6),
+            &(12_000, Told::NoteOn, 2),
+            &(54_000, Told::NoteOff, 6),
+            &(60_000, Told::NoteOff, 2)
+        ]
+    );
+    // The wheel is the sixth channel's and no other's, all through its
+    // climb; the pedal is the second's.
+    let wheel: Vec<_> = heard.iter().filter(|(_, what, _)| *what == Told::Wheel).collect();
+    assert!(wheel.len() > 100, "{} values of the wheel", wheel.len());
+    assert!(wheel.iter().all(|(_, _, channel)| *channel == 6));
+    // (Its last word is where the clip ends: back to rest, on the same channel.)
+    let (last, climb) = wheel.split_last().unwrap();
+    assert!(climb.iter().all(|(frame, ..)| (24_000..=42_100).contains(frame)) && last.0 == 96_000);
+    let pedal: Vec<_> = heard.iter().filter(|(_, what, _)| *what == Told::Controller).collect();
+    // (A curve is looked at every 32 frames of the song: 18000 is between two of them.)
+    assert_eq!(pedal, [&(18_016, Told::Controller, 2), &(72_000, Told::Controller, 2)]);
+}
+
+/// A song for an instrument that gives its channels meanings: one key on
+/// the sixth channel a quarter of a beat in and, a quarter later, the same
+/// key on the second, both held for two beats; the sixth's wheel goes up
+/// from beat 1 to beat 1.75, and the second has a pedal that is down from
+/// beat 0.75 to beat 3. (No two things on one frame, so that a plugin that
+/// makes a sample of each thing it is told says each of them apart.)
+fn song_on_two_channels(instrument: String) -> Project {
+    use trill_core::{AutomationPoint, Channel, ControllerKind};
+    let (second, sixth) = (Channel::new(2).unwrap(), Channel::new(6).unwrap());
+    let mut project = Project::new("t");
+    let track = project.add_track("Guitar");
+    project.add_device(ChainRef::Track(track), instrument, "Channels", None).unwrap();
+    let clip = project.add_midi_clip(track, "clip", 0.0, 4.0).unwrap();
+    let clip = project.clip_mut(clip).unwrap();
+    let key = |start: f64| Note { pitch: 40, start, length: 2.0, velocity: 127, ..Default::default() };
+    clip.add_notes(&[key(0.25).on(sixth), key(0.5).on(second)]).unwrap();
+    let wheel = vec![AutomationPoint::new(1.0, 0.0), AutomationPoint::new(1.75, 1.0)];
+    clip.set_controller_on(sixth, ControllerKind::PitchBend, wheel).unwrap();
+    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: trill_core::project::Segment::Hold };
+    let pedal = vec![held(0.75, 1.0), held(3.0, 0.0)];
+    clip.set_controller_on(second, ControllerKind::SUSTAIN, pedal).unwrap();
+    project
 }

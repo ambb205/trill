@@ -31,7 +31,7 @@ struct Song {
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 100 }
+    Note { pitch, start, length, velocity: 100, ..Default::default() }
 }
 
 fn device(project: &mut Project, chain: ChainRef, uri: &str, params: &[(&str, f64)]) -> DeviceId {

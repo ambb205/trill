@@ -173,7 +173,7 @@ mod tests {
     use super::*;
 
     fn note(start: f64, length: f64) -> Note {
-        Note { pitch: 60, start, length, velocity: 100 }
+        Note { pitch: 60, start, length, velocity: 100, ..Default::default() }
     }
 
     #[test]

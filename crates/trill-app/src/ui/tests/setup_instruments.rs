@@ -401,7 +401,13 @@ fn the_starter_selection_is_asked_for_as_one_thing_stopped_gone_on_with_and_play
         session
             .edit(|project| {
                 let clip = project.add_midi_clip(track, "c", 0.0, 2.0)?;
-                project.clip_mut(clip)?.add_notes(&[Note { pitch: 48, start: 0.0, length: 1.0, velocity: 100 }])
+                project.clip_mut(clip)?.add_notes(&[Note {
+                    pitch: 48,
+                    start: 0.0,
+                    length: 1.0,
+                    velocity: 100,
+                    ..Default::default()
+                }])
             })
             .unwrap();
         assert!(session.problems().is_empty(), "{:?}", session.problems());
@@ -494,7 +500,13 @@ fn the_starter_selection_is_fetched_from_the_panel_and_played() {
                     let notes: Vec<Note> = keys
                         .iter()
                         .enumerate()
-                        .map(|(step, pitch)| Note { pitch: *pitch, start: step as f64, length: 0.9, velocity: 100 })
+                        .map(|(step, pitch)| Note {
+                            pitch: *pitch,
+                            start: step as f64,
+                            length: 0.9,
+                            velocity: 100,
+                            ..Default::default()
+                        })
                         .collect();
                     project.clip_mut(clip)?.add_notes(&notes)
                 })

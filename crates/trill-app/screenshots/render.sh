@@ -145,6 +145,17 @@ shot wavetable "$here/projects/wavetable.trill" --select "Sync Lead" --tab devic
 shot wavetable-whole "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 2560x900
 shot graphite-wavetable "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 1600x900 --theme graphite
 
+# MIDI channels in the piano roll, for an instrument that gives its
+# channels meanings: an organ whose track names its manual and its
+# pedalboard, with both in one clip (the notes carry their channel, and
+# the ones that are not on the chosen channel stand back); the same with
+# the pedalboard chosen and the lane on its expression; and a guitar with a
+# string to a channel, the lane on the wheel of the one string that bends.
+shot channels "$here/projects/channels.trill" --select Chorale
+shot channels-pedalboard "$here/projects/channels.trill" --select Chorale --lane expression --channel 2
+shot channels-string "$here/projects/channels.trill" --select "Em, one string bent" --lane pitch_bend --channel 3
+shot graphite-channels "$here/projects/channels.trill" --select Chorale --lane expression --channel 2 --theme graphite
+
 # A sound of more than one device: a track on one that was saved (a synth
 # and its hall), with the browser listing it among the sounds; and a track
 # on one the wavetable synth brings, wide enough for its chorus and reverb.

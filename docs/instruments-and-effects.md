@@ -3,6 +3,11 @@
 The devices that come with Trill, and the sampled instruments it can fetch. Hosted plugins are in
 [Plugins, presets and sounds](plugins-and-presets.md).
 
+Every built-in instrument takes all sixteen MIDI channels as one instrument: a note, a wheel or a controller on
+any channel is what it would be on the first, and each sounds exactly as it did before notes had channels. A
+channel is for a hosted instrument that gives its channels meanings of their own
+([Writing music](writing-music.md)).
+
 ## Instruments
 
 | Device | |

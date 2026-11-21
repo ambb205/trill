@@ -35,7 +35,7 @@ fn beside_the_others() -> RwLockReadGuard<'static, ()> {
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 100 }
+    Note { pitch, start, length, velocity: 100, ..Default::default() }
 }
 
 fn peak(samples: &[f32]) -> f32 {
@@ -478,7 +478,7 @@ fn session_with(scripted: &ScriptedFactory) -> Session {
 }
 
 fn plain(pitch: u8) -> ProbeNote {
-    ProbeNote { pitch, velocity: 100, with: Vec::new() }
+    ProbeNote { pitch, velocity: 100, with: Vec::new(), ..Default::default() }
 }
 
 /// With little patience: an instrument that is silent on some of the

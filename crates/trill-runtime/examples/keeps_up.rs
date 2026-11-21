@@ -198,7 +198,7 @@ fn built_in(session: &mut Session) -> Result<(), String> {
                 };
                 for voice in 0..together {
                     let pitch = root + [0, 4, 7, 11][voice % 4];
-                    notes.push(Note { pitch, start, length: length * 0.9, velocity: 100 });
+                    notes.push(Note { pitch, start, length: length * 0.9, velocity: 100, ..Default::default() });
                 }
             }
             project.clip_mut(clip)?.add_notes(&notes)?;

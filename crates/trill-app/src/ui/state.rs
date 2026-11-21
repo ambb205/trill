@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use trill_core::device::DeviceDescriptor;
 use trill_core::{
-    AutomationPoint, AutomationTarget, Beats, ChainRef, Clip, ClipId, ControllerKind, DeviceId, EditError, Note,
-    Project, TimeExcerpt, TrackId, TrackKind,
+    AutomationPoint, AutomationTarget, Beats, ChainRef, Channel, Clip, ClipId, ControllerKind, DeviceId, EditError,
+    Note, Project, TimeExcerpt, TrackId, TrackKind,
 };
 use trill_engine::{AudioConfig, Session, SessionError, SharedSession, StreamInfo};
 use trill_noir::Theme;
@@ -402,6 +402,11 @@ pub struct PianoRollState {
     pub note_length: Beats,
     /// Velocity given to new notes: the last one set in the sidebar.
     pub note_velocity: u8,
+    /// The MIDI channel that is chosen: new notes are drawn on it, and
+    /// the lane under the notes shows and edits its curve. The first,
+    /// which is where everything is on an instrument that gives its
+    /// channels no meanings of their own.
+    pub channel: Channel,
     /// Where pasted notes go, in beats from the clip's start. Set by a
     /// click on the roll's ruler.
     pub cursor: Beats,
@@ -837,6 +842,7 @@ impl UiState {
                 framed: None,
                 note_length: 0.25,
                 note_velocity: super::piano_roll::DEFAULT_VELOCITY,
+                channel: Channel::FIRST,
                 cursor: 0.0,
             },
             renaming_track: None,
@@ -961,7 +967,9 @@ impl UiState {
                 // The points of the curve the lane shows, as far as they
                 // are still there.
                 let curve = match self.piano.lane {
-                    LaneShown::Controller(kind) => clip.controller(kind).map(|curve| curve.points.as_slice()),
+                    LaneShown::Controller(kind) => {
+                        clip.controller_on(self.piano.channel, kind).map(|curve| curve.points.as_slice())
+                    }
                     LaneShown::Velocity => None,
                 };
                 self.piano.lane_points.retain(|selected| curve.is_some_and(|points| points.contains(selected)));
@@ -1217,7 +1225,7 @@ mod tests {
     use super::*;
 
     fn note(pitch: u8, start: Beats) -> Note {
-        Note { pitch, start, length: 1.0, velocity: 100 }
+        Note { pitch, start, length: 1.0, velocity: 100, ..Default::default() }
     }
 
     #[test]

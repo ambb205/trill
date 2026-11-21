@@ -181,11 +181,8 @@ fn drive(mut processor: Box<dyn DeviceProcessor>, note: bool, stop: Arc<AtomicBo
             loop_range: None,
         }
         .steady();
-        let events: &[Event] = if note && blocks == 20 {
-            &[Event { offset: 0, kind: EventKind::NoteOn { pitch: 60, velocity: 0.8 } }]
-        } else {
-            &[]
-        };
+        let events: &[Event] =
+            if note && blocks == 20 { &[Event::new(0, EventKind::NoteOn { pitch: 60, velocity: 0.8 })] } else { &[] };
         left.fill(0.0);
         right.fill(0.0);
         processor.process(&info, events, &mut left, &mut right);

@@ -60,8 +60,15 @@ fn build(session: &mut Session) -> Song {
             .edit(|project| {
                 let track = project.add_track(name);
                 let clip = project.add_midi_clip(track, "clip", 0.0, 4.0)?;
-                let notes: Vec<Note> =
-                    (0..4u8).map(|beat| Note { pitch, start: f64::from(beat), length: 0.5, velocity: 100 }).collect();
+                let notes: Vec<Note> = (0..4u8)
+                    .map(|beat| Note {
+                        pitch,
+                        start: f64::from(beat),
+                        length: 0.5,
+                        velocity: 100,
+                        ..Default::default()
+                    })
+                    .collect();
                 project.clip_mut(clip)?.add_notes(&notes)?;
                 Ok(track)
             })
@@ -205,7 +212,15 @@ fn edits_while_devices_are_on_their_way_land_as_they_would_on_a_song_that_is_who
     // A note, and its undo: the song's own business.
     let clip = session.project().track(song.keys_track).unwrap().clips[0].id;
     session
-        .edit(|project| project.clip_mut(clip)?.add_notes(&[Note { pitch: 72, start: 2.0, length: 1.0, velocity: 90 }]))
+        .edit(|project| {
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 72,
+                start: 2.0,
+                length: 1.0,
+                velocity: 90,
+                ..Default::default()
+            }])
+        })
         .unwrap();
     assert!(session.is_modified() && session.can_undo());
     assert!(session.undo());
@@ -389,7 +404,7 @@ fn a_render_a_measurement_and_a_probe_in_the_middle_have_the_whole_song() {
     // A probe of the bass, which is not there yet: of an instrument made
     // for the probe from what the song says of it.
     let probe = session.probe_job(&ProbeTarget::Track { track: song.bass_track, effects: false }).unwrap();
-    let note = ProbeNote { pitch: 40, velocity: 100, with: Vec::new() };
+    let note = ProbeNote { pitch: 40, velocity: 100, with: Vec::new(), ..Default::default() };
     let heard = probe.run(&[note], &ProbeOptions { sample_rate: SR, ..ProbeOptions::default() }).unwrap();
     assert!(heard.heard[0].sounded, "{:?}", heard.heard);
     assert!(session.wait_until_opened(PATIENCE));

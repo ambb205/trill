@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{DeviceFactory, DeviceInstance, DeviceProcessor, Event, EventKind, Purpose};
 use trill_core::presets::PresetInfo;
-use trill_core::{ControllerKind, Device};
+use trill_core::{Channel, ControllerKind, Device};
 
 /// How far below its own peak a sound has to fall to be over, in dB.
 const OVER_DB: f32 = 40.0;
@@ -55,13 +55,18 @@ const HIGHEST_HZ: f64 = 4200.0;
 const CLEAR_PITCH: f64 = 0.7;
 
 /// A note to play.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProbeNote {
     pub pitch: u8,
     /// 1..=127.
     pub velocity: u8,
-    /// Keys held down with it, pressed just before: keyswitches.
+    /// Keys held down with it, pressed just before: keyswitches. They are
+    /// on the first channel, wherever the note is.
     pub with: Vec<u8>,
+    /// The MIDI channel the note is played on: the first, unless what is
+    /// asked is what the instrument does on another (an organ's pedals).
+    #[serde(default)]
+    pub channel: Channel,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -229,7 +234,8 @@ impl ProbeJob {
     pub fn open(&self, first: &[ProbeNote], options: &ProbeOptions) -> Result<Probing, ProbeError> {
         // The instrument is asked a spread of the notes, with what is held
         // with each, until it answers and goes on answering alike.
-        let standing: Vec<EventKind> = options.controllers.iter().map(|(kind, value)| kind.event(*value)).collect();
+        let standing: Vec<(Channel, EventKind)> =
+            options.controllers.iter().map(|(kind, value)| (Channel::FIRST, kind.event(*value))).collect();
         let step = first.len().div_ceil(OPENING_NOTES).max(1);
         let mut opening = Opening::default();
         for note in first.iter().step_by(step) {
@@ -239,6 +245,7 @@ impl ProbeJob {
                     velocity: velocity_of(100),
                     controllers: standing.clone(),
                     switch: true,
+                    channel: Channel::FIRST,
                 });
             }
             opening.notes.push(OpeningNote {
@@ -246,6 +253,7 @@ impl ProbeJob {
                 velocity: velocity_of(note.velocity),
                 controllers: standing.clone(),
                 switch: false,
+                channel: note.channel,
             });
         }
         self.open_asking(opening, options)
@@ -267,12 +275,7 @@ impl ProbeJob {
     /// [`ProbeJob::wait_until_ready`] in this process: see
     /// [`ProbeJob::run_here`].
     pub(crate) fn wait_here(&self, pitches: &[u8], patience: Duration) -> Result<(Readiness, Probing), ProbeError> {
-        let note = |pitch: &u8| OpeningNote {
-            pitch: *pitch,
-            velocity: velocity_of(100),
-            controllers: Vec::new(),
-            switch: false,
-        };
+        let note = |pitch: &u8| OpeningNote { pitch: *pitch, velocity: velocity_of(100), ..OpeningNote::default() };
         let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty(), left_on: None };
         let options = ProbeOptions { patience, ..ProbeOptions::default() };
         let probing = self.open_asking(opening, &options)?;
@@ -317,12 +320,12 @@ impl ProbeJob {
 
         // Where the controllers stand, and the keys held throughout.
         let standing: Vec<EventKind> = options.controllers.iter().map(|(kind, value)| kind.event(*value)).collect();
-        let mut setting: Vec<Event> = standing.iter().map(|kind| Event { offset: 0, kind: *kind }).collect();
+        let mut setting: Vec<Event> = standing.iter().map(|kind| Event::new(0, *kind)).collect();
         setting.extend(
-            options.held.iter().map(|pitch| Event {
-                offset: 0,
-                kind: EventKind::NoteOn { pitch: *pitch, velocity: velocity_of(100) },
-            }),
+            options
+                .held
+                .iter()
+                .map(|pitch| Event::new(0, EventKind::NoteOn { pitch: *pitch, velocity: velocity_of(100) })),
         );
         // An instrument that listens to another track is lent something to
         // listen to while its notes are down (see [`crate::ready`]). Not
@@ -428,13 +431,13 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
         let keys: Vec<Event> = note
             .with
             .iter()
-            .map(|pitch| Event { offset: 0, kind: EventKind::NoteOn { pitch: *pitch, velocity: velocity(100) } })
+            .map(|pitch| Event::new(0, EventKind::NoteOn { pitch: *pitch, velocity: velocity(100) }))
             .collect();
         with_sounded = stand.run(&keys, WITH_SECONDS) > floor;
     }
 
     let (mut left, mut right): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
-    let on = [Event { offset: 0, kind: EventKind::NoteOn { pitch: note.pitch, velocity: velocity(note.velocity) } }];
+    let on = [Event::on(note.channel, 0, EventKind::NoteOn { pitch: note.pitch, velocity: velocity(note.velocity) })];
     stand.run_into(&on, stand.frames(options.hold_seconds.max(0.01)), |l, r| {
         left.extend_from_slice(l);
         right.extend_from_slice(r);
@@ -443,8 +446,8 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
 
     // Let go, and listen until it has died away or long enough.
     stand.lend(false);
-    let mut off = vec![Event { offset: 0, kind: EventKind::NoteOff { pitch: note.pitch } }];
-    off.extend(note.with.iter().map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch: *pitch } }));
+    let mut off = vec![Event::on(note.channel, 0, EventKind::NoteOff { pitch: note.pitch })];
+    off.extend(note.with.iter().map(|pitch| Event::new(0, EventKind::NoteOff { pitch: *pitch })));
     let quiet_frames = stand.frames(QUIET_SECONDS);
     // Quiet is quiet by the devices' own measure, not by what the note
     // before left ringing: a note that is taken to be over while it still
@@ -464,7 +467,7 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
         // so that the next note starts from silence: a quiet hit cannot be
         // measured under a cymbal. (Nothing cuts a tail short here: how
         // long a note rings is one of the things that are measured.)
-        let mut all_off = vec![Event { offset: 0, kind: EventKind::AllNotesOff }];
+        let mut all_off = vec![Event::new(0, EventKind::AllNotesOff)];
         all_off.extend_from_slice(setting);
         let mut silent = 0;
         stand.run_into(&all_off, stand.frames(RING_OUT_SECONDS), |l, r| {

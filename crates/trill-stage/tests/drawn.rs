@@ -25,14 +25,21 @@ fn score() -> (Score, TrackId) {
     let mut project = Project::new("Drawn");
     let drums = project.add_track("Drums");
     let clip = project.add_midi_clip(drums, "beat", 0.0, 64.0).unwrap();
-    let kicks: Vec<Note> =
-        (0..64).map(|beat| Note { pitch: 36, start: beat as f64, length: 0.25, velocity: 110 }).collect();
+    let kicks: Vec<Note> = (0..64)
+        .map(|beat| Note { pitch: 36, start: beat as f64, length: 0.25, velocity: 110, ..Default::default() })
+        .collect();
     project.clip_mut(clip).unwrap().add_notes(&kicks).unwrap();
     project.set_track_profile(drums, InstrumentProfile { role: Some(Role::Drums), ..Default::default() }).unwrap();
     let lead = project.add_track("Lead");
     let clip = project.add_midi_clip(lead, "line", 0.0, 64.0).unwrap();
     let line: Vec<Note> = (0..128)
-        .map(|step| Note { pitch: 60 + (step % 7) as u8, start: step as f64 * 0.5, length: 0.45, velocity: 100 })
+        .map(|step| Note {
+            pitch: 60 + (step % 7) as u8,
+            start: step as f64 * 0.5,
+            length: 0.45,
+            velocity: 100,
+            ..Default::default()
+        })
         .collect();
     project.clip_mut(clip).unwrap().add_notes(&line).unwrap();
     project.add_marker(0.0, "Intro").unwrap();
@@ -257,7 +264,13 @@ fn story() -> (Journal, Project) {
     };
     let line = |pitch: u8| -> Vec<Note> {
         (0..16)
-            .map(|n| Note { pitch: pitch + (n % 5) as u8, start: f64::from(n) * 0.5, length: 0.4, velocity: 100 })
+            .map(|n| Note {
+                pitch: pitch + (n % 5) as u8,
+                start: f64::from(n) * 0.5,
+                length: 0.4,
+                velocity: 100,
+                ..Default::default()
+            })
             .collect()
     };
     journal.say(1_000, Author::Person, "Write me a bass line and a lead.");
@@ -314,13 +327,17 @@ fn changing() -> Song {
     let clip = project.add_midi_clip(drums, "beat", 0.0, 23.0).unwrap();
     let kicks: Vec<Note> = [0.0, 4.0, 8.0, 11.5, 15.0, 19.0, 22.0]
         .iter()
-        .map(|beat| Note { pitch: 36, start: *beat, length: 0.25, velocity: 127 })
+        .map(|beat| Note { pitch: 36, start: *beat, length: 0.25, velocity: 127, ..Default::default() })
         .collect();
     project.clip_mut(clip).unwrap().add_notes(&kicks).unwrap();
     project.set_track_profile(drums, InstrumentProfile { role: Some(Role::Drums), ..Default::default() }).unwrap();
     let pad = project.add_track("Pad");
     let clip = project.add_midi_clip(pad, "held", 0.0, 23.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 60, start: 0.0, length: 23.0, velocity: 90 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 60, start: 0.0, length: 23.0, velocity: 90, ..Default::default() }])
+        .unwrap();
     project.set_time_signature_at(8.0, 7, 8).unwrap();
     project.set_tempo_at(8.0, 140.0, false).unwrap();
     project.set_time_signature_at(15.0, 4, 4).unwrap();

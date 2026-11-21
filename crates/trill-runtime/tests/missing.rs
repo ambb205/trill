@@ -70,7 +70,13 @@ fn song(runtime: &Runtime, [kick, snare, a_loop]: &[PathBuf; 3], song: &Path) {
     session
         .edit(|project| {
             let clip = project.add_midi_clip(kit, "Beat", 0.0, 4.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 36, start: 0.0, length: 0.5, velocity: 100 }])
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 36,
+                start: 0.0,
+                length: 0.5,
+                velocity: 100,
+                ..Default::default()
+            }])
         })
         .unwrap();
     std::fs::create_dir_all(song.parent().unwrap()).unwrap();

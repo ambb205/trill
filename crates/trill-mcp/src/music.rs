@@ -8,7 +8,7 @@
 //! terms what was written, and warnings about what would otherwise go
 //! unnoticed.
 
-use crate::input::{PitchInput, controller_scale, parse_controller, parse_pitch_value};
+use crate::input::{ChannelInput, PitchInput, controller_scale, parse_channel, parse_controller, parse_pitch_value};
 use crate::server::{Reply, TrillServer, add_controller_warnings, edit, explain, finish};
 use crate::view::{bar_beat_at, round};
 use rmcp::handler::server::wrapper::Parameters;
@@ -23,7 +23,9 @@ use trill_core::controllers::splice;
 use trill_core::device::{DeviceCategory, DeviceFactory};
 use trill_core::pitch::pitch_name;
 use trill_core::project::{AutomationPoint, Segment};
-use trill_core::{ClipId, ControllerKind, InstrumentProfile, MeterMap, Note, TimeSignature, TrackId, TrackKind};
+use trill_core::{
+    Channel, ClipId, ControllerKind, InstrumentProfile, MeterMap, Note, TimeSignature, TrackId, TrackKind,
+};
 use trill_dsp::BuiltinFactory;
 use trill_engine::Session;
 use trill_theory::arpeggio::{ArpOrder, Arpeggio, ORDERS};
@@ -145,6 +147,12 @@ pub struct Target {
     pub mode: Option<WriteMode>,
     /// How many bars to write. What you give repeats, or is cut, to fill them. Defaults to its own length.
     pub bars: Option<u32>,
+    /// The MIDI channel the whole part is written on, by its number or the instrument's name for it: a bass
+    /// line onto an organ's pedalboard ("pedalboard"), a line onto one string of a guitar that has a string
+    /// to a channel. Only for an instrument that names its channels (get_instrument_profile: `channels`);
+    /// leave it out otherwise. With `clip` and mode "replace", only the notes of this channel in the bars
+    /// written are replaced: what the clip has on its other channels stays.
+    pub channel: Option<ChannelInput>,
 }
 
 /// Timing feel shared by the writing tools. Give every part of a groove the
@@ -374,6 +382,10 @@ pub struct ShapeDynamicsRequest {
     pub start: Option<f64>,
     /// Shape only the notes starting before this beat (relative to the clip).
     pub end: Option<f64>,
+    /// Shape the notes of this MIDI channel only, and write the curve on it: for a line on one channel of an
+    /// instrument that names its channels (get_instrument_profile: `channels`). Omit it otherwise: every note
+    /// of the clip is read, and the curve is on the first channel.
+    pub channel: Option<ChannelInput>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -724,6 +736,11 @@ fn write(
     };
     // With how far its instrument's wheel bends, where the track says nothing of it.
     let profile = session.profile_of(destination.track);
+    // The channel the whole part is on.
+    let channel = match &target.channel {
+        Some(input) => parse_channel(&input.0, &profile)?,
+        None => Channel::FIRST,
+    };
     let song_bars = written_bars(&meter, destination.origin, MAX_BARS as usize + 2);
     let mut part = build(&Setting { signature, tempo, bars, profile: profile.clone(), song_bars })?;
     // The bars it is written into are the song's from there on. Where
@@ -753,6 +770,9 @@ fn write(
     }
     if part.notes.len() > MAX_NOTES {
         return Err(format!("that would write {} notes; write fewer bars or a slower rate", part.notes.len()));
+    }
+    for note in &mut part.notes {
+        note.channel = channel;
     }
     let heard = summarize(&part.notes);
 
@@ -853,7 +873,8 @@ fn write(
             let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
             let mut all = read_back(&profile, &held);
             if replace {
-                all.retain(|asked| !inside(&asked.note));
+                // (Of the part's own channel: what the clip has on another stays.)
+                all.retain(|asked| !(inside(&asked.note) && asked.note.channel == channel));
             }
             // What the notes that stay took by themselves, so as to say what these added.
             let kept = articulate_asked(&profile, &all, 0.0).map_err(theory)?.presses;
@@ -928,13 +949,16 @@ fn write(
                     let leading = |note: &Note| {
                         profile.is_keyswitch(note.pitch) && note.start >= offset - SWITCH_REACH && note.start < offset
                     };
-                    clip.remove_notes(|note| inside(note) || leading(note))?;
+                    // The notes of the part's own channel: what the clip
+                    // has on another is another part, and stays.
+                    let own = |note: &Note| note.channel == channel;
+                    clip.remove_notes(|note| own(note) && (inside(note) || leading(note)))?;
                 }
                 clip.add_notes(notes)?;
             }
             if let Some(wheel) = &wheel {
                 let kind = ControllerKind::PitchBend;
-                let existing = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
+                let existing = clip.controller_on(channel, kind).map(|curve| curve.points.clone()).unwrap_or_default();
                 // A line without ornaments still takes the wheel back from what was there.
                 let rest = vec![AutomationPoint { beat: offset, value: 0.0, shape: Segment::Hold }];
                 let piece = if wheel.is_empty() { &rest } else { wheel };
@@ -943,7 +967,7 @@ fn write(
                         true => piece.clone(),
                         false => splice(&existing, offset, Some(offset + written), piece),
                     };
-                    clip.set_controller(kind, points)?;
+                    clip.set_controller_on(channel, kind, points)?;
                 }
             }
             Ok(id)
@@ -956,7 +980,7 @@ fn write(
                 clip.set_loop_length(Some(written))?;
             }
             if let Some(wheel) = wheel.as_ref().filter(|wheel| !wheel.is_empty()) {
-                clip.set_controller(ControllerKind::PitchBend, wheel.clone())?;
+                clip.set_controller_on(channel, ControllerKind::PitchBend, wheel.clone())?;
             }
             Ok(id)
         }
@@ -977,8 +1001,11 @@ fn write(
     }
     warnings.extend(outside_clip(session, clip));
     if wheel.as_ref().is_some_and(|wheel| !wheel.is_empty()) {
-        warnings.extend(bent_together(session, track, destination.origin, written));
+        // On an instrument that names its channels a wheel is its channel's.
+        let own = profile.names_channels().then_some(channel);
+        warnings.extend(bent_together(session, track, own, destination.origin, written));
     }
+    warnings.extend(crate::instruments::channel_warning(&profile, channel));
 
     let mut out = Map::new();
     out.insert("clip_id".into(), json!(clip));
@@ -991,6 +1018,9 @@ fn write(
                 json!(format!("{} beats written, looped to fill {}", round(written), round(clip_length))),
             );
         }
+    }
+    if !channel.is_first() {
+        out.insert("channel".into(), json!(profile.channel_label(channel)));
     }
     out.insert("bars".into(), json!(part.bars));
     // Two lengths that are easy to take for one another: what was written
@@ -1212,7 +1242,11 @@ fn other_hits(profile: &InstrumentProfile) -> Vec<&str> {
 /// The pitch wheel moves every note of a track at once. Says so when a
 /// stretch that was given bends has other notes of the track sounding
 /// together in it: a chord under the line, or another clip of the track.
-fn bent_together(session: &Session, track: TrackId, start: f64, length: f64) -> Option<String> {
+///
+/// `own` is the channel the bends are on, where the track's instrument
+/// names its channels: a wheel is then its channel's, and only the notes
+/// of that channel bend with the line.
+fn bent_together(session: &Session, track: TrackId, own: Option<Channel>, start: f64, length: f64) -> Option<String> {
     let found = session.project().track(track).ok()?;
     let end = start + length;
     // Notes that only touch (a slur, a joined note) are not a chord.
@@ -1221,17 +1255,25 @@ fn bent_together(session: &Session, track: TrackId, start: f64, length: f64) -> 
         .iter()
         .filter(|clip| !clip.muted)
         .flat_map(|clip| clip.timeline_notes())
+        .filter(|note| own.is_none_or(|own| note.channel == own))
         .filter(|note| found.profile.is_music(note.pitch) && note.end() > start && note.start < end)
         .map(|note| Note { length: (note.length - 0.1).max(0.01), ..note })
         .collect();
-    (summarize(&sounding)?.polyphony > 1).then(|| {
-        format!(
+    (summarize(&sounding)?.polyphony > 1).then(|| match own {
+        Some(channel) => format!(
+            "The pitch wheel of a channel moves every note on it at once, and channel {channel} has notes sounding \
+             together between beats {} and {}: they bend and waver with the line. Put the line on a channel of \
+             its own.",
+            round(start),
+            round(end)
+        ),
+        None => format!(
             "The pitch wheel moves every note of a track at once, and this track has notes sounding together \
              between beats {} and {} (a chord in this clip, or another clip of the track): they bend and waver \
              with the line. Give the lead a track of its own.",
             round(start),
             round(end)
-        )
+        ),
     })
 }
 
@@ -1936,9 +1978,14 @@ fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Repl
     let project = session.project();
     let clip = project.clip(id).map_err(|error| explain(project, error))?;
     let Some(midi) = clip.midi() else { return Err(format!("{id} is an audio clip and has no notes to shape")) };
+    // One channel's line, where one is asked for.
+    let profile = project.clip_track(id).map(|track| session.profile_of(track)).unwrap_or_default();
+    let asked = request.channel.as_ref().map(|input| parse_channel(&input.0, &profile)).transpose()?;
+    let channel = asked.unwrap_or(Channel::FIRST);
     let in_range = |note: &&Note| {
         request.start.is_none_or(|start| note.start >= start - EPSILON)
             && request.end.is_none_or(|end| note.start < end - EPSILON)
+            && asked.is_none_or(|channel| note.channel == channel)
     };
     let notes: Vec<Note> = midi.notes.iter().filter(in_range).copied().collect();
     if notes.is_empty() {
@@ -1966,7 +2013,7 @@ fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Repl
         if piece.first().is_none_or(|first| first.beat > from + EPSILON) {
             piece.insert(0, AutomationPoint { beat: from, value: wanted.rest, shape: Segment::Hold });
         }
-        let existing = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
+        let existing = clip.controller_on(channel, kind).map(|curve| curve.points.clone()).unwrap_or_default();
         splice(&existing, from, Some(to), &piece)
     };
 
@@ -1989,7 +2036,7 @@ fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Repl
         .collect();
 
     let count = points.len();
-    edit(session, |project| project.clip_mut(id)?.set_controller(kind, points))?;
+    edit(session, |project| project.clip_mut(id)?.set_controller_on(channel, kind, points))?;
     let mut out = json!({
         "clip_id": id,
         "controller": kind.key(),
@@ -2001,7 +2048,15 @@ fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Repl
             "high": (wanted.high * scale).round(),
         },
     });
-    add_controller_warnings(&mut out, session, id, std::iter::once(kind));
+    if !channel.is_first() {
+        out["channel"] = json!(profile.channel_label(channel));
+    }
+    add_controller_warnings(&mut out, session, id, std::iter::once((channel, kind)));
+    if let Some(warning) = crate::instruments::channel_warning(&profile, channel) {
+        let mut warnings: Vec<Value> = out["warnings"].as_array().cloned().unwrap_or_default();
+        warnings.push(json!(warning));
+        out["warnings"] = json!(warnings);
+    }
     Ok(out)
 }
 

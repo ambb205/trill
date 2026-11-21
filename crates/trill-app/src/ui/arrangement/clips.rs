@@ -547,7 +547,7 @@ mod tests {
         let mut project = Project::new("t");
         let track = project.add_track("A");
         let id = project.add_midi_clip(track, "c", 8.0, 10.0).unwrap();
-        let note = Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100 };
+        let note = Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100, ..Default::default() };
         project.clip_mut(id).unwrap().add_notes(&[note]).unwrap();
         let marks = |project: &Project| {
             let clip = project.clip(id).unwrap();

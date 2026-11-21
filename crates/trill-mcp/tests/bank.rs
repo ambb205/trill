@@ -215,7 +215,8 @@ fn serum_2s_presets_measured_by_kind() {
                 .ok()?;
             let (left, right) = render(session, 0.0).ok()?;
             let phrase = character(&left, &right, rate);
-            let one = [Note { pitch: played.single, start: 0.0, length: played.held, velocity: 100 }];
+            let one =
+                [Note { pitch: played.single, start: 0.0, length: played.held, velocity: 100, ..Default::default() }];
             session
                 .edit(|project| {
                     project.remove_clip(clip)?;

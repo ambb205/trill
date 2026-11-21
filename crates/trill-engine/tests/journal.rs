@@ -33,7 +33,7 @@ fn assert_in_step(session: &Session) {
 }
 
 fn note_at(start: f64, pitch: u8) -> Note {
-    Note { pitch, start, length: 0.5, velocity: 100 }
+    Note { pitch, start, length: 0.5, velocity: 100, ..Default::default() }
 }
 
 /// A track with a synth and a clip of eight notes, made in three edits.
@@ -654,7 +654,10 @@ fn a_journal_kept_before_a_format_change_replays_the_song_as_it_sounded() {
         song.device_mut(synth).unwrap().params.insert(param.to_string(), value);
     }
     let clip = song.add_midi_clip(track, "Held", 0.0, 4.0).unwrap();
-    song.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100 }]).unwrap();
+    song.clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100, ..Default::default() }])
+        .unwrap();
     let mut kept = Journal::begin(&song, 0);
     let mut step = |song: &mut Project, at: u64, edit: &dyn Fn(&mut Project)| {
         let before = song.clone();

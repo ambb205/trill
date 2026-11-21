@@ -37,7 +37,7 @@ fn held(beat: f64, value: f64) -> AutomationPoint {
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 100 }
+    Note { pitch, start, length, velocity: 100, ..Default::default() }
 }
 
 /// A clip on `track` with `notes` and a curve for each of `curves`.

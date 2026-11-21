@@ -314,7 +314,7 @@ fn starting_and_coming_round_after_a_key_that_switches_never_touches_the_allocat
     };
     project.set_track_profile(track, profile).unwrap();
     let clip = project.add_midi_clip(track, "part", 0.0, 8.0).unwrap();
-    let note = |pitch: u8, start: f64, length: f64| Note { pitch, start, length, velocity: 100 };
+    let note = |pitch: u8, start: f64, length: f64| Note { pitch, start, length, velocity: 100, ..Default::default() };
     let mut notes = vec![note(25, 0.0, 0.03)];
     for step in 0..32u8 {
         let at = f64::from(step) * 0.25;
@@ -360,6 +360,72 @@ fn starting_and_coming_round_after_a_key_that_switches_never_touches_the_allocat
 }
 
 #[test]
+fn notes_and_controllers_on_sixteen_channels_never_touch_the_allocator() {
+    use trill_core::project::AutomationPoint;
+    use trill_core::{ChainRef, Channel, ControllerKind, Note};
+
+    // A part that uses every channel: a key on each (the same key on
+    // some), with a wheel, a pressure, an expression and a pedal on each.
+    // What a track keeps of keys and controllers is kept by channel, and
+    // all of it was made before the song plays.
+    let (mut project, track) = audio_project(120.0);
+    project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+    let clip = project.add_midi_clip(track, "part", 0.0, 8.0).unwrap();
+    let mut notes = Vec::new();
+    for channel in Channel::all() {
+        for step in 0..16u8 {
+            let start = f64::from(step) * 0.5 + f64::from(channel.number()) * 0.01;
+            let pitch = 48 + (channel.number() % 4) * 3 + step % 3;
+            notes.push(Note { pitch, start, length: 0.45, velocity: 90, ..Default::default() }.on(channel));
+        }
+    }
+    let clip = project.clip_mut(clip).unwrap();
+    clip.add_notes(&notes).unwrap();
+    for channel in Channel::all() {
+        let ramp = |from: f64, to: f64| vec![AutomationPoint::new(0.0, from), AutomationPoint::new(8.0, to)];
+        clip.set_controller_on(channel, ControllerKind::PitchBend, ramp(-1.0, 1.0)).unwrap();
+        clip.set_controller_on(channel, ControllerKind::Pressure, ramp(0.0, 1.0)).unwrap();
+        clip.set_controller_on(channel, ControllerKind::EXPRESSION, ramp(1.0, 0.4)).unwrap();
+        let pedal =
+            vec![AutomationPoint::new(1.0, 1.0), AutomationPoint::new(2.0, 0.0), AutomationPoint::new(5.0, 1.0)];
+        clip.set_controller_on(channel, ControllerKind::SUSTAIN, pedal).unwrap();
+    }
+    project.set_loop(true, 1.0, 5.0).unwrap();
+
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    let mut processor = Processor::new(SR);
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let retired = processor.swap_graph(controller.compile_prepared(&project));
+    processor.play();
+    // Once without watching, to fault in pages.
+    play(&mut processor, &mut left, &mut right, 4_096);
+
+    let mut level = 0.0;
+    let calls = allocator_calls(|| {
+        // Round the loop twice.
+        level = play(&mut processor, &mut left, &mut right, 5 * SR as usize);
+        // A jump while it plays, with keys down on every channel.
+        processor.seek(2.24);
+        play(&mut processor, &mut left, &mut right, 4_096);
+        // Stopped, put elsewhere, and started again from there.
+        processor.stop();
+        play(&mut processor, &mut left, &mut right, 2_048);
+        processor.seek(3.5);
+        play(&mut processor, &mut left, &mut right, 2_048);
+        processor.play();
+        play(&mut processor, &mut left, &mut right, 4_096);
+    });
+    assert!(level > 0.01, "the part should be sounding: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls while sixteen channels played");
+    drop(retired);
+}
+
+#[test]
 fn a_song_spread_over_several_threads_touches_the_allocator_on_none_of_them() {
     use std::sync::atomic::Ordering;
     use trill_core::project::{AutomationPoint, AutomationTarget};
@@ -390,6 +456,7 @@ fn a_song_spread_over_several_threads_touches_the_allocator_on_none_of_them() {
                 start: f64::from(step) * 0.5,
                 length: 0.4,
                 velocity: 100,
+                ..Default::default()
             })
             .collect();
         project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
@@ -511,8 +578,9 @@ fn a_tempo_and_a_meter_that_change_never_touch_the_allocator() {
     let keys = project.add_track("Keys");
     project.add_device(ChainRef::Track(keys), "builtin:polysynth", "Synth", None).unwrap();
     let clip = project.add_midi_clip(keys, "notes", 0.0, 8.0).unwrap();
-    let notes: Vec<Note> =
-        (0..32).map(|step| Note { pitch: 60, start: step as f64 * 0.25, length: 0.2, velocity: 100 }).collect();
+    let notes: Vec<Note> = (0..32)
+        .map(|step| Note { pitch: 60, start: step as f64 * 0.25, length: 0.2, velocity: 100, ..Default::default() })
+        .collect();
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     let point = AutomationPoint::new;
     project.set_automation(AutomationTarget::TrackVolume { track }, vec![point(0.0, -12.0), point(8.0, 0.0)]).unwrap();
@@ -644,7 +712,7 @@ fn playing_by_hand_and_recording_never_touch_the_allocator() {
             for (track, start, length) in [(keys, 0.0, 4.0), (drums, 0.0, 4.0)] {
                 let id = project.add_midi_clip(track, "curves", start, length)?;
                 let clip = project.clip_mut(id)?;
-                clip.add_notes(&[Note { pitch: 40, start: 0.25, length: 0.5, velocity: 90 }])?;
+                clip.add_notes(&[Note { pitch: 40, start: 0.25, length: 0.5, velocity: 90, ..Default::default() }])?;
                 let bent = AutomationPoint { beat: 0.5, value: 0.1, shape: Segment::Curve(0.7) };
                 clip.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.4), bent, point(1.75, 1.0)])?;
                 clip.set_controller(ControllerKind::SUSTAIN, vec![held(0.25, 1.0), held(1.5, 0.0)])?;

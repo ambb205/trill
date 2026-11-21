@@ -211,15 +211,22 @@ mod tests {
         let mut project = Project::new("Test Song");
         let drums = project.add_track("Drums");
         let clip = project.add_midi_clip(drums, "beat", 0.0, 64.0).unwrap();
-        let kicks: Vec<Note> =
-            (0..64).map(|beat| Note { pitch: 36, start: beat as f64, length: 0.25, velocity: 110 }).collect();
+        let kicks: Vec<Note> = (0..64)
+            .map(|beat| Note { pitch: 36, start: beat as f64, length: 0.25, velocity: 110, ..Default::default() })
+            .collect();
         project.clip_mut(clip).unwrap().add_notes(&kicks).unwrap();
         let profile = trill_core::InstrumentProfile { role: Some(Role::Drums), ..Default::default() };
         project.set_track_profile(drums, profile).unwrap();
         let lead = project.add_track("Lead");
         let clip = project.add_midi_clip(lead, "line", 0.0, 64.0).unwrap();
         let line: Vec<Note> = (0..128)
-            .map(|step| Note { pitch: 60 + (step % 7) as u8, start: step as f64 * 0.5, length: 0.45, velocity: 100 })
+            .map(|step| Note {
+                pitch: 60 + (step % 7) as u8,
+                start: step as f64 * 0.5,
+                length: 0.45,
+                velocity: 100,
+                ..Default::default()
+            })
             .collect();
         project.clip_mut(clip).unwrap().add_notes(&line).unwrap();
         project.add_marker(0.0, "Intro").unwrap();
@@ -333,8 +340,10 @@ mod tests {
         let mut project = Project::new("Changing");
         let drums = project.add_track("Drums");
         let clip = project.add_midi_clip(drums, "beat", 0.0, 23.0).unwrap();
-        let kicks: Vec<Note> =
-            KICKS.iter().map(|beat| Note { pitch: 36, start: *beat, length: 0.25, velocity: 127 }).collect();
+        let kicks: Vec<Note> = KICKS
+            .iter()
+            .map(|beat| Note { pitch: 36, start: *beat, length: 0.25, velocity: 127, ..Default::default() })
+            .collect();
         project.clip_mut(clip).unwrap().add_notes(&kicks).unwrap();
         let profile = trill_core::InstrumentProfile { role: Some(Role::Drums), ..Default::default() };
         project.set_track_profile(drums, profile).unwrap();

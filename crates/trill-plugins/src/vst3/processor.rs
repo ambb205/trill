@@ -208,7 +208,7 @@ impl Vst3Processor {
         }
 
         let silencing = self.events.fill(info, events, part);
-        self.params.fill(silencing, self.events.controls());
+        self.params.fill(silencing.then(|| self.events.spoken()), self.events.controls());
         let (input_changes, output_changes) = self.params.lists();
         let mut context = process_context(info, start, self.continuous_samples);
         let mut data = ProcessData {

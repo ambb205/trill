@@ -24,6 +24,8 @@ Options:
   --lane <CONTROLLER>     What the lane under the piano roll's notes shows first: velocity, or a
                           MIDI controller by name or number (expression, mod_wheel, pitch_bend,
                           sustain, 74)
+  --channel <1-16>        The MIDI channel that is chosen in the piano roll at first: new notes
+                          are drawn on it, and the lane shows its curve (default: 1)
   --shortcuts             Start with the shortcut reference open
   --play                  Start playback when the window opens
   --size <WIDTHxHEIGHT>   Initial window size in points (default: 1440x900)
@@ -170,6 +172,8 @@ pub struct Cli {
     /// The controller the lane under the piano roll's notes shows first;
     /// `None` for velocity.
     pub lane: Option<ControllerKind>,
+    /// The MIDI channel that is chosen in the piano roll at first.
+    pub channel: trill_core::Channel,
     pub screenshot: Option<PathBuf>,
     /// With a screenshot: open the machine's own devices all the same.
     pub real_audio: bool,
@@ -308,6 +312,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                         )
                     })?),
                 };
+            }
+            "--channel" => {
+                let number = value("a MIDI channel")?;
+                cli.channel =
+                    number.parse::<u8>().ok().and_then(trill_core::Channel::new).with_context(|| {
+                        format!("'{number}' is not a MIDI channel (expected a number from 1 to 16)")
+                    })?;
             }
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
@@ -471,6 +482,7 @@ impl Cli {
             also_select: Vec::new(),
             show_automation: self.automation,
             lane: self.lane,
+            channel: self.channel,
             show_shortcuts: self.shortcuts,
             mcp_url: None,
             theme: self.theme.unwrap_or(defaults.theme),
@@ -768,6 +780,11 @@ mod tests {
         assert_eq!(run(&["--lane", "expression"]).unwrap().ui_options().lane, Some(ControllerKind::EXPRESSION));
         assert_eq!(run(&["--lane", "pitch_bend"]).unwrap().ui_options().lane, Some(ControllerKind::PitchBend));
         assert_eq!(run(&["--lane", "74"]).unwrap().ui_options().lane, ControllerKind::numbered(74));
+        // The channel that is chosen in the piano roll at first.
+        assert!(USAGE.contains("--channel"));
+        assert_eq!(run(&[]).unwrap().ui_options().channel, trill_core::Channel::FIRST);
+        assert_eq!(run(&["--channel", "2"]).unwrap().ui_options().channel.number(), 2);
+        assert!(run(&["--channel", "17"]).unwrap_err().to_string().contains("1 to 16"));
         assert_eq!(run(&["--lane", "velocity"]).unwrap().ui_options().lane, None);
         assert!(run(&["--lane", "loudness"]).unwrap_err().to_string().contains("cannot show 'loudness'"));
     }

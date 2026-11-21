@@ -108,7 +108,10 @@ fn ticking(project: &mut Project, beats: &[f64]) -> TrackId {
     project.add_device(ChainRef::Track(track), TICK_URI, "Ticker", None).unwrap();
     let length = beats.iter().fold(0.0f64, |end, beat| end.max(*beat)).ceil() + 1.0;
     let clip = project.add_midi_clip(track, "ticks", 0.0, length).unwrap();
-    let notes: Vec<Note> = beats.iter().map(|&start| Note { pitch: 60, start, length: 0.05, velocity: 127 }).collect();
+    let notes: Vec<Note> = beats
+        .iter()
+        .map(|&start| Note { pitch: 60, start, length: 0.05, velocity: 127, ..Default::default() })
+        .collect();
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     track
 }
@@ -391,7 +394,11 @@ fn an_envelope_and_a_loop_of_notes_follow_the_beats_through_a_change() {
         params.insert(key.to_string(), value);
     }
     let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 69, start: 0.0, length: 8.0, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 69, start: 0.0, length: 8.0, velocity: 100, ..Default::default() }])
+        .unwrap();
     let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
     let volume = AutomationTarget::TrackVolume { track };
     project.set_automation(volume, vec![held(0.0, -70.0), held(6.0, 0.0)]).unwrap();

@@ -6,6 +6,7 @@
 //! [`device::DeviceProcessor`].
 
 pub mod audio;
+pub mod channel;
 pub mod controllers;
 pub mod device;
 pub mod files;
@@ -22,6 +23,7 @@ pub mod time;
 mod time_ops;
 pub mod travel;
 
+pub use channel::Channel;
 pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
 pub use files::{DeviceFiles, FilePlace, FileTable, FileUse, FolderMove, KnownFile, Relink};
 pub use ids::{ClipId, DeviceId, TrackId};

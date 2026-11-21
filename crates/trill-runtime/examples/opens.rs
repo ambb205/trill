@@ -205,7 +205,13 @@ fn long_song(session: &mut Session, recordings: &[PathBuf], sampled: Option<&Pat
                 let notes: Vec<Note> = (0..steps)
                     .map(|step| {
                         let pitch = lowest + [0, 5, 3, 7][(step + clip) % 4];
-                        Note { pitch, start: step as f64 * length, length: length * 0.9, velocity: 96 }
+                        Note {
+                            pitch,
+                            start: step as f64 * length,
+                            length: length * 0.9,
+                            velocity: 96,
+                            ..Default::default()
+                        }
                     })
                     .collect();
                 project.clip_mut(id)?.add_notes(&notes)?;

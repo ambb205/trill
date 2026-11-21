@@ -20,20 +20,28 @@ pub fn round(value: f64) -> f64 {
     (value * 1e4).round() / 1e4
 }
 
-pub fn note_json(note: &Note) -> Value {
-    json!({
+/// A note. `channels` says its MIDI channel too: for the notes of a clip
+/// that uses another channel than the first, which is the only place a
+/// channel is worth a word.
+pub fn note_json(note: &Note, channels: bool) -> Value {
+    let mut out = json!({
         "pitch": note.pitch,
         "name": pitch_name(note.pitch),
         "start": round(note.start),
         "length": round(note.length),
         "velocity": note.velocity,
-    })
+    });
+    if channels {
+        out["channel"] = json!(note.channel);
+    }
+    out
 }
 
 /// A controller's curve in a clip: what it is called, and its points as
 /// `[beat, value, shape?]` in the values tools take (0 to 127; the pitch
-/// wheel -1 to 1).
-pub fn controller_json(curve: &ControllerCurve, include_points: bool) -> Value {
+/// wheel -1 to 1). `channels` says its MIDI channel too, as for
+/// [`note_json`].
+pub fn controller_json(curve: &ControllerCurve, include_points: bool, channels: bool) -> Value {
     let kind = curve.controller;
     let scale = controller_scale(kind);
     let values = || curve.points.iter().map(|point| point.value * scale);
@@ -43,6 +51,9 @@ pub fn controller_json(curve: &ControllerCurve, include_points: bool) -> Value {
         "point_count": curve.points.len(),
         "range": format!("{}..{}", round(low), round(high)),
     });
+    if channels {
+        out["channel"] = json!(curve.channel);
+    }
     if let (Some(number), true) = (kind.number(), kind.name().is_some()) {
         out["number"] = json!(number);
     }
@@ -94,11 +105,16 @@ pub fn clip_json(clip: &Clip, bars: &MeterMap, include_notes: bool) -> Value {
             {
                 fields.insert("pitch_range".into(), json!(format!("{}-{}", pitch_name(low), pitch_name(high))));
             }
+            // The channels, where the clip uses another than the first.
+            let channels = midi.uses_channels();
+            if channels {
+                fields.insert("channels".into(), json!(midi.channels()));
+            }
             if include_notes {
-                fields.insert("notes".into(), midi.notes.iter().map(note_json).collect());
+                fields.insert("notes".into(), midi.notes.iter().map(|note| note_json(note, channels)).collect());
             }
             if !midi.controllers.is_empty() {
-                let curves = midi.controllers.iter().map(|curve| controller_json(curve, include_notes));
+                let curves = midi.controllers.iter().map(|curve| controller_json(curve, include_notes, channels));
                 fields.insert("controllers".into(), curves.collect());
             }
         }

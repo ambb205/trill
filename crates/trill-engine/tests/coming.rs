@@ -44,8 +44,9 @@ fn track(session: &mut Session, name: &str, pitch: u8) -> TrackId {
         .edit(|project| {
             let track = project.add_track(name);
             let clip = project.add_midi_clip(track, "clip", 0.0, 4.0)?;
-            let notes: Vec<Note> =
-                (0..4u8).map(|beat| Note { pitch, start: f64::from(beat), length: 0.5, velocity: 100 }).collect();
+            let notes: Vec<Note> = (0..4u8)
+                .map(|beat| Note { pitch, start: f64::from(beat), length: 0.5, velocity: 100, ..Default::default() })
+                .collect();
             project.clip_mut(clip)?.add_notes(&notes)?;
             Ok(track)
         })

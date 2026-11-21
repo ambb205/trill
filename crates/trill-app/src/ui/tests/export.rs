@@ -31,7 +31,13 @@ pub(super) fn with_a_bass(loading: Loading) -> (Harness, TrackId) {
         let track = session.edit(|project| Ok(project.add_track("Bass"))).unwrap();
         session.add_device(ChainRef::Track(track), BASS, None, None).unwrap();
         let notes: Vec<Note> = (0..32u8)
-            .map(|step| Note { pitch: 40 + step % 5, start: f64::from(step) * 0.5, length: 0.4, velocity: 100 })
+            .map(|step| Note {
+                pitch: 40 + step % 5,
+                start: f64::from(step) * 0.5,
+                length: 0.4,
+                velocity: 100,
+                ..Default::default()
+            })
             .collect();
         session
             .edit(|project| {

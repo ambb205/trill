@@ -118,7 +118,7 @@ fn run(
 }
 
 fn note_on(pitch: u8) -> Vec<Event> {
-    vec![Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity: 0.8 } }]
+    vec![Event::new(0, EventKind::NoteOn { pitch, velocity: 0.8 })]
 }
 
 /// Holds middle C from the first block on.
@@ -369,7 +369,11 @@ fn song(uri: &str) -> (Project, trill_core::DeviceId) {
     let track = project.add_track("Lead");
     let device = project.add_device(ChainRef::Track(track), uri, "Plugin", None).unwrap();
     let clip = project.add_midi_clip(track, "clip", 0.0, 4.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100, ..Default::default() }])
+        .unwrap();
     project.add_device(ChainRef::Master, "builtin:limiter", "Limiter", None).unwrap();
     (project, device)
 }
@@ -513,8 +517,8 @@ fn all_notes_off_and_reset_end_sounding_notes() {
         let mut instance = create(&factory, &device(uri));
         let chord = |block: usize| match block {
             0 => vec![
-                Event { offset: 0, kind: EventKind::NoteOn { pitch: 60, velocity: 0.8 } },
-                Event { offset: 100, kind: EventKind::NoteOn { pitch: 67, velocity: 0.8 } },
+                Event::new(0, EventKind::NoteOn { pitch: 60, velocity: 0.8 }),
+                Event::new(100, EventKind::NoteOn { pitch: 67, velocity: 0.8 }),
             ],
             _ => Vec::new(),
         };
@@ -524,7 +528,7 @@ fn all_notes_off_and_reset_end_sounding_notes() {
 
         // The engine's flush: one event that must release both keys.
         let flush = |block: usize| match block {
-            0 => vec![Event { offset: 0, kind: EventKind::AllNotesOff }],
+            0 => vec![Event::new(0, EventKind::AllNotesOff)],
             _ => Vec::new(),
         };
         let (released, _) = run(&mut instance, 400, silence, flush);
@@ -684,7 +688,13 @@ fn a_session_hosts_a_plugin_and_shuts_down_cleanly() {
                 let track = project.add_track("Lead");
                 let clip = project.add_midi_clip(track, "clip", 0.0, 4.0)?;
                 let notes: Vec<Note> = (0..8)
-                    .map(|i| Note { pitch: 55 + i as u8, start: i as f64 * 0.5, length: 0.45, velocity: 110 })
+                    .map(|i| Note {
+                        pitch: 55 + i as u8,
+                        start: i as f64 * 0.5,
+                        length: 0.45,
+                        velocity: 110,
+                        ..Default::default()
+                    })
                     .collect();
                 project.clip_mut(clip)?.add_notes(&notes)?;
                 project.set_loop(true, 0.0, 4.0)?;

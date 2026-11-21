@@ -118,8 +118,8 @@ fn play(instance: &mut DeviceInstance) -> Heard {
         left.fill(0.0);
         right.fill(0.0);
         let events: &[Event] = match block {
-            0 => &[Event { offset: 0, kind: EventKind::NoteOn { pitch: 60, velocity: 0.8 } }],
-            b if b == blocks => &[Event { offset: 0, kind: EventKind::NoteOff { pitch: 60 } }],
+            0 => &[Event::new(0, EventKind::NoteOn { pitch: 60, velocity: 0.8 })],
+            b if b == blocks => &[Event::new(0, EventKind::NoteOff { pitch: 60 })],
             _ => &[],
         };
         instance.processor.process(&info, events, &mut left, &mut right);

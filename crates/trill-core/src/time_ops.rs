@@ -449,7 +449,7 @@ mod tests {
     const STRAIGHT: Travel = Travel::Linear;
 
     fn note(start: Beats) -> Note {
-        Note { pitch: 60, start, length: 0.5, velocity: 100 }
+        Note { pitch: 60, start, length: 0.5, velocity: 100, ..Default::default() }
     }
 
     /// One track with clips at 0..4, 4..12 (a note on every beat) and

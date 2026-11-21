@@ -36,7 +36,13 @@ fn with_a_bass(loading: Loading, beats: f64, apart: bool) -> (Runtime, TrackId) 
     let track = runtime.session.lock().edit(|project| Ok(project.add_track("Bass"))).unwrap();
     runtime.session.lock().add_device(ChainRef::Track(track), BASS, None, None).unwrap();
     let notes: Vec<Note> = (0..32u8)
-        .map(|step| Note { pitch: 40 + step % 5, start: f64::from(step) * 0.5, length: 0.4, velocity: 100 })
+        .map(|step| Note {
+            pitch: 40 + step % 5,
+            start: f64::from(step) * 0.5,
+            length: 0.4,
+            velocity: 100,
+            ..Default::default()
+        })
         .collect();
     runtime
         .session

@@ -10,7 +10,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use trill_core::device::{DeviceFactory, Event, EventKind, KeyInput, ProcessInfo};
-use trill_core::{ChainRef, Project};
+use trill_core::{ChainRef, Channel, Project};
 use trill_plugins::{ClapConfig, ClapFactory, Scanner, Vst3Config, Vst3Factory};
 
 thread_local! {
@@ -101,15 +101,47 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
 
     // Everything the audio thread will touch is set up beforehand, as
     // the engine does.
+    let channel = |number: u8| Channel::new(number).expect("a channel");
+    let (second, sixth, twelfth) = (channel(2), channel(6), channel(12));
     let events: Vec<Vec<Event>> = (0..64)
         .map(|block| match block % 16 {
             0 => vec![
-                Event { offset: 0, kind: EventKind::NoteOn { pitch: 60, velocity: 0.8 } },
-                Event { offset: 17, kind: EventKind::NoteOn { pitch: 64, velocity: 0.5 } },
-                Event { offset: 511, kind: EventKind::NoteOn { pitch: 67, velocity: 1.0 } },
+                Event::new(0, EventKind::NoteOn { pitch: 60, velocity: 0.8 }),
+                Event::new(17, EventKind::NoteOn { pitch: 64, velocity: 0.5 }),
+                Event::new(511, EventKind::NoteOn { pitch: 67, velocity: 1.0 }),
             ],
-            5 => vec![Event { offset: 3, kind: EventKind::NoteOff { pitch: 64 } }],
-            9 => vec![Event { offset: 0, kind: EventKind::AllNotesOff }],
+            // Notes, a wheel, a pressure, a pedal and a controller on
+            // other channels than the first: what the host keeps of keys
+            // and pedals it keeps by channel, and the parameter a VST3
+            // plugin names for a controller is looked up by channel.
+            2 => vec![
+                Event::on(sixth, 0, EventKind::NoteOn { pitch: 40, velocity: 0.9 }),
+                Event::on(second, 1, EventKind::NoteOn { pitch: 40, velocity: 0.9 }),
+                Event::on(sixth, 2, EventKind::PitchBend { value: 0.5 }),
+                Event::on(second, 3, EventKind::ChannelPressure { value: 0.7 }),
+                Event::on(sixth, 4, EventKind::Control { controller: 64, value: 1.0 }),
+                Event::on(twelfth, 5, EventKind::Control { controller: 1, value: 0.3 }),
+            ],
+            // Six strings moving the wheel and the pressure all through a
+            // block, as a guitar with a string to a channel does.
+            3 => (0..16u32)
+                .flat_map(|step| {
+                    let value = step as f32 / 16.0;
+                    (1..=6u8).flat_map(move |string| {
+                        let channel = Channel::new(string).expect("a channel");
+                        [
+                            Event::on(channel, step * 32, EventKind::PitchBend { value }),
+                            Event::on(channel, step * 32, EventKind::ChannelPressure { value }),
+                        ]
+                    })
+                })
+                .collect(),
+            5 => vec![Event::new(3, EventKind::NoteOff { pitch: 64 })],
+            6 => vec![
+                Event::on(sixth, 0, EventKind::NoteOff { pitch: 40 }),
+                Event::on(sixth, 9, EventKind::Control { controller: 64, value: 0.0 }),
+            ],
+            9 => vec![Event::new(0, EventKind::AllNotesOff)],
             _ => Vec::new(),
         })
         .collect();

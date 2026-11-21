@@ -11,14 +11,16 @@ use super::instrument_panel::Shown;
 use super::timeline;
 use super::units::{METER_FLOOR_DB, gain_to_db};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use trill_core::device::{ControllerSupport, DeviceDescriptor, DeviceFactory};
 use trill_core::presets::PresetInfo;
 use trill_core::project::AutomationLane;
-use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
+use trill_core::{
+    AutomationPoint, AutomationTarget, Beats, Channel, Clip, ClipId, DeviceId, Note, Project, Track, TrackId,
+};
 use trill_engine::{Meter, ParamState, Problem, RecordStatus, SampleFile, Session, SilentInstrument};
 
 /// What a MIDI clip plays, as the arrangement draws it.
@@ -77,6 +79,9 @@ pub struct Snapshot {
     /// The tracks that play through a drum instrument, whatever they say
     /// of their notes themselves.
     drum_instruments: HashSet<TrackId>,
+    /// What the instrument of a track calls its MIDI channels, for the
+    /// tracks whose instrument gives its channels meanings of their own.
+    channel_names: HashMap<TrackId, BTreeMap<Channel, String>>,
     /// What each MIDI clip plays, worked out the first time it is drawn and
     /// kept until the next revision.
     clip_notes: RefCell<HashMap<ClipId, Rc<ClipNotes>>>,
@@ -96,6 +101,14 @@ impl Snapshot {
     /// nothing and plays through a drum instrument.
     pub fn plays_drums(&self, track: TrackId) -> bool {
         self.drum_tracks.contains(&track)
+    }
+
+    /// What the instrument of `track` calls its MIDI channels, where it
+    /// gives them meanings of their own (an organ's pedalboard, a
+    /// guitar's strings): `None` for nearly every instrument, on which a
+    /// channel is nothing to choose.
+    pub fn channel_names(&self, track: TrackId) -> Option<&BTreeMap<Channel, String>> {
+        self.channel_names.get(&track)
     }
 
     /// Whether `track` plays through a drum kit or a plugin that calls
@@ -166,6 +179,8 @@ impl Snapshot {
         let ids = || project.tracks.iter().map(|track| track.id);
         let drum_tracks = ids().filter(|id| session.plays_drums(*id)).collect();
         let drum_instruments = ids().filter(|id| session.instrument_plays_drums(*id)).collect();
+        let channel_names =
+            ids().map(|id| (id, session.channel_names(id))).filter(|(_, names)| !names.is_empty()).collect();
         let mut saved_presets: HashMap<String, Vec<PresetInfo>> = HashMap::new();
         for device in shown.iter().flat_map(|track| track.devices.iter()).chain(project.master.devices.iter()) {
             if !saved_presets.contains_key(&device.uri) {
@@ -179,6 +194,7 @@ impl Snapshot {
             controller_support,
             drum_tracks,
             drum_instruments,
+            channel_names,
             saved_presets,
             saved_sounds: session.saved_presets().sounds(),
             revision: session.revision(),
@@ -242,10 +258,18 @@ impl Snapshot {
             .collect();
         let mut params_tracks: Vec<TrackId> = project.tracks.iter().map(|track| track.id).collect();
         params_tracks.sort_by_key(|track| track.0);
+        // What the song itself says of its tracks' channels.
+        let channel_names = project
+            .tracks
+            .iter()
+            .filter(|track| track.profile.names_channels())
+            .map(|track| (track.id, track.profile.channels.clone()))
+            .collect();
         Self {
             controller_support: HashMap::new(),
             drum_tracks,
             drum_instruments,
+            channel_names,
             saved_presets: HashMap::new(),
             saved_sounds: Vec::new(),
             revision,
@@ -591,7 +615,13 @@ mod tests {
         let clip = session
             .edit(|project| {
                 let clip = project.add_midi_clip(track, "Riff", 4.0, 8.0)?;
-                project.clip_mut(clip)?.add_notes(&[Note { pitch: 60, start: 0.0, length: 1.0, velocity: 90 }])?;
+                project.clip_mut(clip)?.add_notes(&[Note {
+                    pitch: 60,
+                    start: 0.0,
+                    length: 1.0,
+                    velocity: 90,
+                    ..Default::default()
+                }])?;
                 Ok(clip)
             })
             .unwrap();

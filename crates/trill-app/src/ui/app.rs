@@ -184,6 +184,7 @@ impl TrillApp {
         if let Some(kind) = options.lane {
             state.piano.lane = super::state::LaneShown::Controller(kind);
         }
+        state.piano.channel = options.channel;
         let (snapshot, factory, audio, live_input) = {
             let mut guard = session.lock();
             let first = Snapshot::capture(&guard, &[]);

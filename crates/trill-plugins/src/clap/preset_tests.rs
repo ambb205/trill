@@ -72,7 +72,7 @@ fn impulse(instance: &mut DeviceInstance) -> f32 {
         loop_range: None,
     };
     let (mut left, mut right) = (vec![0.0; BLOCK], vec![0.0; BLOCK]);
-    let note = Event { offset: 5, kind: EventKind::NoteOn { pitch: 60, velocity: 1.0 } };
+    let note = Event::new(5, EventKind::NoteOn { pitch: 60, velocity: 1.0 });
     instance.processor.process(&info, &[note], &mut left, &mut right);
     left[5]
 }
@@ -352,7 +352,13 @@ fn session(factory: &ClapFactory) -> (Session, trill_core::TrackId) {
             project.remove_device(limiter)?;
             let track = project.add_track("Lead");
             let clip = project.add_midi_clip(track, "clip", 0.0, 4.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 127 }])?;
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 60,
+                start: 1.0,
+                length: 1.0,
+                velocity: 127,
+                ..Default::default()
+            }])?;
             Ok(track)
         })
         .unwrap();

@@ -8,7 +8,7 @@
 //! them, in the order below, and says how many more there were.
 
 use super::change::{Change, Op, StateChange};
-use crate::{AutomationTarget, ChainRef, Clip, Device, Project, TimeSignature, Track};
+use crate::{AutomationTarget, ChainRef, Channel, Clip, Device, Project, TimeSignature, Track};
 
 /// A name in the quotation marks names are shown in.
 pub fn quoted(name: &str) -> String {
@@ -89,6 +89,25 @@ fn track_change(was: &Track, now: &Track) -> String {
     }
 }
 
+/// Where two versions of a clip hold the same notes but for the channels
+/// some are on, and those all went to one channel: how many, and which.
+fn rechannelled(was: &Clip, now: &Clip) -> Option<(usize, Channel)> {
+    let listed = |clip: &Clip| {
+        let key = |note: &crate::Note| (note.start.to_bits(), note.pitch, note.length.to_bits(), note.velocity);
+        let mut notes: Vec<_> = clip.notes().iter().map(|note| (key(note), note.channel)).collect();
+        notes.sort_unstable();
+        notes
+    };
+    let (was, now) = (listed(was), listed(now));
+    if was.len() != now.len() || was.iter().zip(&now).any(|(was, now)| was.0 != now.0) {
+        return None;
+    }
+    let mut moved = was.iter().zip(&now).filter(|(was, now)| was.1 != now.1).map(|(_, now)| now.1);
+    let channel = moved.next()?;
+    let others = moved.clone().count();
+    moved.all(|other| other == channel).then_some((others + 1, channel))
+}
+
 /// What differs between two versions of a clip's settings.
 fn clip_change(was: &Clip, now: &Clip) -> String {
     let clip = quoted(&now.name);
@@ -101,7 +120,14 @@ fn clip_change(was: &Clip, now: &Clip) -> String {
     } else if was.length != now.length {
         format!("Resized the clip {clip}")
     } else if was.controllers() != now.controllers() {
-        format!("Shaped a controller of {clip}")
+        // The curve that was shaped, or the one that went: its channel is
+        // worth a word where it is not the first.
+        let shaped = now.controllers().iter().find(|curve| !was.controllers().contains(curve));
+        let gone = was.controllers().iter().find(|curve| !now.controllers().contains(curve));
+        match shaped.or(gone).filter(|curve| !curve.channel.is_first()) {
+            Some(curve) => format!("Shaped a controller of {clip} on channel {}", curve.channel),
+            None => format!("Shaped a controller of {clip}"),
+        }
     } else if let (Some(played), Some(plays)) = (was.audio(), now.audio())
         && played.path != plays.path
     {
@@ -249,9 +275,26 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
     for op in change.ops() {
         let Op::Notes { clip, cut, put, .. } = op else { continue };
         let name = after.clip(*clip).map_or_else(|_| "a clip".to_owned(), |clip| quoted(&clip.name));
-        said.push(match (cut, put.len()) {
-            (0, added) => format!("Added {} to {name}", count(added, "note", "notes")),
-            (removed, 0) => format!("Removed {} from {name}", count(*removed, "note", "notes")),
+        // The channel the new notes are on, where they share one that is
+        // not the first.
+        let on = match put.split_first() {
+            Some((first, rest))
+                if !first.channel().is_first() && rest.iter().all(|code| code.channel() == first.channel()) =>
+            {
+                format!(" on channel {}", first.channel())
+            }
+            _ => String::new(),
+        };
+        let moved = match (before.clip(*clip), after.clip(*clip)) {
+            (Ok(was), Ok(now)) => rechannelled(was, now),
+            _ => None,
+        };
+        said.push(match (cut, put.len(), moved) {
+            (0, added, _) => format!("Added {} to {name}{on}", count(added, "note", "notes")),
+            (removed, 0, _) => format!("Removed {} from {name}", count(*removed, "note", "notes")),
+            (_, _, Some((moved, channel))) => {
+                format!("Put {} of {name} on channel {channel}", count(moved, "note", "notes"))
+            }
             _ => format!("Changed the notes of {name}"),
         });
     }
@@ -434,7 +477,7 @@ mod tests {
     }
 
     fn note_at(start: f64) -> Note {
-        Note { pitch: 60, start, length: 0.5, velocity: 100 }
+        Note { pitch: 60, start, length: 0.5, velocity: 100, ..Default::default() }
     }
 
     #[test]
@@ -502,6 +545,37 @@ mod tests {
         assert_eq!(
             words(&with_notes, |p| p.clip_mut(hook).unwrap().set_notes(vec![note_at(0.0), note_at(3.0)]).unwrap()),
             "Changed the notes of \u{201C}Hook\u{201D}"
+        );
+        // Channels are said where they are not the first: notes written
+        // on one, notes put on one, a curve shaped on one.
+        let second = Channel::new(2).unwrap();
+        assert_eq!(
+            words(p, |p| p
+                .clip_mut(hook)
+                .unwrap()
+                .add_notes(&[note_at(0.0).on(second), note_at(1.0).on(second)])
+                .unwrap()),
+            "Added 2 notes to \u{201C}Hook\u{201D} on channel 2"
+        );
+        assert_eq!(
+            words(&with_notes, |p| {
+                p.clip_mut(hook).unwrap().set_note_channels(second, |_| true).unwrap();
+            }),
+            "Put 2 notes of \u{201C}Hook\u{201D} on channel 2"
+        );
+        let point = vec![crate::AutomationPoint::new(0.0, 0.5)];
+        assert_eq!(
+            words(&with_notes, |p| {
+                let clip = p.clip_mut(hook).unwrap();
+                clip.set_controller_on(second, crate::ControllerKind::PitchBend, point.clone()).unwrap()
+            }),
+            "Shaped a controller of \u{201C}Hook\u{201D} on channel 2"
+        );
+        assert_eq!(
+            words(&with_notes, |p| {
+                p.clip_mut(hook).unwrap().set_controller(crate::ControllerKind::EXPRESSION, point.clone()).unwrap()
+            }),
+            "Shaped a controller of \u{201C}Hook\u{201D}"
         );
 
         // Devices.

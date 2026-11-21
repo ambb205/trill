@@ -89,12 +89,29 @@ impl Call<'_> {
     }
 
     /// Where a writing tool writes: the clip it fills, or the track it puts
-    /// a new clip on.
+    /// a new clip on, and the channel where it names one.
     fn written_to(&self) -> String {
+        let channel = self.on_channel("channel");
         match (self.clip("clip"), self.track("track")) {
-            (Some(clip), _) => format!(" in {clip}"),
-            (None, Some(track)) => format!(" on {track}"),
-            (None, None) => String::new(),
+            (Some(clip), _) => format!(" in {clip}{channel}"),
+            (None, Some(track)) => format!(" on {track}{channel}"),
+            (None, None) => channel,
+        }
+    }
+
+    /// The MIDI channel `key` names, for a call that names one: " on
+    /// channel 2", or " on the pedalboard channel" where it is asked for
+    /// as its instrument calls it. Nothing for a call that names none,
+    /// which is nearly every one.
+    fn on_channel(&self, key: &str) -> String {
+        let named = |name: &str| match name.trim().parse::<u8>() {
+            Ok(number) => format!(" on channel {number}"),
+            Err(_) => format!(" on the {} channel", name.trim().replace(['_', '-'], " ").to_lowercase()),
+        };
+        match self.input.get(key).or_else(|| self.input.get("target")?.get(key)) {
+            Some(Value::Number(number)) => format!(" on channel {number}"),
+            Some(Value::String(name)) if !name.trim().is_empty() => named(name),
+            _ => String::new(),
         }
     }
 }
@@ -308,7 +325,8 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 (None, None) => "a clip".to_owned(),
             };
             let track = call.track("track").map(|track| format!(" to {track}")).unwrap_or_default();
-            about("Adding", "Added", &format!("{name}{track}{}", played_as(call.input.get("notes"))))
+            let channel = call.on_channel("channel");
+            about("Adding", "Added", &format!("{name}{track}{channel}{}", played_as(call.input.get("notes"))))
         }
         "update_clip" => {
             let clip = call.clip("clip").unwrap_or_else(|| "a clip".to_owned());
@@ -330,20 +348,23 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             about("Reading", "Read", &format!("the controllers of {}", call.clip("clip").unwrap_or_default()))
         }
         "set_controllers" => {
-            about("Shaping", "Shaped", &format!("the controllers of {}", call.clip("clip").unwrap_or_default()))
+            let clip = call.clip("clip").unwrap_or_default();
+            about("Shaping", "Shaped", &format!("the controllers of {clip}{}", call.on_channel("channel")))
         }
         "shape_dynamics" => {
-            about("Shaping", "Shaped", &format!("the dynamics of {}", call.clip("clip").unwrap_or_default()))
+            let clip = call.clip("clip").unwrap_or_default();
+            about("Shaping", "Shaped", &format!("the dynamics of {clip}{}", call.on_channel("channel")))
         }
         "add_notes" | "set_notes" => {
             let count = call.input.get("notes").and_then(Value::as_array).map_or(0, Vec::len);
             let notes = if count == 1 { "1 note".to_owned() } else { format!("{count} notes") };
             let clip = call.clip("clip").unwrap_or_else(|| "a clip".to_owned());
             let how = played_as(call.input.get("notes"));
+            let channel = call.on_channel("channel");
             if tool == "add_notes" {
-                about("Adding", "Added", &format!("{notes} to {clip}{how}"))
+                about("Adding", "Added", &format!("{notes} to {clip}{channel}{how}"))
             } else {
-                about("Rewriting", "Rewrote", &format!("{clip} with {notes}{how}"))
+                about("Rewriting", "Rewrote", &format!("{clip} with {notes}{channel}{how}"))
             }
         }
         "remove_notes" => {
@@ -352,7 +373,11 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "transform_notes" => {
             let notes = format!("the notes of {}", call.clip("clip").unwrap_or_default());
             let transpose = call.input.get("transpose").and_then(Value::as_i64).filter(|by| *by != 0);
-            if let Some(by) = transpose {
+            let to_channel = call.on_channel("to_channel");
+            if !to_channel.is_empty() {
+                // " on channel 2" reads as where they are put.
+                about("Putting", "Put", &format!("{notes}{to_channel}"))
+            } else if let Some(by) = transpose {
                 about("Transposing", "Transposed", &format!("{notes} by {by:+}"))
             } else if call.has("quantize") {
                 about("Quantizing", "Quantized", &notes)
@@ -1093,6 +1118,28 @@ mod tests {
         assert_eq!(
             did("write_chords", json!({ "clip": clip, "progression": "Am | F" }), p),
             "Wrote chords in \u{201C}Verse\u{201D}"
+        );
+        // A MIDI channel is said where a call names one: by its number,
+        // or as its instrument calls it.
+        assert_eq!(
+            did("write_bass", json!({ "clip": clip, "progression": "Am | F", "channel": "pedalboard" }), p),
+            "Wrote a bass line in \u{201C}Verse\u{201D} on the pedalboard channel"
+        );
+        assert_eq!(
+            did("write_melody", json!({ "track": track, "phrase": "1 2 3", "channel": 3 }), p),
+            "Wrote a melody on \u{201C}Bass\u{201D} on channel 3"
+        );
+        assert_eq!(
+            did("add_notes", json!({ "clip": clip, "notes": [[60, 0, 1]], "channel": "String_2" }), p),
+            "Added 1 note to \u{201C}Verse\u{201D} on the string 2 channel"
+        );
+        assert_eq!(
+            did("set_controllers", json!({ "clip": clip, "channel": "2", "controllers": {} }), p),
+            "Shaped the controllers of \u{201C}Verse\u{201D} on channel 2"
+        );
+        assert_eq!(
+            did("transform_notes", json!({ "clip": clip, "highest": "B2", "to_channel": "pedalboard" }), p),
+            "Put the notes of \u{201C}Verse\u{201D} on the pedalboard channel"
         );
         assert_eq!(
             did(

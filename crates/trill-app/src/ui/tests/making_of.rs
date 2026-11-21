@@ -10,7 +10,7 @@ use trill_engine::journal::acting;
 const CTRL_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
 
 fn note_at(start: f64, pitch: u8) -> Note {
-    Note { pitch, start, length: 0.4, velocity: 100 }
+    Note { pitch, start, length: 0.4, velocity: 100, ..Default::default() }
 }
 
 /// One call of the assistant's that edits the song.

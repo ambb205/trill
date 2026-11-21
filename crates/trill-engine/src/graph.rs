@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
 use trill_core::device::{DeviceProcessor, EventKind};
 use trill_core::project::{AutomationLane, AutomationPoint, envelope_value};
-use trill_core::{DeviceId, MeterMap, TempoMap, TimeSignature, TrackId, Travel};
+use trill_core::{Channel, DeviceId, MeterMap, TempoMap, TimeSignature, TrackId, Travel};
 
 /// Largest block the engine hands to a device.
 pub const MAX_BLOCK: usize = 512;
@@ -22,6 +22,125 @@ pub(crate) struct NoteEvent {
     pub end: f64,
     pub pitch: u8,
     pub velocity: u8,
+    /// The MIDI channel the note is on.
+    pub channel: Channel,
+}
+
+/// The song's notes that are sounding on a track: for every key of every
+/// channel, the beat its note ends at. A key comes up on the channel it
+/// went down on, and the same key on two channels is two notes.
+///
+/// It is as large as sixteen keyboards and is kept in a box, so that a
+/// track's state changes hands between two graphs as a pointer does.
+pub(crate) struct Sounding {
+    /// The end beat of the note sounding on each key, or negative where
+    /// none is, by [`Channel::index`] and pitch.
+    until: Box<[[f64; 128]; Channel::COUNT]>,
+    /// How many keys of each channel are sounding.
+    counts: [u16; Channel::COUNT],
+}
+
+impl Default for Sounding {
+    fn default() -> Self {
+        Self { until: Box::new([[-1.0; 128]; Channel::COUNT]), counts: [0; Channel::COUNT] }
+    }
+}
+
+impl Sounding {
+    /// Whether no note of the song is sounding.
+    pub fn is_empty(&self) -> bool {
+        self.counts.iter().all(|count| *count == 0)
+    }
+
+    /// How many keys are sounding, over all the channels.
+    #[cfg(test)]
+    pub fn count(&self) -> usize {
+        self.counts.iter().map(|count| usize::from(*count)).sum()
+    }
+
+    /// The channels that have a key sounding, the first first.
+    pub fn channels(&self) -> impl Iterator<Item = Channel> + '_ {
+        Channel::all().filter(|channel| self.counts[channel.index()] > 0)
+    }
+
+    /// A note begins on `pitch` of `channel` and ends at `until`. Returns
+    /// whether one was sounding there already, which this one replaces.
+    pub fn begin(&mut self, channel: Channel, pitch: u8, until: f64) -> bool {
+        let key = &mut self.until[channel.index()][usize::from(pitch.min(127))];
+        let was = *key >= 0.0;
+        *key = until;
+        if !was {
+            self.counts[channel.index()] += 1;
+        }
+        was
+    }
+
+    /// Takes every note that ends before `before`: `ended` is told each
+    /// with its channel, its pitch and the beat it ends at, the channels
+    /// in order and the keys of each from the lowest.
+    pub fn end_before(&mut self, before: f64, mut ended: impl FnMut(Channel, u8, f64)) {
+        for channel in Channel::all() {
+            let at = channel.index();
+            if self.counts[at] == 0 {
+                continue;
+            }
+            for pitch in 0..128usize {
+                let end = self.until[at][pitch];
+                if end >= 0.0 && end < before {
+                    self.until[at][pitch] = -1.0;
+                    self.counts[at] -= 1;
+                    ended(channel, pitch as u8, end);
+                }
+            }
+        }
+    }
+
+    /// Every key that is sounding, the channels in order and the keys of
+    /// each from the lowest.
+    pub fn each(&self, mut found: impl FnMut(Channel, u8)) {
+        for channel in self.channels() {
+            for pitch in (0..128u8).filter(|pitch| self.until[channel.index()][usize::from(*pitch)] >= 0.0) {
+                found(channel, pitch);
+            }
+        }
+    }
+
+    /// Nothing is sounding any more.
+    pub fn clear(&mut self) {
+        for channel in Channel::all().filter(|channel| self.counts[channel.index()] > 0) {
+            self.until[channel.index()] = [-1.0; 128];
+        }
+        self.counts = [0; Channel::COUNT];
+    }
+}
+
+/// What the song last told a track's instrument each controller is at, on
+/// each channel: not a number where it has said nothing that still
+/// stands. In a box, like [`Sounding`].
+pub(crate) struct Told(Box<[[f32; CONTROLLER_KINDS]; Channel::COUNT]>);
+
+impl Default for Told {
+    fn default() -> Self {
+        Self(Box::new([[f32::NAN; CONTROLLER_KINDS]; Channel::COUNT]))
+    }
+}
+
+impl Told {
+    /// What the controller at `index` ([`ControllerKind::index`]) was last
+    /// said to be on `channel`.
+    pub fn get(&self, channel: Channel, index: usize) -> f32 {
+        self.0[channel.index()][index]
+    }
+
+    pub fn set(&mut self, channel: Channel, index: usize, value: f32) {
+        self.0[channel.index()][index] = value;
+    }
+
+    /// The instrument knows nothing any more: everything is to be said
+    /// again.
+    pub fn forget(&mut self) {
+        *self.0 = [[f32::NAN; CONTROLLER_KINDS]; Channel::COUNT];
+    }
 }
 
 /// A key of a track's part that chooses how the notes after it are played
@@ -69,15 +188,18 @@ pub(crate) fn switches_of(notes: &[NoteEvent], profile: &trill_core::InstrumentP
     let lasts = |pitch: u8| profile.articulations.iter().find(|way| way.key == Some(pitch)).map(|way| way.lasts);
     let mut switches: Vec<Switch> = Vec::new();
     let mut staying = u32::MAX;
+    // A key that switches is one on the first channel: the song presses
+    // it there when it starts in the middle, and on another channel the
+    // key is a note of whatever that channel plays.
+    let switch = |note: &NoteEvent| lasts(note.pitch).filter(|_| note.channel.is_first());
     for (at, note) in notes.iter().enumerate() {
-        let Some(lasts) = lasts(note.pitch) else { continue };
+        let Some(lasts) = switch(note) else { continue };
         let stays = lasts == trill_core::Lasts::Stays;
         if stays {
             staying = switches.len() as u32;
         }
         // The first note after it that is no switch.
-        let used_at =
-            notes[at..].iter().find(|later| lasts_of(profile, later.pitch).is_none()).map(|later| later.start);
+        let used_at = notes[at..].iter().find(|later| switch(later).is_none()).map(|later| later.start);
         switches.push(Switch {
             start: note.start,
             end: note.end,
@@ -89,10 +211,6 @@ pub(crate) fn switches_of(notes: &[NoteEvent], profile: &trill_core::InstrumentP
         });
     }
     switches
-}
-
-fn lasts_of(profile: &trill_core::InstrumentProfile, pitch: u8) -> Option<trill_core::Lasts> {
-    profile.articulations.iter().find(|way| way.key == Some(pitch)).map(|way| way.lasts)
 }
 
 /// The switches that are chosen where a song is at `beat`, of `switches`
@@ -368,9 +486,8 @@ const SPRUNG: [usize; 8] = [64, 65, 66, 67, 68, 69, 128, 129];
 
 /// Per-track state that must survive a graph swap.
 pub(crate) struct TrackState {
-    /// End beat of the sounding note per pitch, or negative when silent.
-    pub active_until: [f64; 128],
-    pub active_count: usize,
+    /// The song's notes that are sounding, by channel and key.
+    pub sounding: Sounding,
     /// Where the fader and the pan have the two sides: see [`Glide`].
     pub fader: Glide<2>,
     /// How much of the track's sound passes at all, and how much of that
@@ -379,7 +496,9 @@ pub(crate) struct TrackState {
     pub passes: Gate,
     pub out: Gate,
     /// The keys held by hand on this track, a bit per pitch: through a
-    /// keyboard or [`Session::note_on`](crate::Session::note_on).
+    /// keyboard or [`Session::note_on`](crate::Session::note_on). What is
+    /// played by hand is on the first channel, and so is everything else
+    /// here that is the hand's.
     pub live_held: u128,
     /// Those of them a keyboard holds, which it lets go of when the track
     /// stops being one it plays.
@@ -389,9 +508,9 @@ pub(crate) struct TrackState {
     /// or the song has taken it back. While a controller is the hand's,
     /// the song's curve for it is not played.
     pub live: [f32; CONTROLLER_KINDS],
-    /// What the song last told the instrument each controller is at; not
-    /// a number where it has said nothing that still stands.
-    pub sent: [f32; CONTROLLER_KINDS],
+    /// What the song last told the instrument each controller is at, on
+    /// each channel.
+    pub sent: Told,
     /// Set to have the next block tell the instrument everything again: it
     /// is new, or was reset, and knows nothing of what it was told.
     pub resend: bool,
@@ -421,15 +540,14 @@ pub(crate) struct TrackState {
 impl Default for TrackState {
     fn default() -> Self {
         Self {
-            active_until: [-1.0; 128],
-            active_count: 0,
+            sounding: Sounding::default(),
             fader: Glide::default(),
             passes: Gate::default(),
             out: Gate::default(),
             live_held: 0,
             routed_held: 0,
             live: [f32::NAN; CONTROLLER_KINDS],
-            sent: [f32::NAN; CONTROLLER_KINDS],
+            sent: Told::default(),
             resend: false,
             latched: AS_MADE,
             rechoose: false,
@@ -460,7 +578,7 @@ impl TrackState {
                 continue;
             }
             // Whatever the song said last, it must say again.
-            self.sent[index] = f32::NAN;
+            self.sent.set(Channel::FIRST, index, f32::NAN);
             if value != 0.0
                 && let Some(kind) = ControllerKind::from_index(index)
             {

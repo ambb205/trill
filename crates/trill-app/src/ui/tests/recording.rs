@@ -828,7 +828,13 @@ fn an_instrument_that_is_given_notes_and_stays_silent_is_pointed_out_where_one_l
         .lock()
         .edit(|project| {
             let clip = project.add_midi_clip(keys, "Line", 0.0, 8.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 60, start: 3.0, length: 4.0, velocity: 100 }])?;
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 60,
+                start: 3.0,
+                length: 4.0,
+                velocity: 100,
+                ..Default::default()
+            }])?;
             Ok(clip)
         })
         .unwrap();

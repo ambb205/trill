@@ -84,6 +84,75 @@ async fn ok(client: &Client, tool: &'static str, arguments: Value) -> Value {
     call(client, tool, arguments).await.unwrap_or_else(|error| panic!("{tool} failed: {error}"))
 }
 
+/// How much of `audio` (at 48 kHz) is a tone of the pitch `pitch`, a MIDI
+/// note number: the level of that tone alone that would measure the same.
+fn tone(audio: &[f32], pitch: f64) -> f64 {
+    let hertz = 440.0 * ((pitch - 69.0) / 12.0).exp2();
+    let turn = std::f64::consts::TAU * hertz / 48_000.0;
+    let (mut real, mut imaginary) = (0.0f64, 0.0f64);
+    for (frame, sample) in audio.iter().enumerate() {
+        real += f64::from(*sample) * (turn * frame as f64).cos();
+        imaginary += f64::from(*sample) * (turn * frame as f64).sin();
+    }
+    2.0 * (real * real + imaginary * imaginary).sqrt() / audio.len() as f64
+}
+
+/// A guitar chord with one string bent, written with nothing but tool
+/// calls for an instrument that has a string to a channel, and heard in
+/// what is rendered: the wheel written on one channel moves that
+/// channel's note and no other. A probe plays a channel too.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_bends_one_string_of_an_instrument_that_has_a_string_to_a_channel() {
+    use trill_engine::scripted::{STRINGS, ScriptedFactory};
+    let parts = Parts { devices: vec![Box::new(ScriptedFactory::new())], ..Parts::default() };
+    let fixture = connect_with(tempfile::tempdir().unwrap(), parts).await;
+    let client = &fixture.client;
+    ok(client, "set_project", json!({ "tempo": 120 })).await;
+    let guitar = ok(client, "create_track", json!({ "name": "Guitar", "instrument": STRINGS })).await["track_id"]
+        .as_u64()
+        .unwrap();
+    let strings = json!({ "1": "String 1", "2": "String 2", "3": "String 3" });
+    ok(client, "set_instrument_profile", json!({ "track": guitar, "channels": strings, "remember": false })).await;
+
+    // An A on the second string and the E above it on the third, held
+    // for eight beats; from beat 4 the second string is bent a whole tone.
+    let notes = json!([
+        { "pitch": "A4", "start": 0, "length": 8, "channel": "string_2" },
+        { "pitch": "E5", "start": 0, "length": 8, "channel": "string_3" },
+    ]);
+    let clip = ok(client, "create_clip", json!({ "track": guitar, "start": 0, "length": 8, "notes": notes })).await;
+    assert_eq!(clip["channels"], json!([2, 3]), "{clip}");
+    let wheel = json!({ "pitch_bend": [[0, 0, "hold"], [4, 1, "hold"]] });
+    ok(client, "set_controllers", json!({ "clip": clip["clip_id"], "channel": "string_2", "controllers": wheel }))
+        .await;
+
+    let wav = fixture.folder.path().join("strings.wav");
+    ok(client, "render", json!({ "path": wav.display().to_string(), "max_tail_seconds": 0 })).await;
+    let audio = decode(&wav).unwrap();
+    // A beat is 24000 frames: a second before the bend, and one after.
+    let (before, after) = (&audio.left[24_000..72_000], &audio.left[120_000..168_000]);
+    let level = tone(before, 76.0);
+    assert!(level > 0.01, "the third string sounds: {level}");
+    let heard = |audio: &[f32]| [69.0, 71.0, 76.0, 78.0].map(|pitch| tone(audio, pitch) > level / 2.0);
+    assert_eq!(heard(before), [true, false, true, false], "an A and an E");
+    assert_eq!(heard(after), [false, true, true, false], "the A is a B, and the E is where it was");
+
+    // A probe plays a key on the channel it is asked to, by its name.
+    let probed = ok(client, "probe", json!({ "track": guitar, "notes": ["A4"], "channel": "string_3" })).await;
+    assert_eq!(probed["channel"], "3 String 3", "{probed}");
+    assert_eq!(probed["heard"][0]["heard"], "A4", "{probed}");
+    let plain = ok(client, "probe", json!({ "track": guitar, "notes": ["A4"] })).await;
+    assert!(plain.get("channel").is_none(), "{plain}");
+    let wrong = call(client, "probe", json!({ "track": guitar, "notes": ["A4"], "channel": "string_9" })).await;
+    assert!(wrong.unwrap_err().contains("1 String 1, 2 String 2, 3 String 3"));
+
+    // The journal says these steps in words like the others.
+    let journal = ok(client, "get_journal", json!({})).await.to_string();
+    for words in ["on the string 2 channel", "Shaped the controllers of"] {
+        assert!(journal.contains(words), "'{words}' is not in {journal}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_are_listed_with_schemas() {
     let fixture = connect().await;

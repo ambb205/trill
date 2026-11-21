@@ -697,7 +697,8 @@ fn lead_in(graph: &Graph, start: f64) -> (f64, Vec<(TrackId, usize)>) {
     for node in &graph.tracks {
         let mut too_early = 0;
         for note in node.notes.iter().take_while(|note| note.start < start - AT) {
-            if note.end <= start + AT || node.switches.iter().any(|switch| switch.pitch == note.pitch) {
+            let switches = note.channel.is_first() && node.switches.iter().any(|switch| switch.pitch == note.pitch);
+            if note.end <= start + AT || switches {
                 continue;
             }
             match note.start < start - LEAD_IN_BEATS {

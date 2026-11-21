@@ -124,8 +124,15 @@ fn the_stage_is_of_the_song_as_it_is_now() {
             .edit(|project| {
                 let track = project.add_track("Lead");
                 let clip = project.add_midi_clip(track, "line", 0.0, 64.0)?;
-                let notes: Vec<Note> =
-                    (0..64).map(|beat| Note { pitch: 60, start: beat as f64, length: 0.5, velocity: 100 }).collect();
+                let notes: Vec<Note> = (0..64)
+                    .map(|beat| Note {
+                        pitch: 60,
+                        start: beat as f64,
+                        length: 0.5,
+                        velocity: 100,
+                        ..Default::default()
+                    })
+                    .collect();
                 project.clip_mut(clip)?.set_notes(notes)?;
                 project.add_marker(0.0, "Intro")?;
                 project.add_marker(32.0, "Chorus")?;

@@ -21,7 +21,7 @@ fn rms(samples: &[f32]) -> f32 {
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 100 }
+    Note { pitch, start, length, velocity: 100, ..Default::default() }
 }
 
 /// A track with a snappy sine synth, so note edges are easy to measure.

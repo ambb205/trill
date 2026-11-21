@@ -24,7 +24,11 @@ fn sine_track(project: &mut Project, name: &str, pitch: u8) -> TrackId {
         params.insert(key.to_string(), value);
     }
     let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch, start: 0.0, length: 8.0, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch, start: 0.0, length: 8.0, velocity: 100, ..Default::default() }])
+        .unwrap();
     track
 }
 

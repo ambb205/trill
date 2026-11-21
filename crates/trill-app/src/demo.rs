@@ -35,7 +35,7 @@ const CHORDS: [Chord; PROGRESSION_BARS] = [
 ];
 
 fn note(pitch: u8, start: Beats, length: Beats, velocity: u8) -> Note {
-    Note { pitch, start, length, velocity }
+    Note { pitch, start, length, velocity, ..Default::default() }
 }
 
 /// Fills the project with the demo song, as a single undo step, and returns

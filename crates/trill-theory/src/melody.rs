@@ -300,6 +300,7 @@ impl Phrase {
                 start: tone.start,
                 length: (tone.length * gate).max(MIN_LENGTH),
                 velocity,
+                ..Default::default()
             })
             .collect()
     }

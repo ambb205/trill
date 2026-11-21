@@ -5,8 +5,8 @@
 
 use crate::guard::Guard;
 use crate::input::{
-    ControllerPointInput, controller_scale, find_param, find_param_index, parse_controller, parse_controller_points,
-    parse_notes, parse_param_value, parse_pitch_value, parse_points,
+    ControllerPointInput, PitchInput, controller_scale, find_param, find_param_index, parse_controller,
+    parse_controller_points, parse_notes, parse_param_value, parse_pitch_value, parse_points,
 };
 use crate::requests::*;
 use crate::view::{
@@ -36,7 +36,9 @@ use trill_core::midi_file;
 use trill_core::presets::{PresetFile, PresetList};
 use trill_core::project::AutomationPoint;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
-use trill_core::{ChainRef, ClipId, ControllerKind, DeviceId, EditError, Project, TrackId, TrackKind, Travel};
+use trill_core::{
+    ChainRef, Channel, ClipId, ControllerKind, DeviceId, EditError, Note, Project, TrackId, TrackKind, Travel,
+};
 use trill_engine::{Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
 use trill_runtime::{Runtime, SoundClip, SoundError};
@@ -1548,7 +1550,8 @@ impl TrillServer {
         let mut session = self.session.lock();
         let reply = (|| {
             let keys = crate::instruments::TrackKeys::of(&session, TrackId(request.track));
-            let (notes, how) = keys.played(request.notes.as_deref().unwrap_or_default())?;
+            let channel = keys.channel(request.channel.as_ref())?;
+            let (notes, how) = keys.played(request.notes.as_deref().unwrap_or_default(), channel)?;
             // Where a note says how it is played, the instrument's keyswitches go in with the notes.
             let played = crate::instruments::played(&session, TrackId(request.track), &[], &notes, &how)?;
             let written = played.as_ref().map_or(&notes, |played| &played.all);
@@ -1562,7 +1565,7 @@ impl TrillServer {
                     clip.set_loop_length(Some(loop_length))?;
                 }
                 for (kind, points) in &curves {
-                    clip.set_controller(*kind, points.clone())?;
+                    clip.set_controller_on(channel, *kind, points.clone())?;
                 }
                 Ok(id)
             })?;
@@ -1570,9 +1573,10 @@ impl TrillServer {
             say_played(&mut out, played.as_ref());
             if !curves.is_empty() {
                 out["controllers"] = curves.iter().map(|(kind, _)| kind.key()).collect();
-                add_controller_warnings(&mut out, &session, clip, curves.iter().map(|(kind, _)| *kind));
+                add_controller_warnings(&mut out, &session, clip, curves.iter().map(|(kind, _)| (channel, *kind)));
             }
             add_range_warning(&mut out, &session, clip);
+            say_channels(&mut out, &session, clip, &keys, notes.iter().map(|note| note.channel).chain([channel]));
             Ok(out)
         })();
         finish(reply)
@@ -1773,16 +1777,24 @@ impl TrillServer {
             if clip.midi().is_none() {
                 return Err(format!("{} is an audio clip and has no controllers", clip.id));
             }
+            let keys = crate::instruments::TrackKeys::of_clip(&session, clip.id);
+            let channel = keys.channel_asked(request.channel.as_ref())?;
+            // A curve says its channel where the clip uses another than the first, or one was asked for.
+            let channels = clip.uses_channels() || channel.is_some();
             let curves: Vec<Value> = clip
                 .controllers()
                 .iter()
                 .filter(|curve| wanted.is_none_or(|kind| curve.controller == kind))
-                .map(|curve| controller_json(curve, true))
+                .filter(|curve| channel.is_none_or(|channel| curve.channel == channel))
+                .map(|curve| controller_json(curve, true, channels))
                 .collect();
             let mut out = json!({ "clip_id": clip.id, "length": round(clip.length), "controllers": curves });
             if let (Some(kind), true) = (wanted, curves_is_empty(&out)) {
-                out["note"] =
-                    json!(format!("the clip has no {kind} curve; set_controllers or shape_dynamics writes one"));
+                let on = channel.filter(|_| channels).map(|channel| format!(" on channel {channel}"));
+                out["note"] = json!(format!(
+                    "the clip has no {kind} curve{}; set_controllers or shape_dynamics writes one",
+                    on.unwrap_or_default()
+                ));
             }
             Ok(out)
         })();
@@ -1807,12 +1819,16 @@ impl TrillServer {
                 );
             }
             let curves = parse_curves(Some(&request.controllers))?;
+            let keys = crate::instruments::TrackKeys::of_clip(&session, id);
+            let channel = keys.channel(request.channel.as_ref())?;
             let written = edit(&mut session, |project| {
                 let clip = project.clip_mut(id)?;
                 for (kind, points) in &curves {
-                    clip.set_controller(*kind, points.clone())?;
+                    clip.set_controller_on(channel, *kind, points.clone())?;
                 }
-                Ok(clip.controllers().iter().map(|curve| controller_json(curve, false)).collect::<Vec<Value>>())
+                let channels = clip.uses_channels();
+                let listed = clip.controllers().iter().map(|curve| controller_json(curve, false, channels));
+                Ok(listed.collect::<Vec<Value>>())
             })?;
             let removed: Vec<String> =
                 curves.iter().filter(|(_, points)| points.is_empty()).map(|(kind, _)| kind.key()).collect();
@@ -1820,8 +1836,9 @@ impl TrillServer {
             if !removed.is_empty() {
                 out["removed"] = json!(removed);
             }
-            let kept = curves.iter().filter(|(_, points)| !points.is_empty()).map(|(kind, _)| *kind);
+            let kept = curves.iter().filter(|(_, points)| !points.is_empty()).map(|(kind, _)| (channel, *kind));
             add_controller_warnings(&mut out, &session, id, kept);
+            say_channels(&mut out, &session, id, &keys, [channel].into_iter());
             Ok(out)
         })();
         finish(reply)
@@ -1833,7 +1850,9 @@ impl TrillServer {
         let mut session = self.session.lock();
         let id = ClipId(request.clip);
         let reply = (|| {
-            let (notes, how) = crate::instruments::TrackKeys::of_clip(&session, id).played(&request.notes)?;
+            let keys = crate::instruments::TrackKeys::of_clip(&session, id);
+            let channel = keys.channel(request.channel.as_ref())?;
+            let (notes, how) = keys.played(&request.notes, channel)?;
             let played = {
                 let project = session.project();
                 let track = project.clip_track(id).map_err(|error| explain(project, error))?;
@@ -1852,6 +1871,7 @@ impl TrillServer {
             let mut out = json!({ "added": notes.len(), "note_count": total });
             say_played(&mut out, played.as_ref());
             add_range_warning(&mut out, &session, id);
+            say_channels(&mut out, &session, id, &keys, notes.iter().map(|note| note.channel));
             Ok(out)
         })();
         finish(reply)
@@ -1863,18 +1883,22 @@ impl TrillServer {
         let mut session = self.session.lock();
         let id = ClipId(request.clip);
         let reply = (|| {
-            let (notes, how) = crate::instruments::TrackKeys::of_clip(&session, id).played(&request.notes)?;
+            let keys = crate::instruments::TrackKeys::of_clip(&session, id);
+            let channel = keys.channel(request.channel.as_ref())?;
+            let (notes, how) = keys.played(&request.notes, channel)?;
             let played = {
                 let project = session.project();
                 let track = project.clip_track(id).map_err(|error| explain(project, error))?;
                 crate::instruments::played(&session, track, &[], &notes, &how)?
             };
             let count = notes.len();
+            let on: Vec<Channel> = notes.iter().map(|note| note.channel).collect();
             let written = played.as_ref().map_or(notes, |played| played.all.clone());
             edit(&mut session, |project| project.clip_mut(id)?.set_notes(written))?;
             let mut out = json!({ "note_count": count });
             say_played(&mut out, played.as_ref());
             add_range_warning(&mut out, &session, id);
+            say_channels(&mut out, &session, id, &keys, on.into_iter());
             Ok(out)
         })();
         finish(reply)
@@ -1887,11 +1911,15 @@ impl TrillServer {
         let reply = (|| {
             let keys = crate::instruments::TrackKeys::of_clip(&session, ClipId(request.clip));
             let pitch = request.pitch.as_ref().map(|pitch| keys.pitch(&pitch.0)).transpose()?;
+            let channel = keys.channel_asked(request.channel.as_ref())?;
             let (start, end) = (request.start.unwrap_or(f64::MIN), request.end.unwrap_or(f64::MAX));
             let (removed, remaining) = edit(&mut session, |project| {
                 let clip = project.clip_mut(ClipId(request.clip))?;
                 let removed = clip.remove_notes(|note| {
-                    note.start >= start && note.start < end && pitch.is_none_or(|p| note.pitch == p)
+                    note.start >= start
+                        && note.start < end
+                        && pitch.is_none_or(|p| note.pitch == p)
+                        && channel.is_none_or(|channel| note.channel == channel)
                 })?;
                 Ok((removed, clip.notes().len()))
             })?;
@@ -1905,12 +1933,34 @@ impl TrillServer {
     fn transform_notes(&self, Parameters(request): Parameters<TransformNotesRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let (start, end) = (request.start.unwrap_or(f64::MIN), request.end.unwrap_or(f64::MAX));
+        // Which notes, by pitch and by channel, and the channel they are to be on.
+        let keys = crate::instruments::TrackKeys::of_clip(&session, ClipId(request.clip));
+        let chosen = (|| {
+            let pitch = |input: &Option<PitchInput>| input.as_ref().map(|pitch| keys.pitch(&pitch.0)).transpose();
+            let channel = keys.channel_asked(request.channel.as_ref())?;
+            let to_channel = keys.channel_asked(request.to_channel.as_ref())?;
+            Ok::<_, String>((pitch(&request.lowest)?, pitch(&request.highest)?, channel, to_channel))
+        })();
+        let (lowest, highest, channel, to_channel) = match chosen {
+            Ok(chosen) => chosen,
+            Err(error) => return finish(Err(error)),
+        };
+        let within = |note: &Note| {
+            note.start >= start
+                && note.start < end
+                && lowest.is_none_or(|lowest| note.pitch >= lowest)
+                && highest.is_none_or(|highest| note.pitch <= highest)
+                && channel.is_none_or(|channel| note.channel == channel)
+        };
         let reply = edit(&mut session, |project| {
             let clip = project.clip_mut(ClipId(request.clip))?;
             let mut notes = clip.notes().to_vec();
             let mut noise = Noise(request.seed.unwrap_or(1).max(1));
             let mut changed = 0;
-            for note in notes.iter_mut().filter(|note| note.start >= start && note.start < end) {
+            for note in notes.iter_mut().filter(|note| within(note)) {
+                if let Some(channel) = to_channel {
+                    note.channel = channel;
+                }
                 if let Some(semitones) = request.transpose {
                     let pitch = note.pitch as i32 + semitones;
                     if !(0..=127).contains(&pitch) {
@@ -1945,7 +1995,17 @@ impl TrillServer {
                 changed += 1;
             }
             clip.set_notes(notes)?;
-            Ok(json!({ "changed": changed }))
+            let mut out = json!({ "changed": changed });
+            if clip.uses_channels() {
+                out["channels"] = json!(clip.channels());
+            }
+            Ok(out)
+        })
+        .map(|mut out| {
+            if let Some(warning) = to_channel.and_then(|channel| keys.channel_warning(channel)) {
+                out["warning"] = json!(warning);
+            }
+            out
         });
         finish(reply)
     }
@@ -2977,13 +3037,13 @@ pub(crate) fn add_controller_warnings(
     out: &mut Value,
     session: &Session,
     clip: ClipId,
-    kinds: impl Iterator<Item = ControllerKind>,
+    kinds: impl Iterator<Item = (Channel, ControllerKind)>,
 ) {
     let project = session.project();
     let (Ok(found), Ok(track)) = (project.clip(clip), project.clip_track(clip)) else { return };
     let support = session.controller_support(track);
     let mut warnings: Vec<String> = Vec::new();
-    for kind in kinds {
+    for (channel, kind) in kinds {
         if support.responds_to(kind) == Some(false) {
             let known = match &support {
                 trill_core::device::ControllerSupport::Listed(kinds) if !kinds.is_empty() => {
@@ -2999,7 +3059,7 @@ pub(crate) fn add_controller_warnings(
             found.midi().and_then(|midi| midi.loop_length).map_or(found.length, |length| length.min(found.length));
         let offset = found.midi().map_or(0.0, |midi| midi.start_offset);
         let late = found
-            .controller(kind)
+            .controller_on(channel, kind)
             .is_some_and(|curve| curve.points.iter().any(|point| point.beat > offset + playable + 1e-6));
         if late {
             warnings.push(format!(
@@ -3337,6 +3397,30 @@ fn add_audio_notes(out: &mut Value, runtime: &Runtime, session: &Session, clip: 
 
 /// What became of notes that said how they are played: the keyswitches
 /// that were pressed for them, and what was done unasked.
+/// What a reply says of channels: which the clip uses, where it uses
+/// another than the first; and, of what was just written on `written`,
+/// that a channel is nothing to choose on an instrument that names none.
+pub(crate) fn say_channels(
+    out: &mut Value,
+    session: &Session,
+    clip: ClipId,
+    keys: &crate::instruments::TrackKeys,
+    written: impl Iterator<Item = Channel>,
+) {
+    if let Ok(clip) = session.project().clip(clip)
+        && clip.uses_channels()
+    {
+        out["channels"] = json!(clip.channels());
+    }
+    let mut written: Vec<Channel> = written.filter(|channel| !channel.is_first()).collect();
+    written.sort_unstable();
+    written.dedup();
+    if let Some(warning) = written.first().and_then(|channel| keys.channel_warning(*channel)) {
+        let known = out["warning"].as_str().map(|known| format!("{known} ")).unwrap_or_default();
+        out["warning"] = json!(format!("{known}{warning}"));
+    }
+}
+
 fn say_played(out: &mut Value, played: Option<&crate::instruments::Played>) {
     let Some(played) = played else { return };
     out["keyswitches"] = json!(played.keyswitches);

@@ -5,6 +5,7 @@
 //! ids). The model knows nothing about audio; the engine compiles it into a
 //! render graph.
 
+use crate::channel::Channel;
 use crate::controllers::{self, ControllerCurve, ControllerKind, ControllerLane, LaneClip};
 use crate::ids::{ClipId, DeviceId, TrackId};
 use crate::instrument::InstrumentProfile;
@@ -87,11 +88,31 @@ pub struct Note {
     pub length: Beats,
     /// 1..=127.
     pub velocity: u8,
+    /// The MIDI channel the note is on: the first unless the instrument
+    /// gives its channels meanings of their own (an organ's pedalboard, a
+    /// guitar's strings). Two notes of one pitch at one time on two
+    /// channels are two notes. A file saved before notes had one says
+    /// none, and neither does a note on the first.
+    #[serde(default, skip_serializing_if = "Channel::is_first")]
+    pub channel: Channel,
+}
+
+impl Default for Note {
+    /// Middle C for a beat, at the start, on the first channel: something
+    /// to say the rest of a note over (`Note { pitch: 64, ..Default::default() }`).
+    fn default() -> Self {
+        Self { pitch: 60, start: 0.0, length: 1.0, velocity: 100, channel: Channel::FIRST }
+    }
 }
 
 impl Note {
     pub fn end(&self) -> Beats {
         self.start + self.length
+    }
+
+    /// The note on `channel`.
+    pub fn on(self, channel: Channel) -> Self {
+        Self { channel, ..self }
     }
 
     fn validate(&self) -> Result<(), EditError> {
@@ -125,8 +146,9 @@ pub struct MidiContent {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: Beats,
     /// The movement of controllers (expression, the wheels, the pedals)
-    /// through the content: at most one curve per controller, in the order
-    /// of [`ControllerKind`]. They loop and are trimmed with the notes. See
+    /// through the content: at most one curve per controller on a channel,
+    /// in the order of [`ControllerKind`] and then of the channels. They
+    /// loop and are trimmed with the notes. See
     /// [`controllers`](crate::controllers) for what a controller is worth
     /// at any moment of the song.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -134,9 +156,32 @@ pub struct MidiContent {
 }
 
 impl MidiContent {
-    /// The curve for `kind`, if the content has one.
+    /// The curve for `kind` on the first channel, if the content has one.
     pub fn controller(&self, kind: ControllerKind) -> Option<&ControllerCurve> {
-        self.controllers.iter().find(|curve| curve.controller == kind)
+        self.controller_on(Channel::FIRST, kind)
+    }
+
+    /// The curve for `kind` on `channel`, if the content has one.
+    pub fn controller_on(&self, channel: Channel, kind: ControllerKind) -> Option<&ControllerCurve> {
+        self.controllers.iter().find(|curve| curve.controller == kind && curve.channel == channel)
+    }
+
+    /// The channels the content uses, in order: those its notes are on and
+    /// those it has curves for. The first alone for nearly every clip, and
+    /// none for one that is empty.
+    pub fn channels(&self) -> Vec<Channel> {
+        let mut used = [false; Channel::COUNT];
+        for channel in self.notes.iter().map(|note| note.channel).chain(self.controllers.iter().map(|c| c.channel)) {
+            used[channel.index()] = true;
+        }
+        Channel::all().filter(|channel| used[channel.index()]).collect()
+    }
+
+    /// Whether anything of the content is on another channel than the
+    /// first: only then is there a channel to speak of.
+    pub fn uses_channels(&self) -> bool {
+        self.notes.iter().any(|note| !note.channel.is_first())
+            || self.controllers.iter().any(|curve| !curve.channel.is_first())
     }
 
     /// The length of the loop, if the content loops.
@@ -538,25 +583,53 @@ impl Clip {
         self.midi().map_or(&[], |midi| midi.controllers.as_slice())
     }
 
-    /// The clip's curve for `kind`, if it has one.
+    /// The clip's curve for `kind` on the first channel, if it has one.
     pub fn controller(&self, kind: ControllerKind) -> Option<&ControllerCurve> {
-        self.midi().and_then(|midi| midi.controller(kind))
+        self.controller_on(Channel::FIRST, kind)
     }
 
-    /// Replaces the clip's curve for `kind` with `points`, whose beats are
-    /// measured from where the content begins, like the starts of notes,
-    /// and whose values lie within [`ControllerKind::range`]. No points
-    /// removes the curve. The points need not be in order.
+    /// The clip's curve for `kind` on `channel`, if it has one.
+    pub fn controller_on(&self, channel: Channel, kind: ControllerKind) -> Option<&ControllerCurve> {
+        self.midi().and_then(|midi| midi.controller_on(channel, kind))
+    }
+
+    /// The channels the clip's notes and curves are on, in order.
+    pub fn channels(&self) -> Vec<Channel> {
+        self.midi().map(MidiContent::channels).unwrap_or_default()
+    }
+
+    /// Whether anything of the clip is on another channel than the first.
+    pub fn uses_channels(&self) -> bool {
+        self.midi().is_some_and(MidiContent::uses_channels)
+    }
+
+    /// Replaces the clip's curve for `kind` on the first channel: see
+    /// [`Clip::set_controller_on`].
     pub fn set_controller(&mut self, kind: ControllerKind, points: Vec<AutomationPoint>) -> Result<(), EditError> {
+        self.set_controller_on(Channel::FIRST, kind, points)
+    }
+
+    /// Replaces the clip's curve for `kind` on `channel` with `points`,
+    /// whose beats are measured from where the content begins, like the
+    /// starts of notes, and whose values lie within
+    /// [`ControllerKind::range`]. No points removes the curve. The points
+    /// need not be in order. The curves the clip has for the controller on
+    /// other channels are left as they are.
+    pub fn set_controller_on(
+        &mut self,
+        channel: Channel,
+        kind: ControllerKind,
+        points: Vec<AutomationPoint>,
+    ) -> Result<(), EditError> {
         let id = self.id;
         let points = controllers::validated(kind, points)?;
         let ClipContent::Midi(midi) = &mut self.content else {
             return invalid(format!("{id} is an audio clip and has no controllers"));
         };
-        midi.controllers.retain(|curve| curve.controller != kind);
+        midi.controllers.retain(|curve| curve.controller != kind || curve.channel != channel);
         if !points.is_empty() {
-            let index = midi.controllers.partition_point(|curve| curve.controller < kind);
-            midi.controllers.insert(index, ControllerCurve { controller: kind, points });
+            let index = midi.controllers.partition_point(|curve| (curve.controller, curve.channel) < (kind, channel));
+            midi.controllers.insert(index, ControllerCurve { controller: kind, channel, points });
         }
         Ok(())
     }
@@ -568,11 +641,17 @@ impl Clip {
         (beat >= self.start && beat < self.end()).then(|| midi.content_beat(beat - self.start))
     }
 
-    /// What the clip's curve for `kind` is worth at the timeline position
-    /// `beat`; `None` where the clip does not lie or has no such curve.
+    /// What the clip's curve for `kind` on the first channel is worth at
+    /// the timeline position `beat`; `None` where the clip does not lie or
+    /// has no such curve.
     pub fn controller_value_at(&self, kind: ControllerKind, beat: Beats) -> Option<f64> {
+        self.controller_value_on(Channel::FIRST, kind, beat)
+    }
+
+    /// [`Clip::controller_value_at`], for the curve on `channel`.
+    pub fn controller_value_on(&self, channel: Channel, kind: ControllerKind, beat: Beats) -> Option<f64> {
         let content = self.content_beat(beat)?;
-        self.controller(kind).map(|curve| curve.value_at(content))
+        self.controller_on(channel, kind).map(|curve| curve.value_at(content))
     }
 
     /// Adds notes, keeping them sorted.
@@ -597,6 +676,20 @@ impl Clip {
         Ok(())
     }
 
+    /// Puts the notes `filter` matches on `channel`, and returns how many
+    /// of them were on another. Nothing else of a note changes, and the
+    /// clip's curves stay on the channels they are on.
+    pub fn set_note_channels(&mut self, channel: Channel, filter: impl Fn(&Note) -> bool) -> Result<usize, EditError> {
+        let midi = self.midi_mut()?;
+        let mut moved = 0;
+        for note in midi.notes.iter_mut().filter(|note| note.channel != channel && filter(note)) {
+            note.channel = channel;
+            moved += 1;
+        }
+        sort_notes(&mut midi.notes);
+        Ok(moved)
+    }
+
     /// Removes the notes `filter` matches and returns how many were removed.
     pub fn remove_notes(&mut self, filter: impl Fn(&Note) -> bool) -> Result<usize, EditError> {
         let midi = self.midi_mut()?;
@@ -617,7 +710,7 @@ impl Clip {
 }
 
 fn sort_notes(notes: &mut [Note]) {
-    notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+    notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)).then(a.channel.cmp(&b.channel)));
 }
 
 /// An instrument or effect in a device chain.
@@ -767,19 +860,21 @@ pub struct Track {
 
 impl Track {
     /// What each controller that a clip of this track moves is worth over
-    /// the whole song, one lane per controller in the order of
-    /// [`ControllerKind`]. Muted clips take no part. This is the one
-    /// definition of it (see [`controllers`](crate::controllers)): the
-    /// engine plays these lanes and the exporters write them.
+    /// the whole song, one lane per controller on a channel, in the order
+    /// of [`ControllerKind`] and then of the channels. Muted clips take no
+    /// part. This is the one definition of it (see
+    /// [`controllers`](crate::controllers)): the engine plays these lanes
+    /// and the exporters write them.
     pub fn controller_lanes(&self) -> Vec<ControllerLane> {
         let playing = || self.clips.iter().filter(|clip| !clip.muted).filter_map(|clip| Some((clip, clip.midi()?)));
-        let mut kinds: Vec<ControllerKind> =
-            playing().flat_map(|(_, midi)| midi.controllers.iter().map(|curve| curve.controller)).collect();
+        let mut kinds: Vec<(ControllerKind, Channel)> = playing()
+            .flat_map(|(_, midi)| midi.controllers.iter().map(|curve| (curve.controller, curve.channel)))
+            .collect();
         kinds.sort();
         kinds.dedup();
         kinds
             .into_iter()
-            .map(|kind| {
+            .map(|(kind, channel)| {
                 let clips: Vec<LaneClip<'_>> = playing()
                     .filter_map(|(clip, midi)| {
                         Some(LaneClip {
@@ -787,11 +882,11 @@ impl Track {
                             end: clip.end(),
                             offset: midi.start_offset.max(0.0),
                             period: midi.period(),
-                            curve: midi.controller(kind)?,
+                            curve: midi.controller_on(channel, kind)?,
                         })
                     })
                     .collect();
-                controllers::lane_of(kind, &clips)
+                controllers::lane_of(kind, channel, &clips)
             })
             .collect()
     }
@@ -1960,7 +2055,7 @@ impl Project {
                 let clip = self.clip_mut(clip)?;
                 clip.add_notes(&part.notes)?;
                 for curve in &part.controllers {
-                    clip.set_controller(curve.controller, curve.points.clone())?;
+                    clip.set_controller_on(curve.channel, curve.controller, curve.points.clone())?;
                 }
             }
             parts.push(ImportedPart { track, clip, drums: part.drums });
@@ -2412,7 +2507,7 @@ fn lane_curve(lane: &ControllerLane, length: Beats) -> Option<ControllerCurve> {
         return None;
     }
     let points = controllers::thin(&events, lane.kind.is_switch(), controllers::THIN_TOLERANCE / 4.0, 4.0 * step);
-    Some(ControllerCurve { controller: lane.kind, points })
+    Some(ControllerCurve { controller: lane.kind, channel: lane.channel, points })
 }
 
 fn sort_clips(clips: &mut [Clip]) {
@@ -2451,7 +2546,7 @@ mod tests {
     use super::*;
 
     fn note(pitch: u8, start: Beats) -> Note {
-        Note { pitch, start, length: 1.0, velocity: 100 }
+        Note { pitch, start, length: 1.0, velocity: 100, ..Default::default() }
     }
 
     #[test]
@@ -2708,7 +2803,13 @@ mod tests {
         let notes: Vec<Note> = lengths
             .iter()
             .enumerate()
-            .map(|(n, length)| Note { pitch: 60, start: n as f64 + length / 7.0, length: *length, velocity: 100 })
+            .map(|(n, length)| Note {
+                pitch: 60,
+                start: n as f64 + length / 7.0,
+                length: *length,
+                velocity: 100,
+                ..Default::default()
+            })
             .collect();
         project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
         project.set_tempo(123.45600000000002).unwrap();
@@ -2735,7 +2836,7 @@ mod tests {
         let pitches: Vec<u8> = c.notes().iter().map(|n| n.pitch).collect();
         assert_eq!(pitches, [60, 62, 64, 67]);
 
-        let bad = Note { pitch: 60, start: -1.0, length: 1.0, velocity: 100 };
+        let bad = Note { pitch: 60, start: -1.0, length: 1.0, velocity: 100, ..Default::default() };
         assert!(c.add_notes(&[note(72, 0.0), bad]).is_err());
         assert_eq!(c.notes().len(), 4, "a rejected batch must not be partially applied");
         assert!(c.add_notes(&[Note { velocity: 0, ..note(60, 0.0) }]).is_err());
@@ -3436,8 +3537,8 @@ mod tests {
                 name: "Lead".into(),
                 drums: false,
                 notes: vec![
-                    Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100 },
-                    Note { pitch: 62, start: 9.0, length: 0.5, velocity: 100 },
+                    Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100, ..Default::default() },
+                    Note { pitch: 62, start: 9.0, length: 0.5, velocity: 100, ..Default::default() },
                 ],
                 controllers: Vec::new(),
             }],
@@ -3899,5 +4000,114 @@ mod tests {
             );
             assert!((was - is).abs() < 0.02, "at beat {beat}: {is} for {was}");
         }
+    }
+
+    #[test]
+    fn a_note_and_a_curve_are_on_a_channel_and_a_song_that_says_none_is_written_as_it_was() {
+        let (mut project, track, clip) = expressive();
+        let plain = project.to_json();
+        assert!(!plain.contains("channel"), "a song on the first channel says no channel: {plain}");
+        assert!(!project.clip(clip).unwrap().uses_channels());
+        assert_eq!(project.clip(clip).unwrap().channels(), [Channel::FIRST]);
+
+        // The same pitch at the same time on two channels is two notes,
+        // and a curve for a controller on another channel stands beside
+        // the one on the first.
+        let (second, third) = (Channel::new(2).unwrap(), Channel::new(3).unwrap());
+        let c = project.clip_mut(clip).unwrap();
+        c.add_notes(&[note(60, 0.0).on(second), note(64, 1.0).on(third)]).unwrap();
+        c.set_controller_on(third, ControllerKind::PitchBend, vec![point(1.0, 0.0), point(2.0, 1.0)]).unwrap();
+        c.set_controller_on(third, ControllerKind::EXPRESSION, vec![point(0.0, 0.5)]).unwrap();
+        let on: Vec<(u8, u8)> = c.notes().iter().map(|note| (note.pitch, note.channel.number())).collect();
+        assert_eq!(on, [(60, 1), (60, 2), (64, 3), (62, 1)], "by start, then pitch, then channel");
+        assert_eq!(c.channels(), [Channel::FIRST, second, third]);
+        assert!(c.uses_channels());
+        let curves: Vec<(String, u8)> =
+            c.controllers().iter().map(|c| (c.controller.key(), c.channel.number())).collect();
+        assert_eq!(
+            curves,
+            [
+                ("expression".to_string(), 1),
+                ("expression".to_string(), 3),
+                ("sustain".to_string(), 1),
+                ("pitch_bend".to_string(), 3)
+            ]
+        );
+        // The first channel's curve is what the plain questions are about.
+        assert_eq!(c.controller(ControllerKind::EXPRESSION).unwrap().points.len(), 2);
+        assert_eq!(c.controller_on(third, ControllerKind::EXPRESSION).unwrap().points.len(), 1);
+        assert!(c.controller(ControllerKind::PitchBend).is_none());
+        assert_eq!(c.controller_value_on(third, ControllerKind::PitchBend, 9.5), Some(0.5));
+        // Replacing one channel's curve leaves the other's, and no points
+        // takes one away.
+        c.set_controller_on(third, ControllerKind::EXPRESSION, Vec::new()).unwrap();
+        assert!(c.controller_on(third, ControllerKind::EXPRESSION).is_none());
+        assert_eq!(c.controller(ControllerKind::EXPRESSION).unwrap().points.len(), 2);
+
+        // Written with the channels that are not the first, and read back
+        // the same.
+        let saved = project.to_json();
+        assert_eq!(saved.matches("\"channel\": 2").count(), 1, "{saved}");
+        assert_eq!(saved.matches("\"channel\": 3").count(), 2, "{saved}");
+        assert_eq!(saved.matches("\"channel\"").count(), 3, "nothing on the first says so: {saved}");
+        assert_eq!(Project::from_json(&saved).unwrap(), project);
+        // A channel that is none is refused where it is read.
+        let wrong = saved.replace("\"channel\": 2", "\"channel\": 17");
+        assert!(Project::from_json(&wrong).unwrap_err().to_string().contains("1 to 16"));
+
+        // A lane for each controller on each channel, and each its own.
+        let lanes = project.track(track).unwrap().controller_lanes();
+        let which: Vec<(String, u8)> = lanes.iter().map(|lane| (lane.kind.key(), lane.channel.number())).collect();
+        assert_eq!(which, [("expression".to_string(), 1), ("sustain".to_string(), 1), ("pitch_bend".to_string(), 3)]);
+        assert_eq!(lanes[2].value_at(9.5), 0.5);
+    }
+
+    #[test]
+    fn whatever_moves_copies_splits_or_loops_notes_keeps_their_channels() {
+        let (mut project, track, clip) = expressive();
+        let (second, sixth) = (Channel::new(2).unwrap(), Channel::new(6).unwrap());
+        let c = project.clip_mut(clip).unwrap();
+        c.set_notes(vec![note(40, 0.0).on(sixth), note(60, 0.0), note(60, 0.0).on(second), note(64, 3.0).on(second)])
+            .unwrap();
+        c.set_controller_on(sixth, ControllerKind::PitchBend, vec![point(0.0, 0.0), point(4.0, 1.0)]).unwrap();
+        let channels = |project: &Project, clip: ClipId| -> Vec<u8> {
+            project.clip(clip).unwrap().timeline_notes().iter().map(|note| note.channel.number()).collect()
+        };
+        assert_eq!(channels(&project, clip), [6, 1, 2, 2]);
+
+        // Looped: every round has them.
+        project.clip_mut(clip).unwrap().set_loop_length(Some(2.0)).unwrap();
+        assert_eq!(channels(&project, clip), [6, 1, 2, 6, 1, 2, 6, 1, 2, 6, 1, 2]);
+        project.clip_mut(clip).unwrap().set_loop_length(None).unwrap();
+
+        // Copied, split and duplicated with its track: notes and curves.
+        let copy = project.duplicate_clip(clip, 16.0, None).unwrap();
+        assert_eq!(project.clip(copy).unwrap().notes(), project.clip(clip).unwrap().notes());
+        assert_eq!(project.clip(copy).unwrap().controllers(), project.clip(clip).unwrap().controllers());
+        let right = project.split_clip(copy, 18.0).unwrap();
+        assert_eq!(channels(&project, copy), [6, 1, 2]);
+        assert_eq!(channels(&project, right), [2]);
+        assert!(project.clip(right).unwrap().controller_on(sixth, ControllerKind::PitchBend).is_some());
+        let twin = project.duplicate_track(track).unwrap();
+        assert_eq!(project.track(twin).unwrap().clips[0].notes(), project.clip(clip).unwrap().notes());
+
+        // The channel of some notes set at once: only theirs changes.
+        let moved = project.clip_mut(clip).unwrap().set_note_channels(sixth, |note| note.pitch == 60).unwrap();
+        assert_eq!(moved, 2);
+        let now: Vec<(u8, u8)> =
+            project.clip(clip).unwrap().notes().iter().map(|n| (n.pitch, n.channel.number())).collect();
+        assert_eq!(now, [(40, 6), (60, 6), (60, 6), (64, 2)]);
+        assert_eq!(project.clip_mut(clip).unwrap().set_note_channels(sixth, |note| note.pitch == 60).unwrap(), 0);
+
+        // Through a MIDI file: a part that uses several channels keeps
+        // them, notes and curves.
+        let file = crate::midi_file::parse(&crate::midi_file::write(&project.export_midi())).unwrap();
+        let mut imported = Project::new("in");
+        let parts = imported.import_midi(&file, 0.0).unwrap();
+        let back = imported.clip(parts[0].clip).unwrap();
+        let heard: Vec<(u8, u8)> = back.notes().iter().take(4).map(|n| (n.pitch, n.channel.number())).collect();
+        assert_eq!(heard, [(40, 6), (60, 6), (60, 6), (64, 2)]);
+        assert!(back.controller_on(sixth, ControllerKind::PitchBend).is_some());
+        assert!(back.controller_on(Channel::FIRST, ControllerKind::EXPRESSION).is_some());
     }
 }

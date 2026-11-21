@@ -15,11 +15,24 @@
 //! ([`controllers::thin`]); writing samples the curve at every tick and
 //! writes an event wherever its value, in the file's resolution, changes.
 //!
+//! **Channels.** In most files a channel only says which part something
+//! belongs to, and an instrument takes all sixteen as one. So a track
+//! whose notes are all on one channel is read as a part on the first
+//! channel, whichever it was in the file, and a file of one track that
+//! holds every part (format 0) is read as a part for each channel, as it
+//! always was. A track of a file of several tracks that plays on several
+//! channels means them: an organ's manual and pedals, a guitar with a
+//! string to a channel. It is read as one part whose notes and curves keep
+//! their channels. Written, a part's notes and curves are on the channels
+//! they have (and a drum part that says no channel on the tenth, as
+//! General MIDI has it).
+//!
 //! A file's tempo only jumps. A tempo that glides is written as the jumps
 //! that keep its time: [`GLIDE_STEPS_PER_BEAT`] to a beat, each at the
 //! tempo that makes its stretch last as long as the glide does there. Read
 //! back, it is those jumps.
 
+use crate::channel::Channel;
 use crate::controllers::{self, ControllerCurve, ControllerKind, GESTURE_GAP_SECONDS, THIN_TOLERANCE};
 use crate::project::Note;
 use crate::tempo::{MeterChange, MeterMap, SAME_BEAT, TempoChange, TempoMap};
@@ -75,9 +88,12 @@ pub struct MidiTrack {
     /// Whether the notes are on the General MIDI drum channel.
     pub drums: bool,
     /// Sorted by start; positions are in beats from the start of the file.
+    /// On the first channel, unless the part means its channels (see the
+    /// module documentation).
     pub notes: Vec<Note>,
-    /// The controllers the track moves, one curve each in the order of
-    /// [`ControllerKind`], over beats from the start of the file.
+    /// The controllers the track moves, one curve for each on a channel,
+    /// in the order of [`ControllerKind`] and then of the channels, over
+    /// beats from the start of the file.
     pub controllers: Vec<ControllerCurve>,
 }
 
@@ -168,7 +184,8 @@ pub fn parse(bytes: &[u8]) -> Result<MidiFile, MidiFileError> {
         let chunk = reader.take(length)?;
         // Chunks of other kinds are allowed and skipped.
         if kind == b"MTrk" {
-            parse_track(chunk, ticks_per_beat, &mut file, &mut conducted)?;
+            // A file that is one track has its parts by channel.
+            parse_track(chunk, ticks_per_beat, format == 0, &mut file, &mut conducted)?;
         }
     }
 
@@ -215,6 +232,7 @@ pub fn parse(bytes: &[u8]) -> Result<MidiFile, MidiFileError> {
 fn parse_track(
     chunk: &[u8],
     ticks_per_beat: f64,
+    parts_by_channel: bool,
     file: &mut MidiFile,
     conducted: &mut Conducted,
 ) -> Result<(), MidiFileError> {
@@ -235,6 +253,7 @@ fn parse_track(
             start: started.start as f64 / ticks_per_beat,
             length,
             velocity: started.velocity,
+            channel: Channel::FIRST,
         });
     };
 
@@ -341,6 +360,29 @@ fn parse_track(
     // How long a controller rests before its next movement is a new one.
     let gap = GESTURE_GAP_SECONDS * file.tempo.unwrap_or(DEFAULT_TEMPO) / 60.0;
     let several = notes.len() > 1;
+    if several && !parts_by_channel {
+        // One part that means its channels: its notes and its curves keep
+        // them.
+        let on = |channel: u8| Channel::from_index(usize::from(channel)).unwrap_or(Channel::FIRST);
+        let mut kept: Vec<Note> = Vec::new();
+        for (channel, notes) in notes {
+            kept.extend(notes.into_iter().map(|note| note.on(on(channel))));
+        }
+        kept.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)).then(a.channel.cmp(&b.channel)));
+        let mut curves: Vec<ControllerCurve> = moves
+            .iter()
+            .map(|((channel, controller), events)| ControllerCurve {
+                controller: *controller,
+                channel: on(*channel),
+                points: controllers::thin(events, controller.is_switch(), THIN_TOLERANCE, gap),
+            })
+            .filter(|curve| !curve.points.is_empty())
+            .collect();
+        curves.sort_by_key(|curve| (curve.controller, curve.channel));
+        let name = if name.is_empty() { format!("MIDI {}", file.tracks.len() + 1) } else { name };
+        file.tracks.push(MidiTrack { name, drums: false, notes: kept, controllers: curves });
+        return Ok(());
+    }
     for (channel, mut notes) in notes {
         notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
         let name = match (name.is_empty(), several) {
@@ -352,6 +394,7 @@ fn parse_track(
             .range((channel, ControllerKind::Controller(0))..=(channel, ControllerKind::PitchBend))
             .map(|((_, controller), events)| ControllerCurve {
                 controller: *controller,
+                channel: Channel::FIRST,
                 points: controllers::thin(events, controller.is_switch(), THIN_TOLERANCE, gap),
             })
             .filter(|curve| !curve.points.is_empty())
@@ -531,7 +574,14 @@ pub fn write(file: &MidiFile) -> Vec<u8> {
     write_chunk(&mut out, b"MTrk", &conductor);
 
     for track in &file.tracks {
-        let channel = if track.drums { DRUM_CHANNEL } else { 0 };
+        // Everything on the channel it has; a drum part that says none is
+        // on the tenth, where a reader looks for drums.
+        let says_none = track.notes.iter().all(|note| note.channel.is_first())
+            && track.controllers.iter().all(|curve| curve.channel.is_first());
+        let wire = |channel: Channel| match track.drums && says_none {
+            true => DRUM_CHANNEL,
+            false => channel.index() as u8,
+        };
         // (tick, order within the tick, bytes, how many of them); at one
         // tick, offs go first so a repeated note is released before it is
         // struck again.
@@ -539,11 +589,12 @@ pub fn write(file: &MidiFile) -> Vec<u8> {
         for note in &track.notes {
             let start = to_tick(note.start);
             let end = to_tick(note.end()).max(start + 1);
+            let channel = wire(note.channel);
             events.push((start, NOTE_ON_ORDER, [0x90 | channel, note.pitch & 0x7F, note.velocity & 0x7F], 3));
             events.push((end, NOTE_OFF_ORDER, [0x80 | channel, note.pitch & 0x7F, 0], 3));
         }
         for curve in &track.controllers {
-            controller_events(curve, channel, &mut events);
+            controller_events(curve, wire(curve.channel), &mut events);
         }
         // Stable, so a controller's events keep the order they were made in.
         events.sort_by_key(|&(tick, order, bytes, _)| {
@@ -570,7 +621,7 @@ mod tests {
     use crate::project::{AutomationPoint, Segment};
 
     fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
-        Note { pitch, start, length, velocity }
+        Note { pitch, start, length, velocity, ..Default::default() }
     }
 
     #[test]
@@ -768,7 +819,7 @@ mod tests {
     }
 
     fn curve(controller: ControllerKind, points: &[AutomationPoint]) -> ControllerCurve {
-        ControllerCurve { controller, points: points.to_vec() }
+        ControllerCurve { controller, channel: Channel::FIRST, points: points.to_vec() }
     }
 
     #[test]
@@ -848,5 +899,52 @@ mod tests {
         let bend = &controllers[1];
         assert_eq!(bend.value_at(0.0), 0.0);
         assert!((bend.value_at(1.5) - 0.5).abs() < 0.01, "{:?}", bend.points);
+    }
+
+    #[test]
+    fn a_part_that_plays_on_several_channels_keeps_them_and_one_on_a_single_channel_comes_in_on_the_first() {
+        let (second, sixth) = (Channel::new(2).unwrap(), Channel::new(6).unwrap());
+        let organ = MidiTrack {
+            name: "Organ".into(),
+            drums: false,
+            notes: vec![note(36, 0.0, 4.0, 90).on(second), note(60, 0.0, 1.0, 100), note(60, 0.0, 2.0, 80).on(sixth)],
+            controllers: vec![
+                curve(ControllerKind::EXPRESSION, &[step(0.0, 1.0)]),
+                ControllerCurve {
+                    channel: sixth,
+                    ..curve(ControllerKind::PitchBend, &[step(1.0, 1.0), step(2.0, 0.0)])
+                },
+            ],
+        };
+        // A part wholly on another channel, as a file of another program
+        // has one for every instrument.
+        let bass = MidiTrack {
+            name: "Bass".into(),
+            drums: false,
+            notes: vec![note(28, 0.0, 1.0, 100).on(sixth)],
+            controllers: vec![ControllerCurve { channel: sixth, ..curve(ControllerKind::SUSTAIN, &[step(0.0, 1.0)]) }],
+        };
+        let drums =
+            MidiTrack { name: "Kit".into(), drums: true, notes: vec![note(36, 0.0, 0.25, 110)], controllers: vec![] };
+        let file = MidiFile { tracks: vec![organ.clone(), bass.clone(), drums.clone()], ..MidiFile::default() };
+        let bytes = write(&file);
+        // Written on the channels they have: the second and sixth of the
+        // organ, the bass's sixth, and the drums on the tenth.
+        let statuses = |status: u8| bytes.windows(3).filter(|w| w[0] == status && w[2] > 0 && w[1] < 128).count();
+        assert!(statuses(0x91) >= 1 && statuses(0x95) >= 2 && statuses(0x99) >= 1 && statuses(0xE5) >= 1);
+
+        let read = parse(&bytes).unwrap();
+        assert_eq!(read.tracks[0].notes, organ.notes, "a part on several channels keeps them");
+        let curves: Vec<(ControllerKind, u8)> =
+            read.tracks[0].controllers.iter().map(|curve| (curve.controller, curve.channel.number())).collect();
+        assert_eq!(curves, [(ControllerKind::EXPRESSION, 1), (ControllerKind::PitchBend, 6)], "and so do its curves");
+        assert_eq!(read.tracks[0].controllers[1].value_at(1.5), 1.0);
+        assert_eq!((read.tracks[0].name.as_str(), read.tracks[0].drums), ("Organ", false));
+        // The channel only said which part it was: it is the first here.
+        assert_eq!(read.tracks[1].notes, [note(28, 0.0, 1.0, 100)]);
+        let curves: Vec<(ControllerKind, u8)> =
+            read.tracks[1].controllers.iter().map(|curve| (curve.controller, curve.channel.number())).collect();
+        assert_eq!(curves, [(ControllerKind::SUSTAIN, 1)]);
+        assert_eq!(read.tracks[2], drums);
     }
 }

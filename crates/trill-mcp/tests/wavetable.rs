@@ -453,7 +453,7 @@ fn a_sawtooth_against_the_installed_synths() {
                 model.params.insert("env1_sustain".into(), 1.0);
             }
             let clip = project.add_midi_clip(track, "note", 0.0, 8.0).unwrap();
-            let note = trill_core::Note { pitch, start: 0.0, length: 7.5, velocity: 100 };
+            let note = trill_core::Note { pitch, start: 0.0, length: 7.5, velocity: 100, ..Default::default() };
             project.clip_mut(clip).unwrap().add_notes(&[note]).unwrap();
             let options = trill_engine::RenderOptions { sample_rate: 48_000, ..trill_engine::RenderOptions::default() };
             let out = trill_engine::render::render(&project, &factory, &options).unwrap();
