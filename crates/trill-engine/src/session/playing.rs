@@ -27,7 +27,7 @@ use super::{Session, SessionError, UndoGroup};
 use crate::compile::StandIns;
 use crate::engine::{Applied, Health, Message, RecordPhase};
 use crate::host::{AudioConfig, AudioDevices, StreamFailure};
-use crate::live::{LiveSender, MAX_LIVE_TRACKS, TrackSet};
+use crate::live::{Captured, LiveSender, MAX_LIVE_TRACKS, TrackSet};
 use std::time::{Duration, Instant};
 use trill_core::device::EventKind;
 use trill_core::{TrackId, TrackKind};
@@ -37,6 +37,10 @@ pub const MAX_COUNT_IN_BARS: u32 = 8;
 /// How long stopping waits for the audio thread to say where the take
 /// ended, before ending it where the song was last known to be.
 const STOP_WAIT: Duration = Duration::from_millis(400);
+/// How long it then waits for the last of a take's audio to be handed
+/// over: sound takes a moment to go round, and what was sung to the end
+/// of the song comes in that much after it.
+const AUDIO_WAIT: Duration = Duration::from_millis(1500);
 
 /// Whether a take is being recorded.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -81,11 +85,23 @@ pub(super) struct Playing {
     sent: Option<TrackSet>,
     count_in_bars: u32,
     take: Option<ActiveTake>,
+    /// Whether the take that is going on is punched in. Said here and
+    /// not asked of the take, which is out of its place while what it
+    /// has is written into the song, and the song is compiled then.
+    punched: bool,
     /// The number of the last take started.
     takes: u32,
     last_take: Vec<TakeClip>,
     /// Bumped whenever the audio stream changes.
     audio_revision: u64,
+    /// When the song was last said to have changed because audio is
+    /// being recorded.
+    audio_noted: Option<Instant>,
+    /// When the song was stopped under the take that is going on: the
+    /// take is over when the audio thread has said where it ended and the
+    /// last of its sound has come in, or when that has been waited for
+    /// long enough.
+    stopping: Option<Instant>,
 }
 
 impl Playing {
@@ -128,7 +144,14 @@ impl Session {
     /// after, as when the song was opened ([`Session::arriving`]): the
     /// song stands with what is made in no time until they are there, and
     /// play is there to be pressed meanwhile.
+    ///
+    /// Which device is recorded from is changed only by the user's own
+    /// hand while anything keeps the input live: what a hand let live is
+    /// the device that was the input then. Asked by anybody else, the
+    /// rest of `config` is taken and the input is left as it is, with a
+    /// sentence ([`Session::take_input_note`]).
     pub fn set_audio_config(&mut self, config: AudioConfig) {
+        let config = self.hold_the_input_device(config);
         self.before_audio_change();
         let position = self.engine.position();
         // What the stream that goes leaves behind is taken down after the
@@ -159,9 +182,18 @@ impl Session {
 
     /// What the stream is about to go through: a take ends, and plugins
     /// hand over their state in case they have to be created again.
+    /// The audio streams are not what they were: whoever shows them
+    /// reads them again.
+    pub(super) fn playing_audio_changed(&mut self) {
+        self.playing.audio_revision += 1;
+    }
+
     fn before_audio_change(&mut self) {
         if self.playing.take.is_some() {
-            self.engine.send(Message::Stop);
+            // The take ends there; the song is not stopped for it. Where
+            // the stream that comes runs at the rate of the one that goes
+            // the song plays on through it.
+            self.end_take_early("the audio device changed: the take ends there, whole up to that moment");
             self.finish_take(true);
         }
         // Nothing may sound on into the new stream: keys that come up
@@ -212,6 +244,9 @@ impl Session {
             return;
         }
         log::warn!("the audio thread missed messages while it was away; telling it again");
+        // An input that was closed again because it could not be told of
+        // it is opened now, if it is still needed.
+        self.input_is_to_be_tried();
         self.release_everything_played();
         self.compile_and_swap();
         let mut values = Vec::new();
@@ -233,6 +268,8 @@ impl Session {
 
     fn after_audio_change(&mut self, applied: Applied, position: f64) {
         self.playing.audio_revision += 1;
+        // The input was read for the stream that went.
+        self.input_is_to_be_opened_again();
         self.audio.media().set_loader_rate(Some(self.engine.sample_rate()));
         if applied.reset {
             // The audio thread starts from nothing: every device is made
@@ -299,11 +336,23 @@ impl Session {
     /// keyboard was holding on the track. Only tracks that hold clips can
     /// be armed (not groups or returns), and at most
     /// [`MAX_LIVE_TRACKS`] at once.
+    ///
+    /// Arming a track that records an input opens the input, which only
+    /// the user's own hand does ([`crate::hand::by_hand`]): asked by
+    /// anybody else it is refused, and the track is as it was.
     pub fn set_armed(&mut self, track: TrackId, armed: bool) -> Result<(), SessionError> {
         let found = self.project.track(track)?;
+        let found_input = found.input;
         if !armed {
             self.playing.armed.retain(|id| *id != track);
         } else if !self.playing.armed.contains(&track) {
+            if found_input.is_some() && !crate::hand::is_by_hand() {
+                return Err(SessionError::Recording(format!(
+                    "{track} ({}) records an input of the audio device, and arming it opens the microphone: the user \
+                     arms it themselves, with the track's arm button. Once it is armed it can be recorded",
+                    found.name
+                )));
+            }
             if found.kind != TrackKind::Normal {
                 let kind = if found.kind == TrackKind::Group { "group" } else { "return" };
                 return Err(SessionError::Recording(format!(
@@ -318,8 +367,31 @@ impl Session {
             }
             self.playing.armed.push(track);
         }
+        // Whose hand it was is what lets the input be opened for it.
+        self.hold_to_the_hand(&|_| true);
         self.send_live_targets();
+        // A track that records an input is heard through its devices
+        // while it is armed, where it says so: the graph has that. And
+        // the input is opened, or closed, at the next round of chores.
+        if found_input.is_some_and(|input| input.monitor == trill_core::Monitoring::Armed) {
+            self.compile_and_swap();
+        }
+        if found_input.is_some() {
+            // Without waiting for the time a failed attempt is left alone.
+            self.input_is_to_be_tried();
+        }
         Ok(())
+    }
+
+    /// Disarms `tracks` without a word: for the rule that holds the input
+    /// to the user's hand, which says its own.
+    pub(super) fn playing_disarm(&mut self, tracks: &[TrackId]) {
+        self.playing.armed.retain(|id| !tracks.contains(id));
+    }
+
+    /// Nothing is armed any more: another song is open.
+    pub(super) fn disarm_all(&mut self) {
+        self.playing.armed.clear();
     }
 
     /// The armed tracks, in the order they were armed.
@@ -348,7 +420,10 @@ impl Session {
     /// not be heard.
     pub fn live_tracks(&self) -> Vec<TrackId> {
         let normal = |track: &TrackId| self.project.track(*track).is_ok_and(|found| found.kind == TrackKind::Normal);
-        let armed: Vec<TrackId> = self.playing.armed.iter().copied().filter(normal).collect();
+        // An armed track that records an input of the audio device records
+        // that, and not what a keyboard plays.
+        let keyed = |track: &TrackId| self.project.track(*track).is_ok_and(|found| found.input.is_none());
+        let armed: Vec<TrackId> = self.playing.armed.iter().copied().filter(normal).filter(keyed).collect();
         if armed.is_empty() { self.playing.selected.filter(normal).into_iter().collect() } else { armed }
     }
 
@@ -435,20 +510,39 @@ impl Session {
         let bar = meter.signature_at(position).beats_per_bar();
         let tempo = self.project.tempo_map().tempo_at(position);
         let region = self.project.loop_region;
-        let loop_region = region.enabled.then_some((region.start, region.end));
+        // A take that is punched in plays through the loop's stretch and
+        // records inside it; any other goes round a loop that is on.
+        let punch = self.punch_now();
+        let loop_region = (region.enabled && punch.is_none()).then_some((region.start, region.end));
         self.playing.takes = self.playing.takes.wrapping_add(1);
         let id = self.playing.takes;
+        // The tracks that record an input: their files are begun, and the
+        // input is opened, before anything else is. What cannot be says so.
+        self.begin_audio_take(id, &tracks, punch)?;
         let group = self.begin_group();
         // In the journal, what is played is one step however often it is
         // written down while it is played.
         self.begin_run("Recorded a take");
-        self.playing.take =
-            Some(ActiveTake { take: Take::new(id, &tracks, loop_region, bar, tempo).in_bars(meter), group });
+        // Notes are written on the tracks that record a keyboard.
+        let keyed: Vec<TrackId> = tracks
+            .iter()
+            .copied()
+            .filter(|track| self.project.track(*track).is_ok_and(|found| found.input.is_none()))
+            .collect();
+        let take = Take::new(id, &keyed, loop_region, bar, tempo).in_bars(meter).punched(punch);
+        self.playing.take = Some(ActiveTake { take, group });
+        self.playing.punched = punch.is_some();
         self.playing.last_take.clear();
+        if punch.is_some() && region.enabled {
+            // The graph that plays does not go round from here on: for a
+            // take of notes as for one of an input.
+            self.compile_and_swap();
+        }
         self.engine.send(Message::Record {
             take: id,
             tracks: TrackSet::of(&tracks),
             count_in_beats: self.playing.count_in_bars as f64 * bar,
+            punch,
         });
         Ok(())
     }
@@ -484,6 +578,12 @@ impl Session {
         self.playing.take.is_some()
     }
 
+    /// Whether a take that is punched in is being recorded, of notes or of
+    /// an input: the song then plays through and does not go round.
+    pub(super) fn punching(&self) -> bool {
+        self.playing.punched
+    }
+
     /// The clips the last take wrote into: empty until a take has ended,
     /// and if nothing was played in it.
     pub fn last_take(&self) -> &[TakeClip] {
@@ -500,15 +600,49 @@ impl Session {
             return;
         }
         self.read_take();
+        // Audio that is being recorded is work that is not saved yet, and
+        // more of it every moment: the song counts as changed, so that a
+        // copy kept for safety is made of it with the take in it.
+        if self.audio_is_rolling() && self.playing.audio_noted.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+            self.playing.audio_noted = Some(Instant::now());
+            self.revision += 1;
+        }
         // The clips keep up with the song while nothing is played.
         let heard = self.engine.position() - self.latency_beats();
         if let Some(active) = &mut self.playing.take {
             active.take.heard(heard);
         }
         self.write_take();
-        if self.playing.take.as_ref().is_some_and(|active| active.take.is_stopped()) {
+        // Over once the song has stopped and the last of the take's audio
+        // has been handed over. Or when the song was stopped and the audio
+        // thread never said so: the take then ends where the song was last
+        // known to be, with what there is of its sound.
+        let over = self.playing.take.as_ref().is_some_and(|active| active.take.is_stopped()) && self.recording.ended();
+        let given_up = self.playing.stopping.is_some_and(|at| at.elapsed() >= STOP_WAIT + AUDIO_WAIT);
+        if over || given_up {
             self.finish_take(false);
         }
+    }
+
+    /// The song was told to stop under a take. Where the take ended is the
+    /// audio thread's to say, and what was sung to the last of the song is
+    /// on its way in for as long as sound takes to go round: the take is
+    /// over when both have come, at a round of housekeeping
+    /// ([`Session::is_recording`] says when), and nobody waits for that
+    /// with the session held.
+    ///
+    /// Where the audio thread only runs when it is told to (a host that is
+    /// driven by hand, as tests have them), there is nobody to keep
+    /// waiting and no later moment unless one is made: the take is over
+    /// when this returns.
+    pub(super) fn end_take_when_it_is_in(&mut self) {
+        if self.playing.take.is_none() {
+            return;
+        }
+        if !self.engine.runs_by_itself() {
+            return self.finish_take(true);
+        }
+        self.playing.stopping.get_or_insert_with(Instant::now);
     }
 
     /// The output latency in beats, at the tempo the song has where it is.
@@ -518,8 +652,14 @@ impl Session {
     }
 
     fn read_take(&mut self) {
-        let Some(active) = &mut self.playing.take else { return };
         while let Some(captured) = self.engine.next_captured() {
+            // What is said of the take's audio is the session's to keep.
+            match captured {
+                Captured::Began { take } => self.audio_take_began(take),
+                Captured::Audio { at, mark } => self.audio_mark(at, mark),
+                _ => {}
+            }
+            let Some(active) = &mut self.playing.take else { continue };
             active.take.handle(captured);
         }
     }
@@ -538,6 +678,7 @@ impl Session {
     /// project, and the whole is one undo step. With `wait`, the audio
     /// thread is given a moment to say exactly where the take stopped.
     pub(super) fn finish_take(&mut self, wait: bool) {
+        self.playing.stopping = None;
         if self.playing.take.is_none() {
             return;
         }
@@ -547,6 +688,14 @@ impl Session {
             while self.playing.take.as_ref().is_some_and(|active| !active.take.is_stopped())
                 && Instant::now() < deadline
             {
+                self.engine.pump();
+                std::thread::sleep(Duration::from_millis(1));
+                self.read_take();
+            }
+            // What was sung to the last of the song is still on its way
+            // in: a moment more, until the audio thread has handed it over.
+            let deadline = Instant::now() + AUDIO_WAIT;
+            while !self.recording.ended() && Instant::now() < deadline {
                 self.engine.pump();
                 std::thread::sleep(Duration::from_millis(1));
                 self.read_take();
@@ -562,16 +711,24 @@ impl Session {
         }
         self.playing.take = Some(active);
         self.write_take();
+        // The take's audio is put beside its tracks, in the same step.
+        let punched = std::mem::take(&mut self.playing.punched);
+        self.land_audio_take();
         if let Some(active) = self.playing.take.take() {
             self.playing.last_take = active.take.clips();
             self.end_run();
             self.end_group(active.group);
+        }
+        if punched {
+            // The song goes round its loop again.
+            self.compile_and_swap();
         }
     }
 
     /// Drops a take without writing it: the project it belonged to is
     /// being replaced.
     pub(super) fn abandon_take(&mut self) {
+        (self.playing.punched, self.playing.stopping) = (false, None);
         if let Some(active) = self.playing.take.take() {
             self.end_run();
             self.end_group(active.group);

@@ -109,6 +109,56 @@ pub struct StreamFormat {
     pub exclusive: bool,
 }
 
+/// One attempt to open a device to record from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputRequest {
+    /// `None` for the system's default input.
+    pub device: Option<String>,
+    /// Take the device for this program alone, at `sample_rate` and with
+    /// buffers of `buffer_size`. A device that is shared runs at the rate
+    /// and the buffer the system has it at, whatever is asked.
+    pub exclusive: bool,
+    pub sample_rate: Option<u32>,
+    pub buffer_size: Option<u32>,
+    /// The device the engine plays through, by name, if it plays through
+    /// one: a host says whether the input counts time by the same clock
+    /// ([`InputFormat::shares_clock`]).
+    pub output: Option<String>,
+}
+
+/// What an input turned out to be.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputFormat {
+    /// The device's name, as [`AudioDevice::name`] has it.
+    pub device: String,
+    /// The rate it runs at, which need not be the engine's: what comes in
+    /// is brought into the engine's clock whatever it is
+    /// ([`capture`](crate::capture)).
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// How many frames it hands over at a time.
+    pub buffer_frames: u32,
+    /// How many of its frames the device says lie between its microphone
+    /// and a buffer it hands over. What it does not say is found by
+    /// measuring ([`Session::measure_latency`](crate::Session::measure_latency)).
+    pub latency_frames: u32,
+    pub exclusive: bool,
+    /// Whether the input counts time by the clock the output counts by:
+    /// the two are one piece of hardware. Then a frame of the one is a
+    /// frame of the other for as long as both run, and nothing has to be
+    /// found out from time stamps but where the two began. Two devices
+    /// have two clocks, whatever rate each says it runs at.
+    pub shares_clock: bool,
+}
+
+/// An input a host has opened. Dropping `handle` closes it; the host's
+/// thread has handed over its last buffer by the time the drop returns.
+pub struct OpenInput {
+    pub format: InputFormat,
+    pub handle: StreamHandle,
+    pub(crate) link: Arc<crate::capture::Link>,
+}
+
 /// Why a device could not be opened.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OpenError {
@@ -116,6 +166,8 @@ pub enum OpenError {
     NotFound(String),
     #[error("the system has no audio output device")]
     NoDevice,
+    #[error("the system has no audio input device")]
+    NoInput,
     /// The device is there, but not in the way that was asked for.
     #[error("{0}")]
     Refused(String),
@@ -198,6 +250,17 @@ pub trait AudioHost: Send + Sync {
         on_failure: FailureCallback,
     ) -> Result<OpenStream, OpenError>;
 
+    /// Opens a device to record from and starts it. From then on the
+    /// host's thread hands every buffer the device gives to the
+    /// [`Sink`](crate::capture::Sink) the host made for it
+    /// ([`capture::link`](crate::capture)), with the time on this host's
+    /// clock at which the buffer's first frame was heard; `on_failure` is
+    /// called if the stream stops working. A host without inputs refuses.
+    fn open_input(&self, request: &InputRequest, on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+        let _ = (request, on_failure);
+        Err(OpenError::NoInput)
+    }
+
     /// Called while the engine waits for the audio thread to do something.
     /// A real host has an audio thread of its own and does nothing here; a
     /// host driven by hand renders a buffer, so that waiting ends.
@@ -223,7 +286,12 @@ pub struct NullHost {
     sample_rate: u32,
     block_frames: usize,
     audio_priority: bool,
+    /// How many channels its input has; none unless it was given one.
+    input_channels: u16,
 }
+
+/// The name [`NullHost`]'s input reports as its device.
+pub(crate) const NULL_INPUT: &str = "stand-in input";
 
 /// The name [`NullHost`]'s stream reports as its device.
 pub(crate) const NULL_DEVICE: &str = "none";
@@ -234,7 +302,19 @@ const NULL_CATCH_UP: Duration = Duration::from_millis(100);
 
 impl NullHost {
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate: sample_rate.max(1), block_frames: NULL_BLOCK_FRAMES, audio_priority: false }
+        Self {
+            sample_rate: sample_rate.max(1),
+            block_frames: NULL_BLOCK_FRAMES,
+            audio_priority: false,
+            input_channels: 0,
+        }
+    }
+
+    /// The same host with an input of `channels` channels that hears a
+    /// quiet tone, handed over by a thread of its own as a device's is:
+    /// for measuring what an input costs a song without a microphone.
+    pub fn with_input(self, channels: u16) -> Self {
+        Self { input_channels: channels.clamp(1, crate::capture::MAX_INPUT_CHANNELS as u16), ..self }
     }
 
     /// A host that asks for `block_frames` frames at a time where nothing
@@ -243,7 +323,12 @@ impl NullHost {
     /// device's does. For measuring whether a song is played in time
     /// without a device to play it on.
     pub fn like_a_device(sample_rate: u32, block_frames: usize) -> Self {
-        Self { sample_rate: sample_rate.max(1), block_frames: block_frames.clamp(16, 8192), audio_priority: true }
+        Self {
+            sample_rate: sample_rate.max(1),
+            block_frames: block_frames.clamp(16, 8192),
+            audio_priority: true,
+            input_channels: 0,
+        }
     }
 }
 
@@ -295,6 +380,56 @@ impl AudioHost for NullHost {
             exclusive: false,
         };
         Ok(OpenStream { format, handle: Box::new(NullStream { quit, thread: Some(thread) }) })
+    }
+
+    fn open_input(&self, _request: &InputRequest, _on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+        if self.input_channels == 0 {
+            return Err(OpenError::NoInput);
+        }
+        let (sample_rate, block_frames, channels) = (self.sample_rate, self.block_frames, self.input_channels);
+        let audio_priority = self.audio_priority;
+        let (mut sink, link) = crate::capture::link(f64::from(sample_rate), usize::from(channels));
+        let quit = Arc::new(AtomicBool::new(false));
+        let stop = quit.clone();
+        let thread = std::thread::Builder::new()
+            .name("audio-null-input".into())
+            .spawn(move || {
+                if audio_priority {
+                    priority::AudioPriority::raise_for_good();
+                }
+                let period = Duration::from_secs_f64(block_frames as f64 / f64::from(sample_rate));
+                let period_ns = period.as_nanos() as u64;
+                // A tone a tenth of full scale: something to add up, and
+                // nothing anyone hears.
+                let step = std::f64::consts::TAU * 220.0 / f64::from(sample_rate);
+                let (mut next, mut handed) = (Instant::now(), 0u64);
+                while !stop.load(Ordering::Relaxed) {
+                    let from = handed;
+                    // The first frame of a buffer was heard a buffer ago.
+                    sink.push(now_ns().saturating_sub(period_ns), block_frames, |frame, _| {
+                        (0.1 * ((from + frame as u64) as f64 * step).sin()) as f32
+                    });
+                    handed += block_frames as u64;
+                    next += period;
+                    let now = Instant::now();
+                    if next > now {
+                        std::thread::sleep(next - now);
+                    } else if now - next > NULL_CATCH_UP {
+                        next = now;
+                    }
+                }
+            })
+            .map_err(|error| OpenError::Failed(format!("cannot start a thread: {error}")))?;
+        let format = InputFormat {
+            device: NULL_INPUT.into(),
+            sample_rate,
+            channels,
+            buffer_frames: block_frames as u32,
+            latency_frames: 0,
+            exclusive: false,
+            shares_clock: false,
+        };
+        Ok(OpenInput { format, handle: Box::new(NullStream { quit, thread: Some(thread) }), link })
     }
 }
 

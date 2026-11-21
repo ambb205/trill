@@ -58,6 +58,9 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
             envelopes::show(ui, cx, geometry, &response, lane, geometry.row_rect(row), geometry.lanes);
         }
     }
+    // The takes kept beside the tracks, where they are unfolded, and the
+    // take that is being recorded.
+    super::takes::show(ui, cx, geometry);
     paint_overlays(ui, cx, geometry, &response);
     interact(ui, cx, geometry, &response);
     sound_drop(ui, cx, geometry);
@@ -75,7 +78,7 @@ fn on_envelope(geometry: &Geometry, position: Pos2) -> bool {
 fn track_at(cx: &Cx, geometry: &Geometry, position: Pos2) -> Option<(TrackId, TrackKind)> {
     let index = match geometry.row_at(position.y)?.kind {
         RowKind::Track { index, .. } => index,
-        RowKind::Lane { track, .. } => track,
+        RowKind::Lane { track, .. } | RowKind::Take { track, .. } => track,
     };
     let track = &cx.snap.project.tracks[index];
     Some((track.id, track.kind))
@@ -519,7 +522,7 @@ fn band(cx: &mut Cx, geometry: &Geometry, pointer: Pos2, free: bool, anchor: Bea
     let crossed: Vec<usize> = crossed
         .filter_map(|row| match row.kind {
             RowKind::Track { index, .. } => Some(index),
-            RowKind::Lane { .. } => None,
+            RowKind::Lane { .. } | RowKind::Take { .. } => None,
         })
         .collect();
     let mut selection = kept;
@@ -600,7 +603,7 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
             Some(row) => {
                 let index = match row.kind {
                     RowKind::Track { index, .. } => index,
-                    RowKind::Lane { track, .. } => track,
+                    RowKind::Lane { track, .. } | RowKind::Take { track, .. } => track,
                 };
                 let track = &tracks[index];
                 if track.kind != TrackKind::Normal {
@@ -634,7 +637,7 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
         Some(row) => {
             let index = match row.kind {
                 RowKind::Track { index, .. } => index,
-                RowKind::Lane { track, .. } => track,
+                RowKind::Lane { track, .. } | RowKind::Take { track, .. } => track,
             };
             let track = &tracks[index];
             if track.kind != TrackKind::Normal {
@@ -678,7 +681,7 @@ fn preset_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
         Some(row) => {
             let index = match row.kind {
                 RowKind::Track { index, .. } => index,
-                RowKind::Lane { track, .. } => track,
+                RowKind::Lane { track, .. } | RowKind::Take { track, .. } => track,
             };
             let Some(track) = cx.snap.project.tracks.get(index).map(|track| track.id) else { return };
             if crate::ui::sound_presets::offer_track(cx, track)

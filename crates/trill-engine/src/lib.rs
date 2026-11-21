@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod apart;
+pub mod capture;
 pub mod character;
 mod clock;
 pub mod compile;
@@ -15,6 +16,7 @@ mod crew;
 pub mod engine;
 mod glide;
 pub mod graph;
+pub mod hand;
 pub mod host;
 pub mod instruments;
 pub mod journal;
@@ -24,6 +26,7 @@ pub mod probe;
 pub mod processor;
 mod queue;
 pub mod ready;
+pub mod recorder;
 pub mod render;
 pub mod saved;
 pub mod scripted;
@@ -35,18 +38,22 @@ pub mod team;
 
 pub use analysis::AudioStats;
 pub use compile::Problem;
-pub use engine::{AudioBackend, AudioSetup, Engine, EngineError, Load, Patience, StreamInfo, usual_play_threads};
+pub use engine::{
+    AudioBackend, AudioSetup, Engine, EngineError, InputInfo, Load, Patience, StreamInfo, usual_play_threads,
+};
 pub use graph::{Cost, MAX_BLOCK, Meter};
 pub use host::{AudioConfig, AudioDevice, AudioDevices, AudioHost};
 pub use instruments::InstrumentKnowledge;
 pub use live::LiveSender;
 pub use processor::Processor;
+pub use recorder::{COLUMN_FRAMES, Growing};
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered, Watch};
 pub use saved::{Change as PresetChange, Saved, SavedPresets, SavedSound};
 pub use session::{
-    Added, Arriving, Costs, Given, KeepingUp, ListedSound, MAX_COUNT_IN_BARS, Made, ParamState, ProbeTarget,
-    RecordState, RecordStatus, SampleFile, SavedAsSound, Session, SessionError, Shortfall, SilentInstrument, TakeClip,
-    TrackCost, TransportStatus, file_facts, listed_sounds, sound_after,
+    Added, Arriving, Bin, ComingBeside, Correction, Costs, Given, GrowingTake, InputClock, InputStatus, KeepingUp,
+    ListedSound, MAX_COUNT_IN_BARS, Made, Measured, Measurement, ParamState, ProbeTarget, RecordState, RecordStatus,
+    Recorded, RecordedTake, RecordingLatency, Removed, SampleFile, SavedAsSound, Session, SessionError, Shortfall,
+    SilentInstrument, TakeClip, TrackCost, TransportStatus, file_facts, listed_sounds, sound_after, spelled_path,
 };
 pub use sources::AudioSources;
 

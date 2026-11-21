@@ -18,6 +18,7 @@ pub mod midi_file;
 pub mod pitch;
 pub mod presets;
 pub mod project;
+pub mod takes;
 pub mod tempo;
 pub mod time;
 mod time_ops;
@@ -35,6 +36,7 @@ pub use project::{
     AudioLoop, AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion,
     Marker, Master, Note, Project, Reference, Segment, Send, SongKey, Track, TrackKind, WarpMode,
 };
+pub use takes::{Monitoring, Take, TrackInput};
 pub use tempo::{Bar, MeterChange, MeterMap, TempoChange, TempoMap};
 pub use time::{Beats, TimeSignature};
 pub use time_ops::{PasteMode, TimeExcerpt};

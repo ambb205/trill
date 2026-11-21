@@ -13,7 +13,7 @@
 use super::arrangement::{self, display_order};
 use super::automation::{self, Hold};
 use super::state::{Cx, DetailTab};
-use super::{colors, editors, recording, units, widgets};
+use super::{colors, editors, inputs, recording, units, widgets};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Ui, pos2, vec2};
 use trill_core::{AutomationTarget, Device, Track, TrackId, TrackKind};
 use trill_noir::{Chip, Fader, Icon, fade, paint, text};
@@ -42,10 +42,16 @@ enum Channel<'a> {
     Master,
 }
 
+/// Width of the meter of what a track's input hears, beside its fader.
+const INPUT_METER_WIDTH: f32 = 7.0;
+
 /// How much of a strip's height each part gets. One plan for the whole
 /// row, so the strips' controls line up.
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Budget {
+    /// Whether every strip keeps a row for what its track records: there
+    /// is one as soon as any track of the song records an input.
+    inputs: bool,
     /// Rows for devices: as many as the longest chain needs, if they fit.
     devices: usize,
     /// Rows for sends, of the return tracks there are.
@@ -65,7 +71,7 @@ fn budget(height: f32, row: f32, devices: usize, sends: usize, extras: f32) -> B
     left -= sends as f32 * row;
     let devices = fits(left, devices.min(MAX_DEVICES));
     left -= devices as f32 * row;
-    Budget { devices, sends, fader: (MIN_FADER + left).max(0.0) }
+    Budget { inputs: false, devices, sends, fader: (MIN_FADER + left).max(0.0) }
 }
 
 /// Width of each track's strip when `count` of them share `width`.
@@ -91,8 +97,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let chains = tracks.iter().map(|track| track.devices.len()).chain([cx.snap.project.master.devices.len()]);
     let returns = tracks.iter().filter(|track| track.kind == TrackKind::Return).count();
     let under_name = area.height() - (COLOR_BAR + 3.0 + NAME_ROW - 1.0 + PAD);
-    let extras = READOUT_ROW + 2.0 * row + 4.0;
-    let shares = budget(under_name, row, chains.max().unwrap_or(0), returns, extras);
+    // A song in which something records an input has a row for that on
+    // every strip; one that records only keyboards looks as it always did.
+    let inputs = tracks.iter().any(|track| track.input.is_some());
+    let extras = READOUT_ROW + 2.0 * row + 4.0 + if inputs { row } else { 0.0 };
+    let shares = Budget { inputs, ..budget(under_name, row, chains.max().unwrap_or(0), returns, extras) };
 
     widgets::place(ui, rest, "strips", egui::Layout::left_to_right(egui::Align::Min), |ui| {
         ui.set_clip_rect(rest.intersect(ui.clip_rect()));
@@ -186,6 +195,16 @@ fn strip(ui: &mut Ui, cx: &mut Cx, channel: Channel, rect: Rect, member: bool, s
     // that what the strips share lines up across the mixer.
     let mut top = name_row.bottom() + 3.0;
     let line = |top: f32| Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), bar));
+    if shares.inputs {
+        // What the track records and how it is heard: first, where the
+        // signal comes in.
+        if let Channel::Track(track) = channel
+            && inputs::can_record(track)
+        {
+            inputs::strip_row(ui, cx, track, line(top), id.with("input"), theme.quiet_on(surface));
+        }
+        top += row;
+    }
     device_chips(ui, cx, channel, devices, shares.devices, top, inner, id);
     top += shares.devices as f32 * row;
     if let Channel::Track(track) = channel {
@@ -212,6 +231,16 @@ fn strip(ui: &mut Ui, cx: &mut Cx, channel: Channel, rect: Rect, member: bool, s
             vec2(METER_WIDTH, fader_area.height()),
         );
         let volume = fader(ui, cx, channel, fader_rect, id.with("volume"));
+        // What the track's input hears, at the fader's other side.
+        if let Channel::Track(track) = channel
+            && let Some(input) = track.input.filter(|_| inputs::can_record(track))
+        {
+            let rect = Rect::from_min_size(
+                pos2(fader_rect.left() - 5.0 - INPUT_METER_WIDTH, fader_area.top()),
+                vec2(INPUT_METER_WIDTH, fader_area.height()),
+            );
+            inputs::meter(ui, cx, track, input, rect, id.with("input-level"));
+        }
         let meter = match channel {
             Channel::Track(track) => cx.live.track_meter(track.id),
             Channel::Master => cx.live.master,

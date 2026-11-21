@@ -262,6 +262,13 @@ pub(crate) struct AudioRegion {
     /// its clip.
     pub seam_before: bool,
     pub seam_after: bool,
+    /// Whether the clip is faded across the clip that ends where it
+    /// begins, or the one that begins where it ends: two different
+    /// recordings, which keep their loudness across the seam when one
+    /// goes as the sine of what the other comes as. The region reaches
+    /// half the fade into the other's time.
+    pub cross_before: bool,
+    pub cross_after: bool,
     /// The clip's fade lengths in beats. The processor never fades an edge
     /// faster than its own click guard, unless the edge joins a neighbour.
     pub fade_in: f64,
@@ -527,6 +534,12 @@ pub(crate) struct TrackState {
     pub lanes_changed: bool,
     /// Set to have the next block let go of what the keyboard holds.
     pub release_routed: bool,
+    /// How far the input the track records is let through to its devices
+    /// (monitoring), and how far what its clips play is: nothing of that
+    /// while a take is recorded over it. Each a [`Gate`], so that neither
+    /// comes or goes with a click.
+    pub monitor: Gate,
+    pub under: Gate,
     /// Whether notes were sounding in the block before, whether anything
     /// has been heard since they began, and for how many frames nothing
     /// has: see [`Meter::unanswered_frames`].
@@ -553,6 +566,8 @@ impl Default for TrackState {
             rechoose: false,
             lanes_changed: false,
             release_routed: false,
+            monitor: Gate::default(),
+            under: Gate::default(),
             had_notes: false,
             answered: true,
             unanswered: 0,
@@ -623,8 +638,20 @@ impl TrackState {
     }
 }
 
+/// What a track takes of the audio device's input: which channels, the
+/// left and the right of a pair (one alone is in the middle), and whether
+/// they are heard through the track's devices right now.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputTap {
+    pub left: usize,
+    pub right: Option<usize>,
+    pub heard: bool,
+}
+
 pub(crate) struct TrackNode {
     pub id: TrackId,
+    /// The input of the audio device the track records, if it records one.
+    pub input: Option<InputTap>,
     /// Sorted by start.
     pub notes: Vec<NoteEvent>,
     /// The keys among the notes that choose how the notes after them are
@@ -763,6 +790,10 @@ pub struct Graph {
     /// one that was opened, or begun. It takes over nothing that was
     /// playing ([`Graph::adopt`]).
     pub(crate) another_song: bool,
+    /// Which channels of the audio device's input the graph's tracks let
+    /// through to their devices, a bit each: what is read of the input
+    /// while nothing is recorded.
+    pub(crate) inputs: u32,
 }
 
 impl Graph {
@@ -785,6 +816,7 @@ impl Graph {
             moves_params: false,
             rounds: None,
             another_song: false,
+            inputs: 0,
         }
     }
 

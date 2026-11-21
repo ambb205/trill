@@ -61,7 +61,7 @@ pub use natural::natural_cmp;
 pub use scan::{MissingRoot, ScanPhase, ScanSummary};
 pub use search::Query;
 pub use settings::{
-    AudioSettings, JournalSettings, LibrarySettings, Loaded, MidiSettings, SaveError, Settings, StudySettings,
-    UiSettings, cache_dir, config_dir, data_dir,
+    AudioSettings, JournalSettings, LibrarySettings, Loaded, MidiSettings, RoundTrip, SaveError, Settings,
+    StudySettings, UiSettings, cache_dir, config_dir, data_dir,
 };
 pub use tags::{Tag, TagRule, Tags, VOCABULARY};

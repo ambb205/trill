@@ -627,6 +627,7 @@ impl Runtime {
                 source_tempo: piece.source_tempo,
                 transpose: plan.semitones,
                 looped: None,
+                ..Default::default()
             };
             song.add_audio_clip(track, plan.name.clone(), piece.start, piece.length, content)
                 .map_err(|error| error.to_string())?;
@@ -695,6 +696,7 @@ impl Runtime {
                             transpose: plan.semitones,
                             looped: rounds
                                 .then_some(trill_core::AudioLoop { start_seconds: piece.offset_seconds, seconds }),
+                            ..Default::default()
                         };
                         let start = take.at + f64::from(round) * plan.length + piece.start;
                         let length = if rounds { piece.length * f64::from(times) } else { piece.length };
@@ -764,6 +766,7 @@ impl Runtime {
                     source_tempo: None,
                     transpose: 0.0,
                     looped: None,
+                    ..Default::default()
                 };
                 let (track, clip) = session
                     .edit(|project| {
@@ -1040,6 +1043,7 @@ impl Runtime {
                     source_tempo: Some(heard.grid.bpm).filter(|bpm| *bpm > 0.0),
                     transpose: 0.0,
                     looped: None,
+                    ..Default::default()
                 };
                 let track = project.add_track(format!("Reference: {title}"));
                 let clip = project.add_audio_clip(track, title.clone(), start, length.max(0.01), content)?;
@@ -1393,6 +1397,7 @@ mod tests {
             source_tempo,
             transpose: 0.0,
             looped: None,
+            ..Default::default()
         };
         let warped = project.add_audio_clip(track, "w", 8.0, 16.0, content(WarpMode::Tonal, Some(120.0))).unwrap();
         let plain = project.add_audio_clip(track, "p", 32.0, 16.0, content(WarpMode::Off, None)).unwrap();

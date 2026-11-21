@@ -9,7 +9,7 @@ use crate::ui::automation::{self, Hold};
 use crate::ui::shortcuts::{self, Command};
 use crate::ui::sounds::DropTarget;
 use crate::ui::state::{ArrangeDrag, ArrangementState, Cx, FocusArea, LaneOwner, TextEditState, TrackDrop};
-use crate::ui::{colors, recording, units, widgets};
+use crate::ui::{colors, inputs, recording, units, widgets};
 use eframe::egui::{self, Align2, CursorIcon, PointerButton, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use trill_core::{AutomationTarget, ChainRef, Role, Track, TrackId, TrackKind};
 use trill_noir::{Bar, Chip, Icon, MenuItem, TRACK_HUES, fade, paint, text};
@@ -91,6 +91,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
                 envelopes::header(&mut column, cx, lane, rect, HEADER_STRIP);
                 resize_lane(&column, cx, lane, rect);
             }
+            RowKind::Take { track, lane } => super::takes::header(&mut column, cx, &tracks[track], lane, rect),
         }
     }
     drop_indicator(&column, cx, geometry);
@@ -164,7 +165,31 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         Rect::from_min_size(pos2(left, name_row.top()), HEADER_CHIP)
     };
     let index_rect = name_row.with_max_x(parts.left + HEADER_INDEX);
-    if track.kind == TrackKind::Group {
+    // What the track records of the audio device, where it records any.
+    let records = track.input.filter(|_| inputs::can_record(track));
+    if !track.takes.is_empty() {
+        // A track that keeps takes unfolds them, as a group its members.
+        let unfolded = super::takes::open(cx, track);
+        let icon = if unfolded { Icon::CaretDown } else { Icon::CaretRight };
+        let caret = Rect::from_center_size(pos2(index_rect.left() + 5.0, index_rect.center().y), vec2(16.0, 16.0));
+        let counted = super::takes::counted(track);
+        let name = match unfolded {
+            true => format!("Fold the takes of {} away", track.name),
+            false => format!("Show the takes of {}", track.name),
+        };
+        let response = trill_noir::bare_icon_button(ui, theme, caret, id.with("takes"), icon, &name);
+        let about = match unfolded {
+            true => format!("Fold the {counted} of this track away"),
+            false => {
+                format!("Show the {counted} kept beside this track: choose between them, or put stretches together")
+            }
+        };
+        cx.hint(&response, shortcuts::with_keys(&about, Command::ToggleTakes, cx.keyboard.is_on()));
+        if response.clicked() {
+            cx.state.select_track(track.id);
+            super::takes::toggle(cx, track.id);
+        }
+    } else if track.kind == TrackKind::Group {
         let folded = cx.state.arrangement.folded.contains(&track.id);
         let icon = if folded { Icon::CaretRight } else { Icon::CaretDown };
         let caret = Rect::from_center_size(pos2(index_rect.left() + 5.0, index_rect.center().y), vec2(16.0, 16.0));
@@ -178,14 +203,24 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         let number_style = trill_noir::TextStyle { size: 11.0, ..theme.text.value };
         text::paint(&painter, index_rect, Align2::LEFT_CENTER, number_style, &number.to_string(), quiet);
     }
-    let mut name_rect = Rect::from_min_max(index_rect.right_top(), pos2(chip(-2.0).left() - 6.0, name_row.bottom()));
+    // The monitor switch of a track that records an input stands ahead of
+    // the other chips.
+    let first_chip = if records.is_some() { -3.0 } else { -2.0 };
+    let mut name_rect =
+        Rect::from_min_max(index_rect.right_top(), pos2(chip(first_chip).left() - 6.0, name_row.bottom()));
     let badge = match track.kind {
         TrackKind::Normal if track.reference.is_some() => Some("Reference"),
         TrackKind::Normal => None,
         TrackKind::Group => Some("Group"),
         TrackKind::Return => Some("Return"),
     };
-    if let Some(badge) = badge {
+    if let Some(input) = records {
+        // What it records, beside the switch that says how it is heard:
+        // a button that opens the choice.
+        let width = inputs::badge(ui, cx, track, input, name_rect, id.with("input"), quiet);
+        name_rect.max.x -= width + 6.0;
+        inputs::monitor_chip(ui, cx, track, input, chip(-3.0), id.with("monitor"), quiet, "");
+    } else if let Some(badge) = badge {
         // What kind of track this is, where the name leaves room.
         let width = text::paint(&painter, name_rect, Align2::RIGHT_CENTER, theme.text.micro, badge, quiet);
         name_rect.max.x -= width + 6.0;
@@ -270,6 +305,15 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     }
 
     if two_rows {
+        if let Some(input) = records {
+            // What is arriving on the input, between the name and the
+            // controls, with its lamp at the right end.
+            let level = Rect::from_min_max(
+                pos2(parts.left + HEADER_INDEX, name_row.bottom() + 2.0),
+                pos2(parts.right, name_row.bottom() + 6.0),
+            );
+            inputs::meter(ui, cx, track, input, level, id.with("input-level"));
+        }
         // Controls row: volume and pan, indented to line up with the name.
         let controls_top = rect.top() + HEADER_CONTROLS_TOP;
         let pan_rect = Rect::from_min_size(
@@ -565,6 +609,19 @@ fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
         if MenuItem::new("Plays drums").checked(drums).detail(detail).show(ui, theme).clicked() {
             set_plays_drums(cx, id, !drums);
         }
+    }
+    if !track.takes.is_empty() {
+        let label = if super::takes::open(cx, track) { "Fold the takes away" } else { "Show the takes" };
+        if MenuItem::new(label).shortcut(&shortcuts::keys(Command::ToggleTakes)).show(ui, theme).clicked() {
+            cx.state.select_track(id);
+            super::takes::toggle(cx, id);
+        }
+    }
+    if inputs::can_record(track) {
+        // What the track records: a keyboard, or an input of the audio
+        // device, and how that is heard meanwhile.
+        trill_noir::menu_separator(ui, theme);
+        inputs::menu(ui, cx, track, 8);
     }
     trill_noir::menu_separator(ui, theme);
 

@@ -488,7 +488,9 @@ fn recording_with_nothing_armed_arms_the_selected_track_or_says_why_not() {
     assert_eq!(recording(&harness), RecordState::Idle);
     assert!(armed(&harness).is_empty());
     let reason = said(&harness).join(" ");
-    assert!(reason.contains("Audio has no instrument") && reason.contains("Select or arm a track"), "{reason}");
+    // It says the two ways there are: an instrument to play, or an input to record.
+    assert!(reason.contains("Audio has no instrument and records no input"), "{reason}");
+    assert!(reason.contains("choose an input under Records") && reason.contains("select a track"), "{reason}");
 
     // A group holds no clips.
     let group = harness.session.lock().edit(|project| Ok(project.add_track_of_kind("Bus", TrackKind::Group))).unwrap();

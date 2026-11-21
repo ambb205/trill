@@ -92,19 +92,112 @@ the rest, and `Ctrl`-click keeps them. `F9`, or the record button in the transpo
 count-in chosen in the box beside it (none, one, two or four bars). The transport says what the take is doing
 (counting in, recording, and which pass of the loop when the loop is on); `Space` or Stop ends it, what it wrote is
 selected, and one undo takes the whole take back. Asked to record with nothing armed, Trill arms the selected track
-if it has an instrument, and otherwise says why it cannot.
+if it has an instrument or records an input, and otherwise says why it cannot.
+
+**Record an input.** A track records what a keyboard plays unless it is told to record an input of the audio
+device: right-click its header and choose a channel, or a pair as left and right, under *Records*. (Once a track
+of the song records an input, every mixer strip has a row that says what its track records, and a click there
+chooses too.) The track then shows which input it is (`IN 1`, `IN 1+2`: a click changes it),
+a monitor switch, and an arm button like any other. **Arming it opens the input**, and for as long as an input is
+open the status bar says `INPUT LIVE` and the device's name, in the signal color: a microphone that is open
+hears the room, whatever is done with what it hears (the stage and the making-of, which hide the status bar, say
+it too). It is open only while something needs it (a track that
+records it is armed or heard, a measurement runs, the settings show its level) and closes when nothing does. What
+arrives is drawn beside the track's own level, a thin bar under its name and a meter beside its fader in the
+mixer, with a lamp that stays lit once the input was at full scale until it is clicked: turn the input down at
+the device and record again. `Shift+F9` arms the selected track.
+
+*An input is opened by your own hand, at this window, in this song.* Three things open it for a track: arming
+the track as it then records an input, giving an armed track its input, and switching its monitoring on. Nothing
+else does. Not the assistant, and not an undo or a redo made for it; not a song that is opened, begun or
+recovered; not a track that is duplicated or pasted. Arming does not carry into another song, and a track that
+comes to be armed with an input in any other way is disarmed, with a line that says so. A song that says a track
+is *always* heard does not open the microphone by being opened either, your own songs included: the switch
+shows it as **held**, and one click lets it go. The assistant may record once you have armed the track yourself,
+and cannot change the device that is recorded from while an input is live.
+
+*Hearing yourself.* The monitor switch has the input heard through the track's own devices, fader and sends,
+where its clips come in: off as it comes, on while the track is armed, or always (from the input's menu). Lit, the
+switch says how many milliseconds late the input is heard, which is the whole way from the microphone to the
+speaker; the pointer over it says whether that figure was measured or is what the devices say. Use headphones: a
+microphone that hears the speakers it is played through feeds back. A render never hears an input.
+
+*A take of audio* is recorded by `F9` with the notes of the armed tracks that record a keyboard, as one take and
+one undo step. Its clip grows on the track as it is sung, with its waveform, and what the track has under it is
+not heard meanwhile. It is put **where it was heard**: the time the sound took to reach the microphone's buffers
+and the time the song takes to reach the speaker are both taken off, from the first frame (see
+[the engine's page](engine.md) for how, and *Audio and MIDI settings* below for measuring it). A count-in is
+recorded too, ahead of the clip, so a breath before the first bar is there when the clip's start is dragged out.
+If the device is pulled out, the disk fills, the file reaches the size a WAV file can have, or the audio device
+is changed under it, the take ends whole up to there, a sentence says why, and the song plays on. Samples that
+did not arrive are silence of their length, never a shift, and are said. A take without a count-in that is
+asked for in the first quarter of a second after its input was opened begins when the input has found its
+place, a moment later, as after a short count-in: a take never has that step in it.
+
+Where the song went during a take is where the take lands. Sent elsewhere in the middle of it (a click in the
+ruler), the take ends its stretch there and begins another where the song now is, each a take of its own where
+it was sung. With the loop switched off in the middle, it goes on as one stretch past the loop's end. Nothing
+that was sung while the song rolled is left without a take.
+
+*Takes.* Every recording of a track is kept as a take, beside its clips and never among them. With the loop on,
+each pass is a take of its own, and the track then plays the last whole pass; recording over a part keeps what
+was there as a take first. Nothing recorded is destroyed by recording again. A track with takes has a caret
+where its number was (`T` does the same for the selected track): unfolded, each lane of takes is a row under the
+track, each take drawn as the clip it is, with what the track plays of it in the track's color.
+
+- **Drag across a take** to put that stretch on the track, in place of what the track had there. That is the
+  comp: ordinary audio clips, with a short crossfade at each seam that neither dips nor clicks.
+- **Double-click a take**, or `Use` in its lane's header, to put the whole of it there.
+- **`Hear`** plays a take in place of what the track has, without changing the song; again goes back.
+- The menu of a take renames it and lets go of it. Its recording stays on disk.
+
+Each is one undo step. What a comp covers is kept as a take first, so choosing between takes never loses one.
+
+*Punch.* The `PUNCH` switch in the transport (`P`) has a take record only inside the stretch the loop marks on
+the ruler, while the song plays through it and on: start a few bars before, sing along, and only the stretch is
+recorded. For notes and audio alike. The narrowest windows leave the switch out; its key works, and the take
+says that it is punched in.
 
 ## Audio and MIDI settings
 
-**Audio and MIDI settings** are one panel: `Ctrl+,`, `File`, or a click on the device in the status bar. It has
-the output device, exclusive mode, the sample rate and the buffer size, and beside the choice what is running now
-with its latency in milliseconds as the device reports it. What a choice costs is said before it is applied:
+**Audio and MIDI settings** are one panel of two pages: `Ctrl+,`, `File`, or a click on the device in the status
+bar. The first page has
+the output device and the device that is recorded from, exclusive mode, the sample rate and the buffer size, and
+beside the choice what is running now with its latency in milliseconds as the device reports it. What a choice costs is said before it is applied:
 exclusive mode silences other programs on that device, and another sample rate stops playback and closes plugin
 windows. Devices are listed and opened away from the window's own thread, so a driver that takes its time shows
 as "Opening the device…" in a window that still draws. A device that was unplugged, a list that comes back
 empty, a choice that fell back to something else: each is a sentence in the panel, with what Trill does about it.
 Below are the MIDI inputs, each with a switch, a lamp that lights when it sends, what is wrong with it if
 anything is, and a rescan. The status bar shows the device, rate, buffer and latency as they are at the moment.
+
+**Input and round trip**, the second page (a click on `INPUT LIVE` in the status bar opens it). *The panel does
+not open a microphone by being looked at*: `Show level` opens the input and shows what arrives on each channel,
+with a lamp a channel, and the input closes with the panel unless a track needs it. An input is one device with
+all its channels; it is opened as the output is (shared, or exclusively where the output is and the device
+allows), and the page says whether it runs on the output's clock or on one of its own, which is the ordinary
+case of a microphone on one device and headphones on another. That an input shares the output's clock is what
+the system says of the two, and Trill holds it against the input's own time stamps: where they say otherwise
+for a few seconds, the input is read as having a clock of its own from then on, without a step, and the page
+says that the system has it as part of the output's device and that its time stamps say otherwise.
+
+*The round trip* is how long sound takes from the microphone back to the speaker: what the input says of
+itself, what handing the sound across to the engine's clock takes, and what the output says. A take is put where
+it was sung by taking all of it off. What devices say of themselves is often short of the truth, and until it is
+measured the page, the monitor switch and the tools say that the figure is what the devices say, not measured.
+**`Measure`** plays a second of quiet noise and listens for it on the channel chosen: connect the output to the
+input with a cable, or hold the microphone to the speaker. What it finds is offered (`Use it`) and changes
+nothing until it is taken; taken, it stands in place of what the output says, and is remembered for this pair of
+devices as they were opened (shared or exclusive, rate, buffer). `Earlier` and `Later` move takes half a
+millisecond at a time by hand, for putting right by ear what cannot be measured; `No nudge` and `Forget` go back.
+
+**`File`, `Unused recordings`** lists the recordings that nothing plays any more: not the open song or any
+state undo can bring back, not a sampler or a drum rack of it, not another song Trill knows of (one that was
+saved under another name goes on playing the files of the song it was saved from), not unsaved work that can
+still be recovered. The ones another song plays are listed apart, with the song's name, and stay. Trill never
+removes a recording by itself: `Remove` asks first and says where they go, and only a second yes sends them to
+the system's Recycle Bin, from where they can be had back. (Where a system has no bin, and in a run on a
+profile folder, they go into a `removed` folder beside the takes.) Nothing is ever deleted outright.
 
 ## Playback load
 

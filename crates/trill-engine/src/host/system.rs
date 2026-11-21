@@ -7,12 +7,13 @@
 //! by [`super::wasapi`].
 
 use super::{
-    AudioDevice, AudioDevices, AudioHost, COMMON_SAMPLE_RATES, FailureCallback, OpenError, OpenStream, Renderer,
-    StreamFailure, StreamFormat, StreamRequest, Timing, now_ns, number_duplicates,
+    AudioDevice, AudioDevices, AudioHost, COMMON_SAMPLE_RATES, FailureCallback, InputFormat, InputRequest, OpenError,
+    OpenInput, OpenStream, Renderer, StreamFailure, StreamFormat, StreamRequest, Timing, now_ns, number_duplicates,
 };
+use crate::capture::{Missing, Said, Sink};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long cpal may take to bring a stream up.
@@ -165,6 +166,233 @@ impl AudioHost for SystemHost {
             return open_exclusive(&found, request, renderer, on_failure);
         }
         open_shared(&found, request, renderer, on_failure, self.unheard)
+    }
+
+    fn open_input(&self, request: &InputRequest, on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+        if self.unheard {
+            // A host that only measures hears nobody's room.
+            return Err(OpenError::Refused(
+                "the machine's devices are only measured on here: no input of theirs is opened".to_string(),
+            ));
+        }
+        let host = cpal::default_host();
+        let found = match &request.device {
+            Some(name) => inputs(&host)
+                .into_iter()
+                .find(|named| named.name == *name)
+                .ok_or_else(|| OpenError::NotFound(name.clone()))?,
+            None => {
+                let device = host.default_input_device().ok_or(OpenError::NoInput)?;
+                let id = device.id().ok();
+                let listed = inputs(&host).into_iter().find(|named| id.is_some() && named.device.id().ok() == id);
+                let name = listed.map_or_else(|| name_of(&device), |listed| listed.name);
+                Named { name, device, is_default: true }
+            }
+        };
+        // An input and an output of one piece of hardware count time by
+        // one clock.
+        let shares_clock = request.output.as_ref().is_some_and(|played| {
+            let output = outputs(&host).into_iter().find(|named| named.name == *played);
+            output.is_some_and(|output| same_hardware(&found.device, &output.device))
+        });
+        let mut open = match request.exclusive {
+            true => open_exclusive_input(&found, request, on_failure)?,
+            false => open_shared_input(&found, on_failure)?,
+        };
+        open.format.shares_clock = shares_clock;
+        Ok(open)
+    }
+}
+
+#[cfg(windows)]
+fn same_hardware(one: &cpal::Device, other: &cpal::Device) -> bool {
+    let endpoint = |device: &cpal::Device| device.id().ok().map(|id| id.to_string());
+    let (Some(one), Some(other)) = (endpoint(one), endpoint(other)) else { return false };
+    let plain = |id: &str| id.strip_prefix("wasapi:").unwrap_or(id).to_string();
+    super::wasapi::same_hardware(&plain(&one), &plain(&other))
+}
+
+#[cfg(not(windows))]
+fn same_hardware(_one: &cpal::Device, _other: &cpal::Device) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn open_exclusive_input(
+    found: &Named,
+    request: &InputRequest,
+    on_failure: FailureCallback,
+) -> Result<OpenInput, OpenError> {
+    let id = found.device.id().map(|id| id.to_string()).map_err(|error| OpenError::Failed(error.to_string()))?;
+    let endpoint = id.strip_prefix("wasapi:").unwrap_or(&id);
+    super::wasapi::open_exclusive_input(endpoint, &found.name, request, on_failure)
+}
+
+#[cfg(not(windows))]
+fn open_exclusive_input(
+    found: &Named,
+    _request: &InputRequest,
+    _on_failure: FailureCallback,
+) -> Result<OpenInput, OpenError> {
+    Err(OpenError::Refused(format!("'{}' cannot be taken exclusively on this system", found.name)))
+}
+
+/// Opens an input as the system has it, shared with other programs: at
+/// the rate and with the buffers it runs at, whatever the engine's are.
+fn open_shared_input(found: &Named, on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+    let device = &found.device;
+    let failed = |error: cpal::Error| match error.kind() {
+        cpal::ErrorKind::DeviceNotAvailable => OpenError::NotFound(found.name.clone()),
+        cpal::ErrorKind::UnsupportedConfig => {
+            OpenError::Refused(format!("'{}' refused the format: {error}", found.name))
+        }
+        _ => OpenError::Failed(format!("'{}' could not be opened: {error}", found.name)),
+    };
+    let supported = device.default_input_config().map_err(failed)?;
+    let (channels, rate, format) = (supported.channels() as usize, supported.sample_rate(), supported.sample_format());
+    let config: cpal::StreamConfig = supported.config();
+    let (sink, link) = crate::capture::link(rate as f64, channels);
+    let measured = Arc::new(Measured::default());
+    let broke = Arc::new(AtomicBool::new(false));
+    let state = Taking {
+        sink,
+        channels: channels.max(1),
+        frames_per_second: rate as f64,
+        age: None,
+        measured: measured.clone(),
+        broke: broke.clone(),
+    };
+    let lost = on_failure.clone();
+    let on_error = move |error: cpal::Error| match error.kind() {
+        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::HostUnavailable => {
+            log::warn!("audio input lost: {error}");
+            lost(StreamFailure::DeviceLost);
+        }
+        // This leaves the stream running. It is the device's own word
+        // that the buffer it hands over next does not follow the one
+        // before, said on its thread just before that buffer: the frames
+        // that are missing are silence where they would have been. (It
+        // does not say how many: as many as that buffer's stamp says.)
+        cpal::ErrorKind::Xrun => broke.store(true, Ordering::Relaxed),
+        cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged => log::warn!("audio input: {error}"),
+        _ => {
+            log::error!("audio input error: {error}");
+            lost(StreamFailure::Failed);
+        }
+    };
+    let timeout = Some(ACTIVATION_TIMEOUT);
+    let stream = match format {
+        cpal::SampleFormat::F32 => device.build_input_stream(config, state.taking::<f32>(), on_error, timeout),
+        cpal::SampleFormat::I16 => device.build_input_stream(config, state.taking::<i16>(), on_error, timeout),
+        cpal::SampleFormat::U16 => device.build_input_stream(config, state.taking::<u16>(), on_error, timeout),
+        cpal::SampleFormat::I32 => device.build_input_stream(config, state.taking::<i32>(), on_error, timeout),
+        cpal::SampleFormat::I8 => device.build_input_stream(config, state.taking::<i8>(), on_error, timeout),
+        cpal::SampleFormat::U8 => device.build_input_stream(config, state.taking::<u8>(), on_error, timeout),
+        cpal::SampleFormat::F64 => device.build_input_stream(config, state.taking::<f64>(), on_error, timeout),
+        other => {
+            return Err(OpenError::Refused(format!(
+                "'{}' gives samples as {other:?}, which Trill does not read",
+                found.name
+            )));
+        }
+    }
+    .map_err(failed)?;
+    stream.play().map_err(failed)?;
+
+    // How many frames it hands over at a time, and how old they are when
+    // it does, are known once a few buffers have come.
+    let deadline = Instant::now() + SETTLE_TIME;
+    while measured.callbacks.load(Ordering::Relaxed) < SETTLE_CALLBACKS && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let buffer_frames = match measured.period.load(Ordering::Relaxed) {
+        // Nothing has come yet: a hundredth of a second, as the system
+        // hands a shared device's sound over.
+        0 => rate / 100,
+        frames => frames,
+    };
+    let format = InputFormat {
+        device: found.name.clone(),
+        sample_rate: rate,
+        channels: channels as u16,
+        buffer_frames,
+        latency_frames: measured.latency.load(Ordering::Relaxed),
+        exclusive: false,
+        shares_clock: false,
+    };
+    Ok(OpenInput { format, handle: Box::new(stream), link })
+}
+
+/// What an input stream's callback owns.
+struct Taking {
+    sink: Sink,
+    channels: usize,
+    frames_per_second: f64,
+    /// How old a buffer's first frame is when it is handed over, smoothed.
+    age: Option<f64>,
+    measured: Arc<Measured>,
+    /// Set when the device has said that the buffer it hands over next
+    /// does not follow the one before.
+    broke: Arc<AtomicBool>,
+}
+
+/// A buffer whose first frame is said to be older than this, in seconds,
+/// when it is handed over has no stamp: a device does not keep that much,
+/// and the zero of the system's counter (which a driver without a stamp
+/// gives) is the day the machine was started.
+const OLDEST_STAMP: f64 = 2.0;
+
+impl Taking {
+    /// The data callback for a stream of `T` samples.
+    fn taking<T>(mut self) -> impl FnMut(&[T], &cpal::InputCallbackInfo) + Send + 'static
+    where
+        T: cpal::SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        move |data, info| self.take(data, info)
+    }
+
+    fn take<T>(&mut self, data: &[T], info: &cpal::InputCallbackInfo)
+    where
+        T: cpal::SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        // An input's thread is an audio thread like the output's.
+        super::priority::AudioPriority::raise_for_good();
+        let channels = self.channels;
+        let frames = data.len() / channels;
+        // When the device heard the buffer's first frame, by its own
+        // account: so long before this call. A stamp that has it heard
+        // after this call, or longer ago than any buffer is old, is none.
+        let stamp = info.timestamp();
+        let age = stamp.callback.checked_duration_since(stamp.capture).map(|age| age.as_secs_f64());
+        let age = age.filter(|age| *age < OLDEST_STAMP);
+        let heard_ns = age.map(|age| now_ns().saturating_sub((age * 1e9) as u64));
+        let missing = match self.broke.swap(false, Ordering::Relaxed) {
+            true => Missing::Uncounted,
+            false => Missing::Nothing,
+        };
+        let said = Said { heard_ns, missing };
+        self.sink.push_said(said, frames, |frame, channel| data[frame * channels + channel].to_sample::<f32>());
+        let Some(age) = age else { return };
+
+        // What lies between the microphone and a buffer beyond the
+        // buffer's own length is the device's latency.
+        let beyond = (age * self.frames_per_second - frames as f64).max(0.0);
+        let smoothed = match self.age {
+            Some(before) => before + (beyond - before) * 0.1,
+            None => beyond,
+        };
+        self.age = Some(smoothed);
+        let measured = &self.measured;
+        measured.latency.store(smoothed.round() as u32, Ordering::Relaxed);
+        let period = measured.period.load(Ordering::Relaxed);
+        if period == 0 || (frames as u32) > period {
+            // (The most it hands over at once: what has to have gone by
+            // before the newest of it is there.)
+            measured.period.store(frames as u32, Ordering::Relaxed);
+        }
+        measured.callbacks.fetch_add(1, Ordering::Relaxed);
     }
 }
 

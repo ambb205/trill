@@ -74,6 +74,32 @@ pub struct AudioSettings {
     pub exclusive: bool,
     /// Name of the device audio is recorded from.
     pub input_device: Option<String>,
+    /// How long sound takes to go round each pair of devices it was found
+    /// out for, as they were opened. A file written before there were any
+    /// has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub round_trips: Vec<RoundTrip>,
+}
+
+/// How long sound takes to go round an output and an input as they were
+/// opened: what a measurement found, and what was added by hand. Another
+/// buffer, another rate, or a device taken for the program alone is
+/// another round trip.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct RoundTrip {
+    pub output: String,
+    pub input: String,
+    pub exclusive: bool,
+    pub sample_rate: u32,
+    pub buffer_frames: u32,
+    /// What lies between the engine and the microphone on the way round
+    /// beside the engine's own part, in milliseconds, where it was
+    /// measured: it stands in place of what the devices say.
+    #[serde(default)]
+    pub measured_ms: Option<f64>,
+    /// What was added to that by hand, in milliseconds.
+    #[serde(default)]
+    pub adjust_ms: f64,
 }
 
 /// MIDI device preferences.
@@ -258,6 +284,7 @@ impl Reader {
             self.value(audio, "audio.sample_rate", &mut settings.audio.sample_rate);
             self.value(audio, "audio.exclusive", &mut settings.audio.exclusive);
             self.value(audio, "audio.input_device", &mut settings.audio.input_device);
+            self.value(audio, "audio.round_trips", &mut settings.audio.round_trips);
         }
         if let Some(midi) = self.section(document, "midi") {
             self.value(midi, "midi.disabled_inputs", &mut settings.midi.disabled_inputs);
@@ -434,6 +461,28 @@ mod tests {
                 sample_rate: Some(48_000),
                 exclusive: true,
                 input_device: Some("Line In (USB Audio)".into()),
+                // What a measurement found for one pair of devices, and
+                // what was added by hand for another.
+                round_trips: vec![
+                    RoundTrip {
+                        output: "Speakers (USB Audio)".into(),
+                        input: "Line In (USB Audio)".into(),
+                        exclusive: true,
+                        sample_rate: 48_000,
+                        buffer_frames: 256,
+                        measured_ms: Some(11.25),
+                        adjust_ms: 0.0,
+                    },
+                    RoundTrip {
+                        output: "Speakers".into(),
+                        input: "Microphone".into(),
+                        exclusive: false,
+                        sample_rate: 44_100,
+                        buffer_frames: 441,
+                        measured_ms: None,
+                        adjust_ms: -1.5,
+                    },
+                ],
             },
             midi: MidiSettings { disabled_inputs: vec!["Loopback".into()] },
             journal: JournalSettings { keep: false },

@@ -13,7 +13,8 @@
 //!   pixel columns, at any zoom.
 //! - [`resample`] converts a buffer to another sample rate, offline and
 //!   band-limited.
-//! - [`write_wav`] writes a buffer to disk.
+//! - [`write_wav`] writes a buffer to disk, and [`GrowingWav`] a recording
+//!   as it is made, which reads at every moment of its making.
 //!
 //! Everything here runs off the audio thread. Files are untrusted, so no
 //! function panics on bad input; each returns a [`MediaError`] that says in
@@ -26,6 +27,7 @@ mod peaks;
 mod resample;
 mod stream;
 mod wav;
+mod wav_growing;
 mod wav_plain;
 mod wav_vorbis;
 
@@ -36,3 +38,4 @@ pub use peaks::{MinMax, PeakColumn, Peaks, scan_columns};
 pub use resample::{Resampler, resample};
 pub use stream::{AudioFile, open, wav_loop};
 pub use wav::{WavFormat, WavWriter, write_wav};
+pub use wav_growing::{GrowingWav, Limits as GrowingLimits};

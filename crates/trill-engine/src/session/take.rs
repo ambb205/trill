@@ -157,6 +157,10 @@ pub(crate) struct Take {
     /// Set once the controllers' curves are as they stay: written after
     /// the take stopped.
     settled: bool,
+    /// The stretch of the song the take is punched in over, if it is:
+    /// only what is played inside it is the take's, and its clip is that
+    /// stretch.
+    punch: Option<(f64, f64)>,
 }
 
 impl Take {
@@ -167,6 +171,7 @@ impl Take {
         Self {
             gesture_gap: GESTURE_GAP_SECONDS * tempo / 60.0,
             settled: false,
+            punch: None,
             id,
             tracks: tracks
                 .iter()
@@ -246,8 +251,11 @@ impl Take {
             return;
         }
         match captured {
-            Captured::Began { .. } => {}
+            // Where the take's audio stands is the session's to read.
+            Captured::Began { .. } | Captured::Audio { .. } => {}
             Captured::Rolling { beat } => {
+                // A take that is punched in begins where the punch does.
+                let beat = self.punch.map_or(beat, |(from, _)| beat.max(from));
                 self.start = Some(beat);
                 self.furthest = beat;
                 self.settle_early_notes();
@@ -261,6 +269,22 @@ impl Take {
                 }
             }
             Captured::Event { track, kind, beat, pass } => {
+                if let Some((from, to)) = self.punch {
+                    // What is played before the punch is not the take's,
+                    // an early downbeat aside; after it, what is held
+                    // ends where the punch does and nothing more is taken.
+                    if beat >= to {
+                        for track in &mut self.tracks {
+                            for sounding in std::mem::take(&mut track.sounding) {
+                                track.finish(sounding, to, pass, None);
+                            }
+                        }
+                        return;
+                    }
+                    if beat < from - EARLY_BEATS {
+                        return;
+                    }
+                }
                 self.pass = self.pass.max(pass);
                 self.furthest = self.furthest.max(beat);
                 let loop_end = self.loop_region.map(|(_, end)| end);
@@ -277,6 +301,7 @@ impl Take {
         if self.stopped.is_some() {
             return;
         }
+        let beat = self.punch.map_or(beat, |(_, to)| beat.min(to));
         let loop_end = self.loop_region.map(|(_, end)| end);
         for track in &mut self.tracks {
             for sounding in std::mem::take(&mut track.sounding) {
@@ -291,6 +316,7 @@ impl Take {
     /// Notes that the song has been heard to reach `beat`, so the clips
     /// keep up with it while nothing is played.
     pub fn heard(&mut self, beat: f64) {
+        let beat = self.punch.map_or(beat, |(_, to)| beat.min(to));
         if self.start.is_some() && self.stopped.is_none() && beat.is_finite() {
             self.furthest = self.furthest.max(beat);
         }
@@ -322,7 +348,7 @@ impl Take {
         let Some(start) = self.start else { return Ok(()) };
         let span_start = self.span_start(start);
         for index in 0..self.tracks.len() {
-            let first_bar = self.bar_from(span_start);
+            let first_bar = self.punch.map_or_else(|| self.bar_from(span_start), |(from, to)| to - from);
             let track = &mut self.tracks[index];
             // A clip that was deleted meanwhile is not come back to.
             if track.clip.is_some_and(|clip| project.clip(clip).is_err()) {
@@ -420,6 +446,12 @@ impl Take {
         Ok(())
     }
 
+    /// The take, punched in over a stretch of the song, or not.
+    pub fn punched(mut self, punch: Option<(f64, f64)>) -> Self {
+        self.punch = punch.filter(|(from, to)| to > from);
+        self
+    }
+
     /// The take, in a song whose bars are `bars`: its clips are cut to
     /// them where the time signature changes.
     pub fn in_bars(mut self, bars: MeterMap) -> Self {
@@ -435,6 +467,9 @@ impl Take {
     /// Where a new clip for this take starts: the bar line at or before
     /// the take's start, or the start of the loop if that is earlier.
     fn span_start(&self, start: f64) -> f64 {
+        if let Some((from, _)) = self.punch {
+            return from.max(0.0);
+        }
         let bar_line = match &self.bars {
             Some(bars) => bars.bar_at(start + EPSILON).start,
             None => ((start + EPSILON) / self.bar).floor() * self.bar,
@@ -453,6 +488,9 @@ impl Take {
     /// Where `track`'s clip should end by now: the bar line after the
     /// furthest the take has got, or the loop's end once it has come round.
     fn wanted_end(&self, track: &TrackTake, start: f64) -> f64 {
+        if let Some((_, to)) = self.punch {
+            return to;
+        }
         let reached = self.furthest.max(track.last_end).max(start);
         let bar_line = match &self.bars {
             Some(bars) => bars.bar_line_at_or_after(reached - EPSILON),

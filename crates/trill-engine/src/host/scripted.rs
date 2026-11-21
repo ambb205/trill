@@ -6,14 +6,118 @@
 //! buffers. Time stands still in between, so what a test plays and where
 //! it lands are exact, on any machine and under any load. Devices can be
 //! unplugged, made to refuse a format, or made to stop answering.
+//!
+//! It has inputs too ([`ScriptedInput`]), each with a clock of its own
+//! that a test sets against the host's: what one hears is a function of
+//! the host's time ([`Hears`]), or what the output plays, as through a
+//! cable. An input hands over its buffers as the host's time reaches
+//! them, which is as the output is advanced.
 
 use super::{
-    AudioDevice, AudioDevices, AudioHost, FailureCallback, OpenError, OpenStream, Renderer, StreamFailure,
-    StreamFormat, StreamRequest, Timing,
+    AudioDevice, AudioDevices, AudioHost, FailureCallback, InputFormat, InputRequest, OpenError, OpenInput, OpenStream,
+    Renderer, StreamFailure, StreamFormat, StreamRequest, Timing,
 };
+use crate::capture::{Missing, Said, Sink};
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How much of what the output played is kept for an input that hears it.
+const PLAYED_SECONDS: usize = 4;
+/// How many frames on either side of a moment between two frames of what
+/// was played are read to say what was played at it.
+const BETWEEN: i64 = 16;
+
+/// An input device of a [`ScriptedHost`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptedInput {
+    pub name: String,
+    /// The rate it runs at, whatever is asked of it.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// How many frames it hands over at a time when shared. Taken
+    /// exclusively it hands over as many as are asked for.
+    pub buffer: u32,
+    /// How many frames it says lie between its microphone and a buffer.
+    pub latency: u32,
+    /// How many more lie there than it says: what a measurement finds.
+    pub unsaid: u32,
+    /// How fast its clock runs against the host's, in parts a million.
+    pub ppm: f64,
+    pub exclusive: bool,
+    /// Whether it says it counts time by the output's clock: the input of
+    /// the device that is played through. (Its `ppm` should then be
+    /// nothing: one that says so and runs apart all the same is how a
+    /// test has the session find out.)
+    pub shares_clock: bool,
+}
+
+impl ScriptedInput {
+    /// A device called `name` with two channels that runs at 48 kHz on
+    /// the host's own clock, hands over 480 frames at a time and says,
+    /// rightly, that they are 240 frames old; it can be taken exclusively.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            sample_rate: 48_000,
+            channels: 2,
+            buffer: 480,
+            latency: 240,
+            unsaid: 0,
+            ppm: 0.0,
+            exclusive: true,
+            shares_clock: false,
+        }
+    }
+}
+
+/// What a channel of an input hears at a moment of the host's clock, in
+/// seconds.
+pub type Sound = Arc<dyn Fn(usize, f64) -> f32 + Send + Sync>;
+
+/// What the inputs of a [`ScriptedHost`] hear.
+#[derive(Clone, Default)]
+pub enum Hears {
+    #[default]
+    Nothing,
+    /// A sound: see [`Sound`].
+    Sound(Sound),
+    /// What the output plays, at the moment it is heard and `gain` as
+    /// loud: a cable from the output to the input, left to the first
+    /// channel and right to the second.
+    Output { gain: f32 },
+}
+
+/// An input that is open.
+struct Capturing {
+    sink: Sink,
+    on_failure: FailureCallback,
+    format: InputFormat,
+    device: ScriptedInput,
+    serial: u64,
+    /// When it was opened on the host's clock, in nanoseconds, and how
+    /// many buffers it has handed over or lost since.
+    opened: f64,
+    handed: u64,
+    /// How many of them it lost since the last it handed over: it says
+    /// so with the next, as a device does that counts its frames.
+    lost: u64,
+}
+
+/// How an input stamps a buffer it hands over: see
+/// [`ScriptedHost::stamp_next`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Stamped {
+    /// When it heard the buffer's first frame, as its latency has it.
+    Right,
+    /// So many seconds after that: handed over late, and stamped then.
+    Late(f64),
+    /// So many seconds before that: a stamp that cannot be.
+    Early(f64),
+    /// Not at all: the device says its stamp is wrong.
+    Not,
+}
 
 /// A device of a [`ScriptedHost`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,8 +169,31 @@ struct State {
     /// Every attempt to open a device, in order.
     requests: Vec<StreamRequest>,
     /// The host's clock, in nanoseconds: it moves only as audio is
-    /// rendered.
+    /// rendered. (Kept with its fraction, so that a buffer which is not a
+    /// whole number of nanoseconds long does not add up to a clock that
+    /// is slow.)
     now_ns: u64,
+    now: f64,
+    inputs: Vec<ScriptedInput>,
+    capturing: Option<Capturing>,
+    /// Every attempt to open an input, in order.
+    input_requests: Vec<InputRequest>,
+    hears: Hears,
+    /// While set, the open input hands nothing over: what it would have
+    /// is lost.
+    input_stalled: bool,
+    /// How the buffers an input hands over next are stamped, in turn;
+    /// then as they should be.
+    stamps: VecDeque<Stamped>,
+    /// What the output has played since it was opened, for an input that
+    /// hears it: the last seconds of it, the frame the first of them is,
+    /// and how many were played in all; when it was opened; and how many
+    /// frames more lie between its buffers and the speaker than it says.
+    played: (VecDeque<f32>, VecDeque<f32>),
+    played_from: u64,
+    played_frames: u64,
+    output_opened: f64,
+    output_unsaid: u32,
     /// What was rendered since the last [`ScriptedHost::take_output`].
     left: Vec<f32>,
     right: Vec<f32>,
@@ -125,6 +252,63 @@ impl ScriptedHost {
         if let Some(running) = lost {
             (running.on_failure)(StreamFailure::DeviceLost);
         }
+    }
+
+    /// Plugs an input device in.
+    pub fn add_input(&self, device: ScriptedInput) {
+        self.state.lock().inputs.push(device);
+    }
+
+    /// Unplugs an input device. A stream running on it says the device is
+    /// lost and hands nothing more over.
+    pub fn remove_input(&self, name: &str) {
+        let lost = {
+            let mut state = self.state.lock();
+            state.inputs.retain(|device| device.name != name);
+            match &state.capturing {
+                Some(capturing) if capturing.format.device == name => state.capturing.take(),
+                _ => None,
+            }
+        };
+        if let Some(capturing) = lost {
+            (capturing.on_failure)(StreamFailure::DeviceLost);
+        }
+    }
+
+    /// Says what the inputs hear from now on.
+    pub fn hear(&self, hears: Hears) {
+        self.state.lock().hears = hears;
+    }
+
+    /// Has the open input hand nothing over for as long as this is set:
+    /// what it would have handed over meanwhile is lost, as it is when a
+    /// device is kept from its work.
+    pub fn stall_input(&self, stalled: bool) {
+        self.state.lock().input_stalled = stalled;
+    }
+
+    /// Has the buffers an input hands over next stamped as `stamps` say,
+    /// one after the other: the input that is open, or the one opened
+    /// next. Its frames are what they would have been.
+    pub fn stamp_next(&self, stamps: impl IntoIterator<Item = Stamped>) {
+        self.state.lock().stamps.extend(stamps);
+    }
+
+    /// Says how many frames more lie between the output's buffers and its
+    /// speaker than it says: what an input that hears the output hears
+    /// that much later.
+    pub fn set_output_unsaid(&self, frames: u32) {
+        self.state.lock().output_unsaid = frames;
+    }
+
+    /// The format of the open input, if one is open.
+    pub fn capturing(&self) -> Option<InputFormat> {
+        self.state.lock().capturing.as_ref().map(|capturing| capturing.format.clone())
+    }
+
+    /// Every attempt to open an input so far, in order.
+    pub fn input_requests(&self) -> Vec<InputRequest> {
+        self.state.lock().input_requests.clone()
     }
 
     /// Makes `name` the system's default device.
@@ -229,16 +413,136 @@ impl ScriptedHost {
 
 impl State {
     fn render(&mut self, frames: usize) {
+        // What the input has to hand over by now is there before the
+        // output is asked for anything.
+        self.hand_over();
         let Some(running) = &mut self.running else { return };
         let timing = Timing { now_ns: self.now_ns, latency_frames: running.format.latency_frames };
         let (left, right, keep) = (&mut self.left, &mut self.right, self.keep_output);
+        let played = &mut self.played;
+        let listened = matches!(self.hears, Hears::Output { .. });
         running.renderer.render(frames, timing, &mut |l, r| {
             if keep {
                 left.extend_from_slice(l);
                 right.extend_from_slice(r);
             }
+            if listened {
+                played.0.extend(l);
+                played.1.extend(r);
+            }
         });
-        self.now_ns += (frames as f64 * 1e9 / running.format.sample_rate as f64).round() as u64;
+        let rate = running.format.sample_rate as usize;
+        self.played_frames += frames as u64;
+        if !listened {
+            // Nobody hears it: what was played before is not there to be
+            // heard later either.
+            self.played.0.clear();
+            self.played.1.clear();
+            self.played_from = self.played_frames;
+        }
+        while self.played.0.len() > PLAYED_SECONDS * rate {
+            self.played.0.pop_front();
+            self.played.1.pop_front();
+            self.played_from += 1;
+        }
+        self.now += frames as f64 * 1e9 / rate as f64;
+        self.now_ns = self.now.round() as u64;
+    }
+
+    /// Has the open input hand over every buffer the host's time has
+    /// reached: one is there once its last frame has been heard and what
+    /// lies between the microphone and the buffer has gone by.
+    fn hand_over(&mut self) {
+        let now = self.now;
+        let stalled = self.input_stalled;
+        let State { capturing, hears, played, played_from, running, output_opened, output_unsaid, stamps, .. } = self;
+        let Some(capturing) = capturing else { return };
+        let device = &capturing.device;
+        let rate = device.sample_rate as f64 * (1.0 + device.ppm / 1e6);
+        let buffer = capturing.format.buffer_frames as u64;
+        let behind = (device.latency + device.unsaid) as f64;
+        // What the speaker gives out at a moment of the host's clock.
+        let output = running.as_ref().map(|running| {
+            let ahead = (running.format.latency_frames + *output_unsaid) as f64;
+            (running.format.sample_rate as f64, ahead)
+        });
+        let (played_from, output_opened) = (*played_from as i64, *output_opened);
+        let speaker = |channel: usize, ns: f64| -> f32 {
+            let Some((output_rate, ahead)) = output else { return 0.0 };
+            let side = match channel {
+                0 => &played.0,
+                1 => &played.1,
+                _ => return 0.0,
+            };
+            // The frame that is at the speaker then, which is seldom a
+            // whole one: read between frames, and exactly where it is.
+            let place = (ns - output_opened) / 1e9 * output_rate - ahead;
+            let whole = place.round();
+            let at = |frame: i64| match usize::try_from(frame - played_from) {
+                Ok(index) => side.get(index).copied().unwrap_or(0.0) as f64,
+                Err(_) => 0.0,
+            };
+            if (place - whole).abs() < 1e-6 {
+                return at(whole as i64) as f32;
+            }
+            let whole = place.floor();
+            let fraction = place - whole;
+            let mut sum = 0.0;
+            for tap in -BETWEEN + 1..=BETWEEN {
+                let away = tap as f64 - fraction;
+                let angle = std::f64::consts::PI * away;
+                let window = 0.5 + 0.5 * (angle / BETWEEN as f64).cos();
+                sum += at(whole as i64 + tap) * angle.sin() / angle * window;
+            }
+            sum as f32
+        };
+        loop {
+            let first = capturing.handed * buffer;
+            let due = capturing.opened + ((first + buffer) as f64 + behind) / rate * 1e9;
+            if due > now {
+                break;
+            }
+            capturing.handed += 1;
+            if stalled {
+                capturing.lost += 1;
+                continue;
+            }
+            // It says its frames are as old as it says its latency is: a
+            // frame is stamped later than it was heard by what it leaves
+            // unsaid.
+            let stamp = capturing.opened + (first as f64 + device.unsaid as f64) / rate * 1e9;
+            let stamp = match stamps.pop_front().unwrap_or(Stamped::Right) {
+                Stamped::Right => Some(stamp),
+                Stamped::Late(seconds) => Some(stamp + seconds * 1e9),
+                Stamped::Early(seconds) => Some((stamp - seconds * 1e9).max(1.0)),
+                Stamped::Not => None,
+            };
+            // What it lost it says with the first buffer after, by its
+            // own count of the frames it heard.
+            let missing = match std::mem::take(&mut capturing.lost) {
+                0 => Missing::Nothing,
+                lost => Missing::Frames(lost * buffer),
+            };
+            let said = Said { heard_ns: stamp.map(|stamp| stamp.round() as u64), missing };
+            let opened = capturing.opened;
+            let heard_ns = |frame: usize| opened + (first + frame as u64) as f64 / rate * 1e9;
+            capturing.sink.push_said(said, buffer as usize, |frame, channel| match &*hears {
+                Hears::Nothing => 0.0,
+                Hears::Sound(sound) => sound(channel, heard_ns(frame) / 1e9),
+                Hears::Output { gain } => speaker(channel, heard_ns(frame)) * gain,
+            });
+        }
+    }
+
+    fn listed_input(&self, device: &ScriptedInput) -> AudioDevice {
+        AudioDevice {
+            name: device.name.clone(),
+            is_default: self.inputs.first().is_some_and(|first| first.name == device.name),
+            default_sample_rate: device.sample_rate,
+            sample_rates: vec![device.sample_rate],
+            channels: device.channels,
+            exclusive: device.exclusive,
+        }
     }
 
     fn listed(&self, device: &ScriptedDevice) -> AudioDevice {
@@ -261,7 +565,46 @@ impl State {
 impl AudioHost for ScriptedHost {
     fn devices(&self) -> AudioDevices {
         let state = self.state.lock();
-        AudioDevices { outputs: state.devices.iter().map(|device| state.listed(device)).collect(), inputs: Vec::new() }
+        AudioDevices {
+            outputs: state.devices.iter().map(|device| state.listed(device)).collect(),
+            inputs: state.inputs.iter().map(|device| state.listed_input(device)).collect(),
+        }
+    }
+
+    fn open_input(&self, request: &InputRequest, on_failure: FailureCallback) -> Result<OpenInput, OpenError> {
+        let mut state = self.state.lock();
+        state.input_requests.push(request.clone());
+        let device = match &request.device {
+            Some(name) => state
+                .inputs
+                .iter()
+                .find(|device| device.name == *name)
+                .ok_or_else(|| OpenError::NotFound(name.clone()))?,
+            None => state.inputs.first().ok_or(OpenError::NoInput)?,
+        }
+        .clone();
+        if request.exclusive && !device.exclusive {
+            return Err(OpenError::Refused(format!("'{}' cannot be taken exclusively", device.name)));
+        }
+        let format = InputFormat {
+            device: device.name.clone(),
+            sample_rate: device.sample_rate,
+            channels: device.channels,
+            buffer_frames: match request.exclusive {
+                true => request.buffer_size.unwrap_or(device.buffer),
+                false => device.buffer,
+            },
+            latency_frames: device.latency,
+            exclusive: request.exclusive,
+            shares_clock: device.shares_clock && request.output.is_some(),
+        };
+        let (sink, link) = crate::capture::link(device.sample_rate as f64, device.channels as usize);
+        state.serial += 1;
+        let serial = state.serial;
+        let opened = state.now;
+        state.capturing =
+            Some(Capturing { sink, on_failure, format: format.clone(), device, serial, opened, handed: 0, lost: 0 });
+        Ok(OpenInput { format, handle: Box::new(InputHandle { state: self.state.clone(), serial }), link })
     }
 
     fn open_output(
@@ -313,6 +656,9 @@ impl AudioHost for ScriptedHost {
         };
         state.serial += 1;
         let serial = state.serial;
+        // What an input hears of the output is this stream's from here.
+        state.played = Default::default();
+        (state.played_from, state.played_frames, state.output_opened) = (0, 0, state.now);
         state.running = Some(Running { renderer, on_failure, format: format.clone(), serial });
         Ok(OpenStream { format, handle: Box::new(Handle { state: self.state.clone(), serial }) })
     }
@@ -346,6 +692,21 @@ impl Drop for Handle {
         let mut state = self.state.lock();
         if state.running.as_ref().is_some_and(|running| running.serial == self.serial) {
             state.running = None;
+        }
+    }
+}
+
+/// Closes its input when dropped, if that input is still the one open.
+struct InputHandle {
+    state: Arc<Mutex<State>>,
+    serial: u64,
+}
+
+impl Drop for InputHandle {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        if state.capturing.as_ref().is_some_and(|capturing| capturing.serial == self.serial) {
+            state.capturing = None;
         }
     }
 }

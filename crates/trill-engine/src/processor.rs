@@ -24,16 +24,19 @@
 //! reports go through queues that have one end), every [`mix`], the
 //! master and the monitor.
 
+use crate::capture::Reader as InputReader;
 use crate::clock::thread_cycles;
 use crate::engine::RecordPhase;
 use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
 use crate::graph::{
     AS_MADE, AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, Switch, TrackNode, TrackState, UNKNOWN,
 };
-use crate::live::{Captured, LiveTarget, TrackSet};
+use crate::live::{AudioMark, Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
+use crate::recorder::Feeds;
 use crate::spread::{Spread, Workers};
 use crate::team::Team;
+use std::sync::Arc;
 use std::time::Instant;
 use trill_core::Channel;
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
@@ -124,6 +127,9 @@ fn same_control(a: EventKind, b: EventKind) -> bool {
 }
 /// Fade applied at the edges of audio clips to avoid clicks.
 pub(crate) const CLIP_FADE_SECONDS: f64 = 0.003;
+/// How long two clips that are faded across one another both sound: the
+/// seam is in the middle of it.
+pub(crate) const CROSS_FADE_SECONDS: f64 = 0.012;
 /// Length of the cross-fade from a stand-in to the audio that replaces it.
 const HAND_OVER_SECONDS: f64 = 0.01;
 
@@ -150,6 +156,30 @@ struct LiveEvent {
     early: f64,
 }
 
+/// A take that was asked for while the place its input is read at had yet
+/// to be put for good: it begins when it has been, or when it has waited
+/// `frames` frames more.
+///
+/// An input's place is put by the first time stamps its device and the
+/// engine's give, each of which may be as late as any, and put again a
+/// quarter of a second on by the least late of them: at once, which is a
+/// step in what is read. A take that began in that quarter second would
+/// have the step in it, and what lies before it a few milliseconds from
+/// where it was sung.
+#[derive(Copy, Clone)]
+struct Waiting {
+    take: u32,
+    tracks: TrackSet,
+    count_in_beats: f64,
+    punch: Option<(f64, f64)>,
+    frames: u64,
+}
+
+/// How long a take waits for its input's place at the most, in seconds:
+/// four times what the place takes to be put. An input that hands nothing
+/// over has no place, and the take is not kept from beginning by it.
+const WAITS_FOR_ITS_PLACE: f64 = 1.0;
+
 /// A take in progress.
 #[derive(Copy, Clone)]
 struct Recording {
@@ -165,6 +195,46 @@ struct Recording {
     /// Set as the song starts rolling: the next block reports where the
     /// hand has left each controller, which is how the take begins.
     standing_due: bool,
+    /// The stretch of the song the take is punched in over, if it is: only
+    /// what is played and sung inside it is the take's. And whether the
+    /// song was inside it when that was last looked at.
+    punch: Option<(f64, f64)>,
+    inside: bool,
+}
+
+/// A signal played to the output while an input is listened to, to find
+/// out how long sound takes to go round: see
+/// [`Session::measure_latency`](crate::Session::measure_latency).
+pub(crate) struct Measure {
+    /// What is played, to both sides, and how loud.
+    pub signal: Arc<[f32]>,
+    pub gain: f32,
+    /// Which channel of the input is listened to, and room for what it
+    /// hears from the frame the signal begins at: longer than the signal
+    /// by as long as it may take to come back.
+    pub channel: usize,
+    pub heard: Box<[f32]>,
+    /// Frames done so far.
+    pub at: usize,
+}
+
+impl Measure {
+    /// Plays the next `frames` frames into the block and keeps what the
+    /// input heard meanwhile. Returns whether that was the last of it.
+    fn block(&mut self, left: &mut [f32], right: &mut [f32], heard: Option<&[f32]>, frames: usize) -> bool {
+        for frame in 0..frames {
+            let at = self.at + frame;
+            if let Some(sample) = self.signal.get(at) {
+                left[frame] += sample * self.gain;
+                right[frame] += sample * self.gain;
+            }
+            if let Some(kept) = self.heard.get_mut(at) {
+                *kept = heard.map_or(0.0, |heard| heard[frame]);
+            }
+        }
+        self.at += frames;
+        self.at >= self.heard.len()
+    }
 }
 
 pub struct Processor {
@@ -247,9 +317,12 @@ pub struct Processor {
     declick: u32,
     /// The audition voice and the metronome, heard but never rendered.
     monitor: Monitor,
-    /// Frames between rendering a frame and hearing it.
+    /// Frames between rendering a frame and hearing it, as the device last
+    /// said and as it has said of late (negative before it said anything).
     output_latency: f64,
+    steady_latency: f64,
     recording: Option<Recording>,
+    waiting: Option<Waiting>,
     /// Where what is recorded goes; `None` when rendering offline.
     capture: Option<rtrb::Producer<Captured>>,
     /// Frames played since the song position last jumped (or playback
@@ -258,6 +331,23 @@ pub struct Processor {
     continuity: u64,
     before_jump: f64,
     jump_was_wrap: bool,
+    /// What an input device hears, in the engine's clock: a frame of it
+    /// for every frame made ([`crate::capture`]). `None` with no input
+    /// open, and always in a render.
+    input: Option<Box<InputReader>>,
+    /// Where the recorded inputs' frames go while a take is recorded, and
+    /// whether they are being handed over; how many frames are still to
+    /// be handed over after the song has stopped (what was sung to the
+    /// last of it is still on its way in); and the ends that are done
+    /// with, to be let go of elsewhere.
+    feeds: Option<Box<Feeds>>,
+    feeding: bool,
+    trailing: Option<u64>,
+    finished_feeds: Option<Box<Feeds>>,
+    /// A measurement of how long sound takes to go round, while one runs,
+    /// and one that has ended.
+    measure: Option<Box<Measure>>,
+    finished_measure: Option<Box<Measure>>,
 }
 
 impl Processor {
@@ -295,12 +385,149 @@ impl Processor {
             declick: (DECLICK_SECONDS * sample_rate).round().max(1.0) as u32,
             monitor: Monitor::new(sample_rate),
             output_latency: 0.0,
+            steady_latency: -1.0,
             recording: None,
+            waiting: None,
             capture: None,
             continuity: 0,
             before_jump: 0.0,
             jump_was_wrap: false,
+            input: None,
+            feeds: None,
+            feeding: false,
+            trailing: None,
+            finished_feeds: None,
+            measure: None,
+            finished_measure: None,
         }
+    }
+
+    /// Gives the processor what an input device hears, or takes it away,
+    /// and returns what it had, to be let go of off the audio thread.
+    pub(crate) fn set_input(&mut self, input: Option<Box<InputReader>>) -> Option<Box<InputReader>> {
+        let before = std::mem::replace(&mut self.input, input);
+        self.read_what_is_wanted();
+        before
+    }
+
+    /// Gives a processor that is driven by hand an input to hear: one
+    /// that is read `delay_frames` of the processor's frames after it was
+    /// heard, on the processor's own clock or (`one_clock`) on one they
+    /// share. Before each buffer the input's side has pushed what there
+    /// is and [`Processor::begin_input`] has been called. This allocates:
+    /// never while the processor plays.
+    pub fn hear(&mut self, source: crate::capture::Source, delay_frames: u32, one_clock: bool) {
+        let reader = InputReader::new(source.0, self.sample_rate, delay_frames, one_clock);
+        self.set_input(Some(Box::new(reader)));
+    }
+
+    /// The device has asked for `frames` frames at `now_ns`: the input is
+    /// told, which sets how fast it is read for them.
+    pub fn begin_input(&mut self, now_ns: u64, frames: usize) {
+        if let Some(input) = &mut self.input {
+            input.begin(now_ns, frames);
+        }
+    }
+
+    /// Has only the channels of the input read that something takes: a
+    /// track that lets its input through, a take, a measurement.
+    fn read_what_is_wanted(&mut self) {
+        let recorded = self.feeds.as_ref().map_or(0, |feeds| feeds.channels());
+        let measured = self.measure.as_ref().map_or(0, |measure| 1u32.checked_shl(measure.channel as u32).unwrap_or(0));
+        let wanted = self.graph.inputs | recorded | measured;
+        if let Some(input) = &mut self.input {
+            input.want(wanted);
+            // What is written down or measured by has no step put in it
+            // for the sake of a better place; what is only heard may.
+            input.keep(recorded != 0 || measured != 0);
+        }
+    }
+
+    /// Gives the processor where the recorded inputs of the take that is
+    /// asked for next go, and returns the ends of a take before it that
+    /// it still had.
+    pub(crate) fn set_feeds(&mut self, feeds: Box<Feeds>) -> Option<Box<Feeds>> {
+        let before = self.feeds.replace(feeds);
+        (self.feeding, self.trailing) = (false, None);
+        self.read_what_is_wanted();
+        before
+    }
+
+    /// The ends of a take's files that nothing more is handed to, to be
+    /// let go of off the audio thread.
+    pub(crate) fn take_finished_feeds(&mut self) -> Option<Box<Feeds>> {
+        self.finished_feeds.take()
+    }
+
+    /// Begins a measurement, and returns one that was still running.
+    pub(crate) fn start_measure(&mut self, measure: Box<Measure>) -> Option<Box<Measure>> {
+        let before = self.measure.replace(measure);
+        self.read_what_is_wanted();
+        before
+    }
+
+    /// A measurement that has ended, with what it heard.
+    pub(crate) fn take_finished_measure(&mut self) -> Option<Box<Measure>> {
+        self.finished_measure.take()
+    }
+
+    /// Ends the take that is being recorded and lets the song play on: its
+    /// file is full, its device has gone.
+    pub(crate) fn end_take(&mut self) {
+        // (One that still waited for its input's place begins and ends.)
+        self.begin_waiting(true);
+        if let Some(heard) = self.heard() {
+            let (beat, pass) = heard.at(0, 0.0);
+            self.recording = None;
+            self.report(Captured::Stopped { beat, pass });
+            self.end_audio();
+        }
+    }
+
+    /// The take's song has stopped, or the take was ended: its audio goes
+    /// on being handed over for as long as what was sung to the last of
+    /// the song takes to come in.
+    fn end_audio(&mut self) {
+        if !self.feeding || self.trailing.is_some() {
+            return;
+        }
+        let Some(feeds) = &self.feeds else { return };
+        let (at, more) = (feeds.handed, u64::from(feeds.tail));
+        let delay = self.input.as_ref().map_or(0, |input| u64::from(input.delay()));
+        self.report(Captured::Audio { at, mark: AudioMark::Stopped { beat: self.position() } });
+        self.trailing = Some((delay + self.steady_output_latency().ceil() as u64 + more).max(1));
+    }
+
+    /// Nothing more of the take's audio is handed over.
+    fn finish_audio(&mut self) {
+        let at = self.feeds.as_ref().map_or(0, |feeds| feeds.handed);
+        self.report(Captured::Audio { at, mark: AudioMark::Ended });
+        (self.feeding, self.trailing) = (false, None);
+        self.finished_feeds = self.feeds.take();
+        self.read_what_is_wanted();
+    }
+
+    /// Says that the song has come into the stretch a take is punched in
+    /// over, and that it has left it, each time it does: asked at the
+    /// first frame of every block, and blocks end on both edges.
+    fn mark_punch(&mut self) {
+        let Some(recording) = self.recording else { return };
+        let Some((from, to)) = recording.punch else { return };
+        if !self.playing || recording.count_in > 0 {
+            return;
+        }
+        let position = self.position();
+        let at = self.feeds.as_ref().map_or(0, |feeds| feeds.handed);
+        let inside = position >= from - 1e-9 && position < to - 1e-9;
+        if inside == recording.inside {
+            return;
+        }
+        if let Some(recording) = &mut self.recording {
+            recording.inside = inside;
+        }
+        let mark =
+            if inside { AudioMark::PunchedIn { beat: position } } else { AudioMark::PunchedOut { beat: position } };
+        self.report(Captured::Audio { at, mark });
     }
 
     pub fn sample_rate(&self) -> f64 {
@@ -409,6 +636,13 @@ impl Processor {
             recording.standing_due = true;
         }
         self.report(Captured::Rolling { beat: self.position() });
+        if let (true, Some(feeds)) = (self.feeding, &self.feeds) {
+            let at = feeds.handed;
+            let delay = self.input.as_ref().map_or(0, |input| input.delay());
+            let latency = self.steady_output_latency().round() as u32;
+            let mark = AudioMark::Rolling { beat: self.position(), latency, delay };
+            self.report(Captured::Audio { at, mark });
+        }
     }
 
     /// Stops the transport. Sounding notes are released, those held by
@@ -416,11 +650,15 @@ impl Processor {
     /// silence a key that hangs), and tails ring out. A take that was being
     /// recorded ends here.
     pub fn stop(&mut self) {
+        // A take that still waited for its input's place begins here and
+        // ends here: whoever asked for it is told both.
+        self.begin_waiting(true);
         if let Some(heard) = self.heard() {
             // Where the song was heard to be when it was stopped.
             let (beat, pass) = heard.at(0, 0.0);
             self.recording = None;
             self.report(Captured::Stopped { beat, pass });
+            self.end_audio();
         }
         self.playing = false;
         self.flush = Flush::Everything;
@@ -489,6 +727,27 @@ impl Processor {
         self.continuity = 0;
         self.before_jump = before;
         self.jump_was_wrap = wrap;
+        // A take's audio is told where the song was sent. (Where it came
+        // round its loop is said there, by the loop's own end.)
+        let to = self.position();
+        if !wrap && to != before {
+            self.mark_jump(before, to, false);
+        }
+    }
+
+    /// Tells a take's audio that the song is no longer where the frames
+    /// handed over lead to: what is handed over from here on was sung to
+    /// another place. Only while the take's song rolls; where it rolls
+    /// from is said when it does.
+    fn mark_jump(&mut self, from: f64, to: f64, round: bool) {
+        let rolls = self.playing && self.recording.is_some_and(|recording| recording.count_in == 0);
+        if rolls
+            && self.feeding
+            && self.trailing.is_none()
+            && let Some(at) = self.feeds.as_ref().map(|feeds| feeds.handed)
+        {
+            self.report(Captured::Audio { at, mark: AudioMark::Jumped { from, to, round } });
+        }
     }
 
     /// Silences everything immediately, including reverb and delay tails.
@@ -552,6 +811,21 @@ impl Processor {
     /// behind where the engine is.
     pub fn set_output_latency(&mut self, frames: u32) {
         self.output_latency = frames as f64;
+        // What a device says of it with every buffer flutters by a
+        // fraction of a millisecond with the moment it is asked; what
+        // lies between the engine and the speaker does not. A take's
+        // audio is placed by a figure that moves over seconds, so that
+        // two takes, and a measurement, are placed by the same one.
+        let steady = self.steady_latency;
+        let far = (self.output_latency - steady).abs() > 0.02 * self.sample_rate;
+        self.steady_latency =
+            if steady < 0.0 || far { self.output_latency } else { steady + (self.output_latency - steady) * 0.004 };
+    }
+
+    /// [`Processor::set_output_latency`] as it has been of late: what a
+    /// take's audio is placed by.
+    pub(crate) fn steady_output_latency(&self) -> f64 {
+        self.steady_latency.max(0.0)
     }
 
     /// Where a take's events are reported. Returns where they went before.
@@ -647,9 +921,42 @@ impl Processor {
 
     /// Starts the take numbered `take` on `tracks`. If the song is stopped
     /// it starts playing, after `count_in_beats` of metronome; if it is
-    /// playing, the take begins where the song is.
-    pub(crate) fn record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64) {
+    /// playing, the take begins where the song is. With `punch`, only what
+    /// is played and sung while the song is inside that stretch is the
+    /// take's. The inputs that are recorded are handed to the ends the
+    /// processor was given for this take ([`Processor::set_feeds`]) from
+    /// here on, the count-in too: what was sung into the downbeat is there
+    /// to be drawn out from under the clip's edge.
+    pub(crate) fn record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64, punch: Option<(f64, f64)>) {
+        // No step inside a take: one that records an input and is not
+        // counted in begins when the place the input is read at has been
+        // put for good. (A take that is counted in begins at once: the
+        // place is put while the count-in goes by, ahead of the take's
+        // first frame, and stays from where the song begins to roll.)
+        let counted = !self.playing && count_in_beats.is_finite() && count_in_beats > 0.0;
+        let unsettled = self.input.as_ref().is_some_and(|input| !input.settled());
+        if self.feeds.is_some() && unsettled && !counted {
+            let frames = (WAITS_FOR_ITS_PLACE * self.sample_rate) as u64;
+            self.waiting = Some(Waiting { take, tracks, count_in_beats, punch, frames });
+            return;
+        }
+        self.begin_record(take, tracks, count_in_beats, punch);
+    }
+
+    /// Begins the take that waits for its input's place, if that has been
+    /// put, if the take has waited as long as one does, or `anyway`.
+    fn begin_waiting(&mut self, anyway: bool) {
+        let Some(waiting) = self.waiting else { return };
+        let settled = self.input.as_ref().is_none_or(|input| input.settled());
+        if anyway || settled || waiting.frames == 0 {
+            self.waiting = None;
+            self.begin_record(waiting.take, waiting.tracks, waiting.count_in_beats, waiting.punch);
+        }
+    }
+
+    fn begin_record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64, punch: Option<(f64, f64)>) {
         self.report(Captured::Began { take });
+        (self.feeding, self.trailing) = (self.feeds.is_some(), None);
         // The take is counted in at the tempo, and in the meter, that the
         // song has where it starts.
         let signature = self.graph.meter_map.signature_at(self.position());
@@ -657,7 +964,8 @@ impl Processor {
         let count_in_beats = if self.playing || !count_in_beats.is_finite() { 0.0 } else { count_in_beats.max(0.0) };
         let count_in = (count_in_beats / self.beats_per_frame()).round() as u64;
         let click_shift = if bar > 0.0 { (count_in_beats / bar).ceil() * bar } else { 0.0 };
-        self.recording = Some(Recording { tracks, count_in, click_shift, pass: 0, standing_due: false });
+        self.recording =
+            Some(Recording { tracks, count_in, click_shift, pass: 0, standing_due: false, punch, inside: false });
         if count_in == 0 {
             self.play();
             self.rolling();
@@ -666,6 +974,8 @@ impl Processor {
 
     pub(crate) fn record_phase(&self) -> RecordPhase {
         match &self.recording {
+            // A take that waits for its input's place has yet to roll.
+            None if self.waiting.is_some() => RecordPhase::CountIn,
             None => RecordPhase::Off,
             Some(recording) if recording.count_in > 0 => RecordPhase::CountIn,
             Some(_) => RecordPhase::Rolling,
@@ -694,6 +1004,7 @@ impl Processor {
         }
         let tempo_changed = new.tempo_map != self.graph.tempo_map;
         let old = std::mem::replace(&mut self.graph, new);
+        self.read_what_is_wanted();
         if tempo_changed {
             // The song stays at the beat it is at, and goes on from there
             // at the tempo it now has.
@@ -784,6 +1095,13 @@ impl Processor {
         while done < total {
             let mut frames = (total - done).min(MAX_BLOCK);
 
+            // A take that waited for the place its input is read at
+            // begins with the first block after it was put.
+            if let Some(waiting) = &mut self.waiting {
+                waiting.frames = waiting.frames.saturating_sub(frames as u64);
+                self.begin_waiting(false);
+            }
+
             // End the block exactly where a count-in ends, so the song
             // starts on the sample.
             let counting = self.recording.map_or(0, |recording| recording.count_in);
@@ -809,6 +1127,18 @@ impl Processor {
                         frames = until as usize;
                     }
                 }
+                // And where a take that is punched in begins and ends, so
+                // that what is under it goes and comes on the frame.
+                if let Some((from, to)) = self.recording.and_then(|recording| recording.punch) {
+                    for edge in [from, to] {
+                        if position < edge - 1e-9 {
+                            let until = ((edge - position) / self.beats_per_frame - 1e-6).ceil().max(1.0);
+                            if until < frames as f64 {
+                                frames = until as usize;
+                            }
+                        }
+                    }
+                }
             }
 
             // End the block exactly at the loop end so the wrap is sample
@@ -830,8 +1160,15 @@ impl Processor {
             }
 
             let limit = wrap.map(|(_, end)| end);
+            self.mark_punch();
             self.process_block(&mut left[done..done + frames], &mut right[done..done + frames], limit, done);
             done += frames;
+            if let Some(left) = self.trailing {
+                self.trailing = Some(left.saturating_sub(frames as u64));
+                if left <= frames as u64 {
+                    self.finish_audio();
+                }
+            }
 
             if self.playing {
                 self.frames += frames as u64;
@@ -840,7 +1177,7 @@ impl Processor {
                 if self.frames >= self.stretch_frames && wrap.is_none() {
                     self.begin_stretch();
                 }
-                if let Some((start, _)) = wrap {
+                if let Some((start, end)) = wrap {
                     // Restart exactly on the loop start. The block above ran
                     // to the first frame at or past the loop end, so a loop
                     // is at most one frame longer than its length in beats,
@@ -851,6 +1188,9 @@ impl Processor {
                     self.chase = true;
                     self.take_back = true;
                     self.jumped(reached, true);
+                    // A take's audio came round with it: a pass ends on
+                    // the loop's end, and the next begins on its start.
+                    self.mark_jump(end, start, true);
                     let pass = self.recording.as_mut().map(|recording| {
                         recording.pass += 1;
                         recording.pass
@@ -920,6 +1260,15 @@ impl Processor {
     /// trigger notes, so nothing past a loop end sounds before the wrap.
     fn process_block(&mut self, out_left: &mut [f32], out_right: &mut [f32], limit: Option<f64>, block_start: usize) {
         let frames = out_left.len();
+        // The input's frames for this block, taken once and before any
+        // track is made: every track, on whichever thread, reads the same
+        // ones; and a take's files are handed them.
+        if let Some(input) = &mut self.input {
+            input.take(frames);
+        }
+        if let (true, Some(feeds)) = (self.feeding, &mut self.feeds) {
+            feeds.push(self.input.as_deref(), frames);
+        }
         let start_beat = self.position();
         let beats_per_frame = self.beats_per_frame();
         // Computed the same way as the next block's start, so consecutive
@@ -960,6 +1309,12 @@ impl Processor {
         let has_live = self.live.iter().any(|event| block.contains(&event.offset));
         // Where a take's events are written: see `Heard`.
         let heard = self.heard();
+        // The tracks a take is being recorded on right now: what they
+        // have under it is not heard. With a punch, only inside it.
+        let over = self.recording.filter(|recording| playing && recording.count_in == 0).filter(|recording| {
+            recording.punch.is_none_or(|(from, to)| start_beat >= from - 1e-9 && start_beat < to - 1e-9)
+        });
+        let over = over.map_or_else(TrackSet::default, |recording| recording.tracks);
         let span = Span { playing, start_beat, anchor_beat: self.anchor_beat, elapsed: self.frames, beats_per_frame };
         // Where the song is for the parameters its envelopes move.
         let param_beat = span.beat_on_grid(PARAM_STEP);
@@ -1000,6 +1355,8 @@ impl Processor {
             declick,
             sample_rate: self.sample_rate,
             cycles: self.cycles,
+            input: self.input.as_deref(),
+            over,
         };
         let mut hand = Hand {
             live: &self.live,
@@ -1105,6 +1462,15 @@ impl Processor {
                 self.monitor.mix(out_left, out_right, playing.then(|| beats_from(start_beat - since, until)), false)
             }
         }
+        // A measurement plays its signal straight to the device, past the
+        // song and the master, and keeps what the input hears meanwhile.
+        if let Some(measure) = &mut self.measure {
+            let heard = self.input.as_deref().map(|input| input.channel(measure.channel));
+            if measure.block(out_left, out_right, heard.filter(|heard| heard.len() >= frames), frames) {
+                self.finished_measure = self.measure.take();
+                self.read_what_is_wanted();
+            }
+        }
     }
 }
 
@@ -1133,6 +1499,11 @@ pub(crate) struct Common<'a> {
     /// The cycles each thread runs over a track's block are counted
     /// beside the clock's time: see [`Processor::count_cycles`].
     pub cycles: bool,
+    /// What the audio device's input heard for the block, a frame of it
+    /// for every frame of the block: the same for every track.
+    input: Option<&'a InputReader>,
+    /// The tracks a take is being recorded over in this block.
+    over: TrackSet,
 }
 
 impl Common<'_> {
@@ -1314,6 +1685,52 @@ pub(crate) fn sound(track: &mut TrackNode, common: &Common, buses: &[Bus], room:
     }
     let unordered = room.unordered;
     gather(track, common, room, unordered);
+    hear_input(track, common, room);
+}
+
+/// What a track that records an input of the audio device makes of it in
+/// the block: nothing of what its clips play is heard while a take is
+/// recorded over them, and the input is let through to the track's
+/// devices where it is monitored. Both come and go over a few
+/// milliseconds. A track that records no input is not touched.
+fn hear_input(track: &mut TrackNode, common: &Common, room: &mut Room) {
+    let Some(tap) = track.input else { return };
+    let frames = common.controls.frames;
+    let Room { left, right, shares, .. } = room;
+    let (left, right, shares) = (&mut left[..frames], &mut right[..frames], &mut shares[..frames]);
+    match track.state.under.fill(!common.over.contains(track.id), common.declick, shares) {
+        // Wide open: what the track has under the take is as it was.
+        Some(share) if share >= 1.0 => {}
+        Some(share) => {
+            scale(left, share);
+            scale(right, share);
+        }
+        None => {
+            scale_by(left, shares);
+            scale_by(right, shares);
+        }
+    }
+    let heard = common.input.filter(|_| tap.heard);
+    let share = track.state.monitor.fill(heard.is_some(), common.declick, shares);
+    // (The gate is worked whether or not there is an input, so that one
+    // which comes back finds it shut and comes up from nothing.)
+    let Some(input) = common.input else { return };
+    let from = |channel: usize| Some(input.channel(channel)).filter(|heard| heard.len() >= frames);
+    let Some(one) = from(tap.left) else { return };
+    // One channel alone is in the middle; a pair is left and right.
+    let other = tap.right.map_or(Some(one), from).unwrap_or(&one[..0]);
+    match share {
+        // Shut: nothing of the input is heard.
+        Some(share) if share <= 0.0 => {}
+        Some(share) => {
+            add_scaled(&one[..frames], left, share);
+            add_scaled(&other[..frames.min(other.len())], right, share);
+        }
+        None => {
+            add_scaled_by(&one[..frames], left, shares);
+            add_scaled_by(&other[..frames.min(other.len())], right, shares);
+        }
+    }
 }
 
 /// What is left of a track's block once its devices have all run: it is
@@ -2123,10 +2540,17 @@ fn render_audio(track: &mut TrackNode, block: &Block, left: &mut [f32], right: &
         // A piece of a clip is faded over the click guard where it meets
         // another piece: counted, like the clip's fades, in frames from
         // the piece's own edges.
-        let seams = (region.seam_before || region.seam_after).then(|| {
+        let crossed = region.cross_before || region.cross_after;
+        let seams = (region.seam_before || region.seam_after || crossed).then(|| {
             let since = block.tempo.frames_between(region.start, block.start_beat, rate);
             (since, block.tempo.frames_between(region.start, region.end, rate))
         });
+        let cross = CROSS_FADE_SECONDS * block.sample_rate;
+        // An edge that is faded across another clip has no fade of its
+        // own: the region reaches past the clip's edge, and the fade
+        // across the seam is all there is to it.
+        let fade_in = if region.cross_before { 0.0 } else { fade_in };
+        let fade_out = if region.cross_after { 0.0 } else { fade_out };
         // Both edges are worked out the same way from a timeline position,
         // so that where one clip ends on the beat another starts on, the
         // frame at the seam belongs to exactly one of them.
@@ -2156,6 +2580,15 @@ fn render_audio(track: &mut TrackNode, block: &Block, left: &mut [f32], right: &
                 let rise = if region.seam_before { t / guard } else { 1.0 };
                 let fall = if region.seam_after { (piece - t) / guard } else { 1.0 };
                 gain *= rise.min(fall).clamp(0.0, 1.0) as f32;
+                // Two recordings across a seam: one comes as the sine of
+                // what the other goes as the cosine of, which keeps what
+                // they add up to as loud as either.
+                if region.cross_before {
+                    gain *= ((t / cross).clamp(0.0, 1.0) * std::f64::consts::FRAC_PI_2).sin() as f32;
+                }
+                if region.cross_after {
+                    gain *= (((piece - t) / cross).clamp(0.0, 1.0) * std::f64::consts::FRAC_PI_2).sin() as f32;
+                }
             }
             left[i] += sample_left * gain;
             right[i] += sample_right * gain;
@@ -2213,6 +2646,7 @@ mod tests {
 
     fn track(notes: &[(f64, f64, u8)]) -> TrackNode {
         TrackNode {
+            input: None,
             id: TrackId(1),
             notes: (notes.iter())
                 .map(|&(start, end, pitch)| NoteEvent { start, end, pitch, velocity: 127, channel: Channel::FIRST })

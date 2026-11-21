@@ -20,6 +20,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# What `windows` is built on, named so that its `implement` macro finds it:
+# the same crate and version `windows` brings in itself, and nothing new
+# to build. For the one COM object Trill makes, which watches the shell
+# put a recording in the Recycle Bin.
+windows-core = "0.62"
 # For taking an output device exclusively (WASAPI), which the audio library
 # does not offer. The same crate and version it brings in itself.
 windows = { version = "0.62", features = [
@@ -28,8 +33,18 @@ windows = { version = "0.62", features = [
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
     "Win32_System_Com",
+    # The Recycle Bin: a recording Trill removes goes there, with undo.
+    "Win32_UI_Shell",
     # How much memory the process holds: plugins that load samples show in it.
     "Win32_System_ProcessStatus",
+    # The counter a capture buffer is stamped with, to say how old it is.
+    "Win32_System_Performance",
+    # Which piece of hardware an endpoint belongs to: an input and an
+    # output of one device count time by one clock.
+    "Win32_Devices_Properties",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Threading",
     # How much of its processor a thread has had, for telling a block that
     # took long to compute from a thread the system held up.

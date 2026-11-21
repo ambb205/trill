@@ -43,6 +43,10 @@ use trill_engine::{Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
 use trill_runtime::{Runtime, SoundClip, SoundError};
 
+/// How long the reply to a stop waits for the take it ended to be in the
+/// project: longer than the session itself waits for an audio thread that
+/// never says where the take ended.
+const TAKE_IS_IN_WITHIN: Duration = Duration::from_millis(2500);
 const SAMPLER_URI: &str = "builtin:sampler";
 const DRUM_RACK_URI: &str = "builtin:drumrack";
 /// Search results returned when the caller does not say how many, and the
@@ -485,6 +489,7 @@ impl TrillServer {
             + Self::wavetable_router()
             + Self::catalogue_router()
             + Self::playing_router()
+            + Self::recording_router()
     }
 
     /// The names of the tools the server offers.
@@ -1148,11 +1153,27 @@ impl TrillServer {
         });
         // Arming is the session's, not the project's: no undo step.
         let reply = reply.and_then(|mut out| {
+            let input = session.project().track(id).ok().and_then(|track| track.input);
             if let Some(armed) = request.armed {
+                // A track that records an input opens the microphone when
+                // it is armed: at the assistant's door that is the user's
+                // own hand on the arm button, or nothing.
+                if armed && self.is_guarded() && input.is_some() && !session.is_armed(id) {
+                    return Err("This track records an input of the audio device, and arming it opens the microphone:                                 the user arms it themselves, with the track's arm button. Once it is armed, transport                                 records it."
+                        .into());
+                }
                 session.set_armed(id, armed).map_err(|error| explain(session.project(), error))?;
             }
             if session.is_armed(id) {
                 out["armed"] = json!(true);
+                if let Some(input) = input {
+                    out["records"] = json!(input.said());
+                    // What is wrong with the input, if anything is, before a take is asked for.
+                    let _ = session.ready_input();
+                    if let Some(problem) = session.input_status().problem {
+                        out["input_problem"] = json!(problem);
+                    }
+                }
             }
             Ok(out)
         });
@@ -2603,6 +2624,9 @@ impl TrillServer {
             if let Some(on) = request.metronome {
                 session.set_metronome(on);
             }
+            if let Some(on) = request.punch {
+                session.set_punch(on);
+            }
             // The audio thread applies commands at its next callback, so the
             // reply states what was asked for rather than a stale reading.
             let current = session.transport();
@@ -2625,11 +2649,31 @@ impl TrillServer {
                 TransportAction::Stop => {
                     let recording = session.is_recording();
                     session.stop();
+                    // A take is over when the last of what was sung has
+                    // come in, which is as long as sound takes to go
+                    // round. That is waited for here, since this reply
+                    // says what was recorded, and with the session let go
+                    // of meanwhile: the window is not kept from it.
+                    let deadline = std::time::Instant::now() + TAKE_IS_IN_WITHIN;
+                    while recording && session.is_recording() && std::time::Instant::now() < deadline {
+                        parking_lot::MutexGuard::unlocked(&mut session, || {
+                            std::thread::sleep(Duration::from_millis(5))
+                        });
+                        session.housekeeping();
+                    }
                     let mut out = commanded(false, current.position_beats);
                     if recording {
                         // The take is in the project by now.
                         out["take"] = take_json(session.last_take());
-                        if session.last_take().is_empty() {
+                        // And what was recorded of the inputs: where its
+                        // files are, how loud they were, what was missing.
+                        let rate = session.audio_info().sample_rate;
+                        let audio =
+                            session.last_recording().map(|recorded| crate::recording::recorded_json(recorded, rate));
+                        if let Some(audio) = &audio {
+                            out["recorded"] = audio.clone();
+                        }
+                        if session.last_take().is_empty() && audio.is_none() {
                             out["note"] = json!("Nothing was played during the recording, so no clip was made.");
                         }
                     }
@@ -2659,6 +2703,21 @@ impl TrillServer {
                         "tracks": session.armed(),
                         "count_in_bars": count_in,
                     });
+                    // Which of them record an input of the audio device.
+                    let inputs: Vec<Value> = session
+                        .armed()
+                        .iter()
+                        .filter_map(|track| session.project().track(*track).ok())
+                        .filter_map(|track| Some(json!({ "track_id": track.id, "records": track.input?.said() })))
+                        .collect();
+                    if !inputs.is_empty() {
+                        out["recording"]["inputs"] = json!(inputs);
+                    }
+                    if session.punch() {
+                        let region = session.project().loop_region;
+                        out["recording"]["punched_in"] =
+                            json!({ "from_beat": round(region.start), "to_beat": round(region.end) });
+                    }
                     out
                 }
                 TransportAction::Status => transport_json(&session),
@@ -2672,9 +2731,11 @@ impl TrillServer {
     /// stops playback). What cannot be had is replaced by the nearest thing, and `warning` then says why.
     #[tool(annotations(title = "Audio device"))]
     async fn audio(&self, Parameters(request): Parameters<AudioRequest>) -> CallToolResult {
-        let runtime = self.runtime.clone();
+        let (runtime, guarded) = (self.runtime.clone(), self.is_guarded());
         // Listing devices and opening one both wait on the system.
         let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            // A client the user set up is the user's hand, on this thread too.
+            let _hand = (!guarded).then(trill_engine::hand::by_hand);
             match request.action {
                 AudioAction::Status => Ok(audio_json(&runtime.audio_status())),
                 AudioAction::Devices => {
@@ -2702,6 +2763,24 @@ impl TrillServer {
                     }
                     if let Some(exclusive) = request.exclusive {
                         config.exclusive = exclusive;
+                    }
+                    if let Some(input) = &request.input {
+                        let named = input.trim();
+                        let follow_system = named.is_empty() || named.eq_ignore_ascii_case("default");
+                        let wanted = (!follow_system).then(|| named.to_string());
+                        // What the user let live is the device that was
+                        // the input then: the assistant does not put
+                        // another microphone in its place.
+                        let live = runtime.session.lock().input_status();
+                        if guarded && wanted != config.input && (live.needed || live.open.is_some()) {
+                            return Err(
+                                "The input is live, and which device is recorded from is the user's to change \
+                                        while it is: in the audio settings. With nothing armed or heard it can be \
+                                        changed here."
+                                    .into(),
+                            );
+                        }
+                        config.input = wanted;
                     }
                     let (status, saved) = runtime.set_audio(config);
                     let mut out = audio_json(&status);
@@ -2963,7 +3042,17 @@ impl TrillServer {
             };
             session.save(&path).map_err(|error| error.to_string())?;
             self.runtime.song_is_at(&path);
-            Ok(json!({ "saved": path.display().to_string() }))
+            let mut out = json!({ "saved": path.display().to_string() });
+            if let Some(coming) = session.recordings_coming() {
+                // Recordings that could be given no second name beside
+                // the song (another volume) are copied after the save.
+                out["recordings"] = json!(format!(
+                    "{} recording(s), {} bytes, are being copied beside the song. The song is saved and plays them \
+                     from where they are; when each copy is whole the song and its file name it there.",
+                    coming.files, coming.total
+                ));
+            }
+            Ok(out)
         })();
         finish(reply)
     }
@@ -3456,6 +3545,10 @@ fn add_range_warning(out: &mut Value, session: &Session, clip: ClipId) {
 /// the session while it runs is entered in the journal as that call's.
 struct Acted<'a> {
     call: Option<CallId>,
+    /// Whether the call is the user's own hand: a client the user set
+    /// up is, and the door of the assistant in the window never is. Only
+    /// the user's hand opens a microphone ([`trill_engine::hand`]).
+    by_hand: bool,
     future: Pin<Box<dyn Future<Output = Result<CallToolResponse, ErrorData>> + Send + 'a>>,
 }
 
@@ -3466,6 +3559,7 @@ impl Future for Acted<'_> {
         // Only for the length of the poll: between polls the thread is
         // someone else's, and the next poll may be on another.
         let _acting = self.call.map(trill_engine::journal::acting);
+        let _hand = self.by_hand.then(trill_engine::hand::by_hand);
         self.future.as_mut().poll(context)
     }
 }
@@ -3532,7 +3626,8 @@ impl ServerHandler for TrillServer {
         };
         let closing = Closing { session: &self.session, call };
         let running = ToolCallContext::new(self, request, context);
-        let response = Acted { call, future: Box::pin(self.tool_router.call(running)) }.await;
+        let by_hand = !self.is_guarded();
+        let response = Acted { call, by_hand, future: Box::pin(self.tool_router.call(running)) }.await;
         closing.with(|session| {
             let answered = match &response {
                 Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true) => {
@@ -3556,7 +3651,7 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::catalogue::INSTRUCTIONS,
                 crate::listening::INSTRUCTIONS,
@@ -3567,6 +3662,7 @@ impl ServerHandler for TrillServer {
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,
                 crate::playing::INSTRUCTIONS,
+                crate::recording::INSTRUCTIONS,
                 crate::story::INSTRUCTIONS,
                 crate::film::INSTRUCTIONS
             ))

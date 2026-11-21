@@ -60,6 +60,8 @@ Options:
   --watch <FILE.trillstory>   Start watching a making-of that was written out to a file
   --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
   --arm <TRACK NAME>      Arm this track at startup; may be given several times
+  --recording <SCENE>     Put a made-up session of recording in the audio hardware's place, for
+                          screenshots: takes, rolling or latency
   --record                Start recording on the armed tracks when the window opens (F9 does it)
   --stage                 Open on the stage: the song filmed as it plays (F11 shows it)
   --film                  Start with the film panel open: File, Export a film (Ctrl+Shift+F shows it)
@@ -121,6 +123,8 @@ pub struct Cli {
     pub load: Option<crate::ui::LoadScene>,
     /// Show the song in the middle of being opened, made up.
     pub opening: Option<crate::ui::OpeningScene>,
+    /// A made-up session of recording, on devices that exist only there.
+    pub recording: Option<crate::ui::RecordingScene>,
     /// What to search the sound library for.
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
@@ -333,6 +337,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                     scene.with_context(|| format!("unknown load '{name}' (expected one of {})", known.join(", ")))?,
                 );
             }
+            "--recording" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = crate::ui::RecordingScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = crate::ui::RecordingScene::named(&name);
+                cli.recording = Some(scene.with_context(|| {
+                    format!("unknown recording scene '{name}' (expected one of {})", known.join(", "))
+                })?);
+            }
             "--opening" => {
                 let name = value("the name of a scene")?;
                 let known: Vec<&str> = crate::ui::OpeningScene::ALL.iter().map(|(name, _)| *name).collect();
@@ -505,7 +517,7 @@ impl Cli {
                 mcp_off: self.mcp_address().is_none(),
             },
             keyboard: self.keyboard.clone(),
-            show_settings: self.settings,
+            show_settings: self.settings || self.recording == Some(crate::ui::RecordingScene::Latency),
             show_setup: self.setup,
             setup_scene: self.setup_scene,
             study: self.study.clone(),
@@ -517,6 +529,7 @@ impl Cli {
             show_load: self.load.is_some(),
             load_scene: self.load,
             opening_scene: self.opening,
+            recording_scene: self.recording,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

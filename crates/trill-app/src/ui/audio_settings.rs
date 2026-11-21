@@ -23,6 +23,10 @@
 //! program holds: each is said in the panel, in the engine's own words
 //! where it has some, and nothing is thrown at the user as an error.
 
+mod input;
+
+pub use input::input_device;
+
 use super::state::{AudioSummary, Cx};
 use super::status_bar::format_rate;
 use eframe::egui::{self, Align, Align2, Id, Layout, Rect, Response, Sense, Ui, UiBuilder, pos2, vec2};
@@ -57,9 +61,20 @@ enum Done {
     Rescanned(bool),
 }
 
+/// The pages of the panel.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum Page {
+    /// The devices, what is running, and the MIDI inputs.
+    #[default]
+    Devices,
+    /// What is arriving on the input, and how long sound takes to go round.
+    Input,
+}
+
 /// The panel and what it is waiting for.
 pub struct Settings {
     open: bool,
+    page: Page,
     /// What the form shows: the wish being edited.
     draft: AudioConfig,
     /// The audio devices as last listed; `None` until a list has come.
@@ -75,6 +90,9 @@ pub struct Settings {
     midi: Vec<MidiInputInfo>,
     /// Per input: the message count last seen, and when it last moved.
     lamps: HashMap<String, (u64, f64)>,
+    /// The audio input's part: whether its level is on show, and which
+    /// channel a measurement listens on.
+    input: input::InputPanel,
     sender: Sender<Done>,
     receiver: Receiver<Done>,
 }
@@ -84,6 +102,7 @@ impl Default for Settings {
         let (sender, receiver) = channel();
         Self {
             open: false,
+            page: Page::default(),
             draft: AudioConfig::default(),
             devices: None,
             listing: false,
@@ -93,6 +112,7 @@ impl Default for Settings {
             rescan_timed_out: false,
             midi: Vec::new(),
             lamps: HashMap::new(),
+            input: input::InputPanel::default(),
             sender,
             receiver,
         }
@@ -109,6 +129,12 @@ impl Settings {
     /// nothing on the window's own thread may wait for it.
     pub fn is_applying(&self) -> bool {
         self.applying
+    }
+
+    /// True while the panel shows the input's level, and so holds the
+    /// input open.
+    pub fn is_listening(&self) -> bool {
+        self.input.is_listening()
     }
 
     /// True while the panel shows something that is still on its way: the
@@ -176,6 +202,18 @@ pub fn toggle(cx: &mut Cx) {
     if cx.settings.open { close(cx) } else { open(cx) }
 }
 
+/// Opens the panel on its page of the input.
+pub fn open_on_input(cx: &mut Cx) {
+    open(cx);
+    cx.settings.page = Page::Input;
+}
+
+/// Opens the panel with the input's level on show, which opens the input.
+pub fn open_showing_level(cx: &mut Cx) {
+    open_on_input(cx);
+    input::listen(cx, true);
+}
+
 /// Puts the panel away, unless a stream is being opened: the session is
 /// busy for as long as that takes, and with the panel gone the next click
 /// in the window would wait for it. The panel stays up and says what it
@@ -183,6 +221,9 @@ pub fn toggle(cx: &mut Cx) {
 /// window that has frozen.
 pub fn close(cx: &mut Cx) {
     if !cx.settings.applying {
+        // The panel no longer shows the input's level, so it no longer
+        // holds the input open.
+        input::closed(cx);
         cx.settings.open = false;
     }
 }
@@ -206,6 +247,10 @@ fn apply(cx: &mut Cx) {
     cx.settings.save_problem = None;
     let (sender, config) = (cx.settings.sender.clone(), cx.settings.draft.clone());
     cx.sounds.quietly(move |runtime| {
+        // Apply was pressed: the worker that opens the devices does it
+        // for the user's hand, which may change the device that is
+        // recorded from while it is live.
+        let _hand = trill_engine::hand::by_hand();
         let (_, saved) = runtime.set_audio(config);
         let _ = sender.send(Done::Applied(saved.map_err(|error| error.to_string())));
         // What can be chosen may have changed with it.
@@ -466,24 +511,52 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
             paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
             ui.add_space(8.0);
 
-            output(ui, cx);
-            ui.add_space(14.0);
-            running(ui, cx);
-            ui.add_space(14.0);
-            midi(ui, cx, now);
+            // Two pages, so that the whole of either stands in the
+            // smallest window: what plays and what is played with, and
+            // what is recorded.
+            let (tabs, _) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.chip), Sense::hover());
+            let labels = ["Devices and MIDI", "Input and round trip"];
+            let shown = cx.settings.page as usize;
+            let (clicked, _) = trill_noir::chip_row(
+                ui,
+                theme,
+                tabs.min,
+                WIDTH,
+                ui.scope_id().with("pages"),
+                &labels,
+                Some(shown),
+                false,
+            );
+            match clicked {
+                Some(0) => cx.settings.page = Page::Devices,
+                Some(_) => cx.settings.page = Page::Input,
+                None => {}
+            }
+            ui.add_space(10.0);
+            match cx.settings.page {
+                Page::Devices => {
+                    output(ui, cx);
+                    ui.add_space(14.0);
+                    running(ui, cx);
+                    ui.add_space(14.0);
+                    midi(ui, cx, now);
+                }
+                Page::Input => input::section(ui, cx),
+            }
         });
     if modal.should_close() {
         close(cx);
     }
 }
 
-/// The form: device, sample rate, buffer and exclusive mode, what applying
-/// it costs, and the buttons that apply it or put it back.
+/// The form: the device that plays and the one recorded from, sample rate,
+/// buffer and exclusive mode, what applying it costs, and the buttons that
+/// apply it or put it back.
 fn output(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
     let id = ui.scope_id().with("output");
     let busy = cx.settings.applying;
-    let row = heading(ui, theme, "Output");
+    let row = heading(ui, theme, "Devices");
     let listing = cx.settings.listing;
     if heading_button(ui, cx, row, "Refresh", listing, "Look again for the audio devices that are connected") {
         list_devices(cx);
@@ -517,6 +590,10 @@ fn output(ui: &mut Ui, cx: &mut Cx) {
             }
         });
     }
+    ui.add_space(theme.metric.gap);
+
+    // The device that is recorded from.
+    input::device_row(ui, cx, &mut draft, devices.as_ref(), id);
     ui.add_space(theme.metric.gap);
 
     // Sample rate and buffer, side by side.
