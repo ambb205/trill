@@ -18,6 +18,7 @@ trill-media.workspace = true
 trill-plugins.workspace = true
 trill-study.workspace = true
 trill-together.workspace = true
+trill-update.workspace = true
 log.workspace = true
 # MIDI ports. Small, and on Windows built on the `windows` crate the audio
 # side already brings in.

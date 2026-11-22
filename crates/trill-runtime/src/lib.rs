@@ -70,6 +70,8 @@ pub mod study_files;
 mod studying;
 pub mod taking;
 pub mod together;
+mod updating;
+pub use updating::{UPDATE_FOLDER, UpdateNotice};
 
 pub use files::{Going, OnItsWay, RECEIVED_FOLDER, Waiting};
 pub use instruments::{Arrived, Ask, INSTRUMENTS, SETS_FOLDER, fetch_list, part_of};
@@ -159,6 +161,10 @@ pub struct Parts {
     /// A catalogue of instruments in place of the one that is built in:
     /// a test's own, whose sets are on its shelf.
     pub catalogue: Option<trill_catalogue::Catalogue>,
+    /// A program in place of the one that is running, for what it knows
+    /// of a newer Trill: a made-up version, key and folder, whose
+    /// releases are on a test's shelf.
+    pub updating: Option<trill_update::Options>,
 }
 
 /// The audio stream: what was asked for and what is.
@@ -222,6 +228,8 @@ pub struct Runtime {
     instruments: instruments::Known,
     /// A catalogue of instruments in place of the one that is built in.
     catalogue: Option<Arc<trill_catalogue::Catalogue>>,
+    /// What is known of a newer Trill.
+    updating: trill_update::Updates,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
@@ -365,6 +373,7 @@ impl Runtime {
             library.rescan();
         }
         let studying = studying::Studies::open(&options.storage, settings.current(), settings.folder(), parts.studying);
+        let updating = updating::open(&options.storage, settings.folder(), parts.updating);
         let copies = SafetyCopies::open(settings.recovery_folder());
         for copy in copies.orphans() {
             log::warn!("'{}' was not saved before the program last stopped; a copy was kept", copy.name);
@@ -389,6 +398,7 @@ impl Runtime {
             studying,
             instruments: instruments::Known::default(),
             catalogue: parts.catalogue.map(Arc::new),
+            updating,
             plugins,
             settings,
             copies,

@@ -87,6 +87,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     // Files the song names that are not on disk: one line for all of
     // them, which opens the list.
     let missing_item = row.missing(ui);
+    // A newer Trill, where one is known and nothing was said against
+    // hearing of it: one line, which opens what there is to read of it.
+    let update_item = row.update(ui);
     let problems = problems(row.cx);
     let items_end = row.problems(ui, &problems);
 
@@ -134,6 +137,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         );
         if response.clicked() {
             missing::open(cx);
+        }
+    }
+    if let Some(response) = update_item {
+        cx.hint(
+            &response,
+            "A newer Trill \u{00B7} click for what is new in it, to fetch it, or to hear no more of it",
+        );
+        if response.clicked() {
+            let ctx = ui.ctx().clone();
+            super::setup::open_on_program(&ctx, cx);
         }
     }
 
@@ -224,6 +237,25 @@ impl Row<'_, '_> {
         self.x += GAP;
         let response = ui.interact(item, ui.scope_id().with("missing-files"), Sense::click());
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Missing files: {words}")));
+        if response.hovered() {
+            self.painter.rect_filled(item, 0.0, theme.hover);
+        }
+        Some(response)
+    }
+
+    /// That a newer Trill is out, or is fetched and waits for a start: a
+    /// button that opens the tab of Setup that says more. `None` where
+    /// none is known, or its user asked to hear no more of it.
+    fn update(&mut self, ui: &Ui) -> Option<egui::Response> {
+        let words = self.cx.setup.notice()?.short();
+        let theme = self.cx.theme;
+        let start = self.x;
+        self.x = paint::dot(self.painter, pos2(self.x, self.bar.center().y), theme.metric.dot, theme.info) + 5.0;
+        self.x += text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, &words, theme.info);
+        let item = Rect::from_min_max(pos2(start - 4.0, self.bar.top()), pos2(self.x + 4.0, self.bar.bottom()));
+        self.x += GAP;
+        let response = ui.interact(item, ui.scope_id().with("newer-trill"), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("A newer Trill: {words}")));
         if response.hovered() {
             self.painter.rect_filled(item, 0.0, theme.hover);
         }

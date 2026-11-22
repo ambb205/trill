@@ -43,6 +43,25 @@ pub struct Settings {
     pub fetched: BTreeMap<String, PathBuf>,
     pub ui: UiSettings,
     pub together: TogetherSettings,
+    pub updates: UpdateSettings,
+}
+
+/// What is remembered about newer versions of Trill.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UpdateSettings {
+    /// Look whether a newer Trill is out when the program starts. On
+    /// unless it was switched off: looking fetches one small text that is
+    /// the same for everyone, and nothing else is fetched unasked.
+    pub look_at_start: bool,
+    /// A version its user asked to hear no more of, as text (`0.3.0`):
+    /// nothing points at it by itself any more. A later one is said again.
+    pub quiet_about: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self { look_at_start: true, quiet_about: None }
+    }
 }
 
 /// What is remembered for working in a song with others.
@@ -347,6 +366,10 @@ impl Reader {
             self.value(together, "together.meeting_point", &mut settings.together.meeting_point);
             self.value(together, "together.ask_above_mb", &mut settings.together.ask_above_mb);
         }
+        if let Some(updates) = self.section(document, "updates") {
+            self.value(updates, "updates.look_at_start", &mut settings.updates.look_at_start);
+            self.value(updates, "updates.quiet_about", &mut settings.updates.quiet_about);
+        }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
             self.value(ui, "ui.browser_width", &mut settings.ui.browser_width);
@@ -548,6 +571,7 @@ mod tests {
                 }),
                 ask_above_mb: 2000,
             },
+            updates: UpdateSettings { look_at_start: false, quiet_about: Some("0.3.0".into()) },
         }
     }
 

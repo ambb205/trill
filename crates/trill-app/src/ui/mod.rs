@@ -82,6 +82,7 @@ mod response;
 mod sample_panels;
 mod setup;
 mod setup_instruments;
+mod setup_program;
 mod setup_scene;
 mod shortcuts;
 mod snapshot;
@@ -223,6 +224,9 @@ pub struct UiOptions {
     pub making_of: Option<MakingOfStart>,
     /// Open watching the making-of that was written out to this file.
     pub watch: Option<PathBuf>,
+    /// What the program has to say of how it started: that it took an
+    /// older Trill's place, or that an update did not go in.
+    pub said_at_start: Option<String>,
 }
 
 impl Default for UiOptions {
@@ -268,6 +272,7 @@ impl Default for UiOptions {
             stage: false,
             making_of: None,
             watch: None,
+            said_at_start: None,
         }
     }
 }

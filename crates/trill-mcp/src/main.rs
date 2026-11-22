@@ -28,6 +28,7 @@ OPTIONS:
     --profile <FOLDER>   Keep settings, the library index, saved presets and safety
                          copies in this folder instead of the user's own
     --project <FILE>     Open a project file at startup
+    -V, --version        Say which Trill this is: its version, and for a release its build
     -h, --help           Show this help";
 
 enum Transport {
@@ -90,12 +91,20 @@ fn main() -> anyhow::Result<()> {
     trill_plugins::scan::run_as_scanner_if_requested();
     trill_runtime::jobs::run_as_job_if_requested();
 
+    if std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V") {
+        println!("{}", trill_update::this().words());
+        return Ok(());
+    }
     let Some(options) = parse_args()? else {
         println!("{USAGE}");
         return Ok(());
     };
     // To stderr: with the stdio transport, stdout belongs to the protocol.
     trill_mcp::logging::init_stderr();
+    // Says for as long as this runs that a Trill does, so that no update
+    // goes in under it. An update that is staged is left for the window:
+    // the program a client started has to be the one that answers it.
+    let _started = trill_update::start(trill_update::Program::Server);
 
     // The session, the sound library and the user's settings: the same
     // ones the window uses. CLAP and VST3 plugins are scanned in a second
@@ -109,6 +118,9 @@ fn main() -> anyhow::Result<()> {
     // And this is a program that may start itself to study a recording,
     // and fetch what the user asks it to with the system's curl.
     runtime.study_and_fetch_as_usual();
+    // It looks for a newer Trill when it is asked to, and never by itself:
+    // there is nobody at a window here to be told.
+    runtime.look_for_updates_when_asked();
     {
         let mut session = runtime.session.lock();
         let audio = session.audio_info().clone();

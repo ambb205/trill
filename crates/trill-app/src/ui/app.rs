@@ -798,6 +798,7 @@ impl TrillApp {
         self.editors.poll(&mut self.state.toasts);
         self.settings.poll();
         self.setup.poll();
+        self.setup.see_updates(&self.sounds.runtime);
         self.filming.poll(ctx, &mut self.state);
         self.take_reports();
         self.sync(ctx);
@@ -960,6 +961,16 @@ impl TrillApp {
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.frames += 1;
+        if self.frames == 1 {
+            // The window is up: said to a Trill that put this one in its
+            // place and waits to see that it starts.
+            trill_update::came_up();
+            // And what the start had to say of an update, for long
+            // enough to be read.
+            if let Some(said) = self.options.said_at_start.take() {
+                self.state.toasts.lasting(super::toast::ToastKind::Info, said, Duration::from_secs(15));
+            }
+        }
         self.guard_close(&ctx);
         self.update_title(&ctx);
 
