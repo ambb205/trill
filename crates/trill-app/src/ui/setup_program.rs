@@ -162,7 +162,7 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx) {
             ui.add_space(6.0);
             // (The button stands at the right end of the heading, so the day it was made is a line below.)
             let row = heading(ui, theme, &format!("Trill {} is out", release.version), "");
-            let build = release.build_for(&trill_update::release::runs_on());
+            let build = status.build();
             if build.is_some() {
                 let hint = "Fetch it, hold it to what its makers signed, and keep it ready: nothing changes until Trill is started again";
                 let label = format!("Fetch {}", release.version);

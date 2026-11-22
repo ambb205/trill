@@ -32,6 +32,15 @@
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+# A path that was given is meant from where the script was started, and is used from the root of
+# the repository and by programs that stand elsewhere again: so each is made whole first.
+here=$(pwd)
+whole() {
+    case "$1" in
+        /* | [A-Za-z]:*) printf '%s' "$1" ;;
+        *) printf '%s' "$here/$1" ;;
+    esac
+}
 cd "$root"
 
 build=yes
@@ -46,12 +55,12 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=no ;;
         --changed) changed=yes ;;
-        --key) key=$2; shift ;;
-        --notes) notes=$2; shift ;;
-        --trial) trial=$2; shift ;;
+        --key) key=$(whole "$2"); shift ;;
+        --notes) notes=$(whole "$2"); shift ;;
+        --trial) trial=$(whole "$2"); shift ;;
         --trial-version) trial_version=$2; shift ;;
         --trial-from) trial_from=$2; shift ;;
-        --out) out=$2; shift ;;
+        --out) out=$(whole "$2"); shift ;;
         *) echo "release: '$1' is not something this script knows: see its first lines" >&2; exit 1 ;;
     esac
     shift

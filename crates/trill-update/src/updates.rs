@@ -101,6 +101,8 @@ pub enum Came {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub this: This,
+    /// The kind of machine a build has to be for, to be one for this program.
+    pub runs_on: String,
     /// Why this program does not look for a newer one, where it does not.
     pub off: Option<String>,
     pub looking: bool,
@@ -115,6 +117,12 @@ pub struct Status {
 }
 
 impl Status {
+    /// The build of the newer release for this kind of machine, where the
+    /// release has one.
+    pub fn build(&self) -> Option<&crate::Build> {
+        self.newer.as_ref()?.build_for(&self.runs_on)
+    }
+
     /// The version there is to tell the user of, where there is one.
     pub fn newer_version(&self) -> Option<Version> {
         match (&self.step, &self.newer) {
@@ -224,6 +232,7 @@ impl Updates {
         let held = self.0.held.lock();
         Status {
             this: self.0.options.this.clone(),
+            runs_on: self.0.options.runs_on.clone(),
             off,
             looking: held.looking,
             looked: held.looked,
@@ -398,7 +407,22 @@ impl Updates {
             if std::fs::metadata(&archive).is_ok_and(|metadata| metadata.len() > build.size) {
                 let _ = std::fs::remove_file(&archive);
             }
-            fetcher.fetch(&build.url, &archive, stop, &mut |got| self.step(Step::Fetching { got, of: build.size }))?;
+            // No more is taken than was announced, whatever the place it comes from sends.
+            let too_much = AtomicBool::new(false);
+            let fetched = fetcher.fetch(&build.url, &archive, stop, &mut |got| {
+                if got > build.size {
+                    too_much.store(true, Ordering::Relaxed);
+                    stop.store(true, Ordering::Relaxed);
+                }
+                self.step(Step::Fetching { got: got.min(build.size), of: build.size });
+            });
+            if too_much.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_file(&archive);
+                return Err(Ended::Failed(format!(
+                    "more came than Trill {version} was announced to be: nothing of it is kept"
+                )));
+            }
+            fetched?;
             if checksum(&archive, stop)? != build.sha256 {
                 let _ = std::fs::remove_file(&archive);
                 return Err(Ended::Failed(format!(
@@ -671,8 +695,8 @@ mod tests {
         let published = world.publish("0.3.0");
         let trill = world.trill("0.2.0");
         trill.look().unwrap();
-        // Somebody put another archive where the release's was.
-        let other = trill_fetch::zip::archive_of(&[("trill.exe", b"something else", true)]);
+        // Somebody put another archive where the release's was: a smaller one.
+        let other = trill_fetch::zip::archive_of(&[("trill.exe", b"else", true)]);
         world.shelf.put(&published.builds[0].url, other);
         let why = trill.fetch().unwrap_err();
         assert!(why.contains("not Trill 0.3.0 as it was announced"), "{why}");
@@ -680,6 +704,13 @@ mod tests {
         assert_eq!(trill.status().problem, Some(why));
         assert_eq!(Place::at(world.home.path()).staged(), None);
         assert_eq!(std::fs::read_to_string(world.home.path().join("trill.exe")).unwrap(), "window 0.2.0");
+        // And one that sends without end is let go of once more has come than was announced.
+        world.shelf.put(&published.builds[0].url, vec![7u8; 4 << 20]);
+        let why = trill.fetch().unwrap_err();
+        assert!(why.contains("more came than Trill 0.3.0 was announced to be"), "{why}");
+        let left: Vec<_> = std::fs::read_dir(world.kept.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, [std::ffi::OsString::from(KNOWN)], "nothing of it is kept");
+        assert_eq!(trill.status().step, Step::Idle);
     }
 
     #[test]

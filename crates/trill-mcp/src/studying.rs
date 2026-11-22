@@ -200,7 +200,7 @@ pub(crate) fn trill_view(runtime: &trill_runtime::Runtime) -> Value {
         if !newer.page.is_empty() {
             view["page"] = json!(newer.page);
         }
-        match newer.build_for(&trill_update::release::runs_on()) {
+        match status.build() {
             Some(build) => {
                 view["size_mb"] = json!(megabytes(build.size));
                 view["from"] = json!(build.url);

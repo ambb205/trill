@@ -185,13 +185,13 @@ cmp -s "$install/trill-mcp.exe" "$trial/b/Trill/trill-mcp.exe" || wrong "the ser
 
 said "7. taking Trill off again"
 windows "$install/unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+# (The uninstaller goes on in a copy of itself after the program that was started has ended.)
 tries=0
-while [ -e "$install/trill.exe" ] || [ -e "$install/unins000.exe" ]; do
+while [ -e "$install" ]; do
     tries=$((tries + 1))
-    [ "$tries" -lt 60 ] || wrong "the uninstaller left the programs in $install"
+    [ "$tries" -lt 60 ] || wrong "the uninstaller left $install: $(ls -A "$install" | tr '\n' ' ')"
     sleep 1
 done
-[ ! -e "$install" ] || wrong "the uninstaller left $install: $(ls -A "$install" | tr '\n' ' ')"
 [ -z "$(listed)" ] || wrong "Windows still lists the trial"
 [ ! -f "$shortcut" ] || wrong "the Start menu still has the trial"
 [ -d "$profile" ] || wrong "the uninstaller took the settings, which are the user's"

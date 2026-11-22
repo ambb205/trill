@@ -1300,6 +1300,8 @@ mod tests {
             "Began fetching the part \u{201C}stems\u{201D}"
         );
         assert_eq!(did("setup", json!({ "action": "test" }), p), "Timed the models on this machine");
+        assert_eq!(did("setup", json!({ "action": "look_for_newer" }), p), "Looked whether a newer Trill is out");
+        assert_eq!(did("setup", json!({ "action": "fetch", "part": "trill" }), p), "Began fetching the newer Trill");
         assert_eq!(did("setup", json!({ "action": "report" }), p), "Looked at what there is to fetch");
         assert_eq!(
             did("transcribe", json!({ "path": "D:/loops/break.wav", "part": "groove" }), p),

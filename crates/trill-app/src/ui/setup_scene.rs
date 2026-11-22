@@ -278,6 +278,7 @@ impl SetupScene {
                     version: trill_update::Version::new(0, 2, 0),
                     commit: Some("0ce65fb".to_owned()),
                 },
+                runs_on: trill_update::release::runs_on(),
                 off: None,
                 looking: false,
                 looked: None,
@@ -383,7 +384,7 @@ mod tests {
                     // What the picture shows is an announcement a program would take.
                     let status = staged.program.status.as_ref().unwrap();
                     status.newer.as_ref().unwrap().check().unwrap();
-                    assert!(status.newer.as_ref().unwrap().build_for(&trill_update::release::runs_on()).is_some());
+                    assert!(status.build().is_some());
                 }
                 SetupScene::Fresh => assert!(here == 0 && staged.untested && staged.machine.is_none()),
                 SetupScene::Fetching => {

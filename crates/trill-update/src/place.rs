@@ -322,10 +322,10 @@ impl Place {
                 let _ = std::fs::remove_file(&aside);
                 let _ = std::fs::rename(&target, &aside);
             }
-            if kept.exists() {
-                if let Err(error) = std::fs::rename(&kept, &target) {
-                    log::error!("{path} could not be put back ({error}): it lies in {}", kept.display());
-                }
+            if kept.exists()
+                && let Err(error) = std::fs::rename(&kept, &target)
+            {
+                log::error!("{path} could not be put back ({error}): it lies in {}", kept.display());
             }
         }
     }
@@ -381,8 +381,12 @@ impl Place {
         for name in [OLD, "failed"] {
             let _ = std::fs::remove_dir_all(self.work().join(name));
         }
-        for name in [APPLIED, CAME_UP] {
-            let _ = std::fs::remove_file(self.work().join(name));
+        let _ = std::fs::remove_file(self.work().join(APPLIED));
+        // What the programs that were tried out wrote to say that they were up.
+        for entry in std::fs::read_dir(self.work()).into_iter().flatten().flatten() {
+            if entry.file_name().to_str().is_some_and(|name| name.starts_with(CAME_UP)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
         if self.staged().is_none() {
             self.unstage();
@@ -404,8 +408,10 @@ impl Place {
     }
 
     fn watch_come_up(&self, program: &Path, args: &[std::ffi::OsString], from: Version) -> Trial {
-        let came_up = self.work().join(CAME_UP);
-        let _ = std::fs::remove_file(&came_up);
+        // A file of this trial's own: one that a program tried out before left, or still has
+        // open, is never taken for this one's word.
+        let moment = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+        let came_up = self.work().join(format!("{CAME_UP}-{}-{moment}", std::process::id()));
         let mut command = std::process::Command::new(program);
         command.args(args).env(TRIAL, &came_up).env(UPDATED_FROM, from.to_string());
         let mut child = match command.spawn() {
