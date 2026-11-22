@@ -415,7 +415,7 @@ pub fn status_words(seen: &Seen) -> Option<String> {
             (true, _) => words.push_str(&format!(" \u{00B7} {files} wait for your word")),
             (false, true) => words.push_str(&format!(" \u{00B7} {files} wait")),
             (false, false) => {
-                let percent = if all == 0 { 0 } else { here * 100 / all };
+                let percent = (here * 100).checked_div(all).unwrap_or(0);
                 words.push_str(&format!(" \u{00B7} {files} arriving, {percent} %"));
             }
         }

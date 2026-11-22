@@ -48,6 +48,10 @@ x86-64 Linux whatever is installed there. Built on Windows it needs one more wor
 own: `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld` in the environment. That is how the one this page was
 checked with was built, in fifteen seconds, and run on Ubuntu under WSL.
 
+**The meeting point and the Trills that use it are of one build.** What is said to a meeting point has a
+number (2, since the answer to a holder says how much of its day is left), and a program that speaks another is
+told so in a sentence: when Trill is updated, put the `trill-meet` of the same build on the server.
+
 **On an ARM server** (a Raspberry Pi, an ARM instance of a hosting company) the same program is built for
 `aarch64-unknown-linux-musl` in place of `x86_64-unknown-linux-musl`, or on the server itself with
 `cargo build -p trill-meet --release`. Nothing in it is written for one processor: it and the three libraries it
@@ -212,6 +216,10 @@ passed.
   other is encrypted end to end all the same.
 - It introduces nobody: the two programs stay connected through it for as long as they are in the song. A direct
   way between them, where there is one, is not built.
-- It carries the song and nothing else: audio files do not travel yet.
+- It passes whatever the two programs say, the song's audio files too, and counts all of it against the key's
+  day. It cannot tell a file from an edit. So that a long recording does not spend the day and leave the song
+  itself stranded, it tells whoever holds a meeting, each time that program says it is there, how much its key
+  may still pass today and for how long the day goes on; a Trill that hears less than 64 MB are left holds the
+  song's files back until the day is over and goes on with the song.
 - It cannot take one person's leave away from a meeting, only a key from whoever holds it.
 - It keeps no accounts and nothing on disk but your file of keys.

@@ -220,6 +220,68 @@ fn company_that_is_made_up_is_shown_as_company_is() {
     assert!(seen.on_track(jo.tracks[0]).is_some() && seen.on_clip(jo.clips[0]).is_some());
 }
 
+#[test]
+fn audio_that_is_on_its_way_and_files_that_are_held_are_said_in_the_status_bar_and_the_panel() {
+    let options = UiOptions { together_scene: Some(TogetherScene::Arriving), ..Default::default() };
+    let (mut harness, ..) = with_three_tracks(options);
+    harness.idle(3);
+    let bar = "Shared song: Here: Jo \u{00B7} 2 audio files wait for your word \u{00B7} 1 file held here";
+    assert!(harness.is_on_screen(bar), "{:?}", harness.labels);
+    harness.click_label(bar);
+    harness.idle(2);
+    // What is on its way: from whom, how far, and why one waits.
+    assert!(harness.is_on_screen("Vocal take 3.wav \u{00B7} 20 MB of 48 MB \u{00B7} from Jo"), "{:?}", harness.labels);
+    assert!(harness.is_on_screen("Room mics.flac \u{00B7} 0.0 MB of 612 MB \u{00B7} waits for your word"));
+    assert!(harness.is_on_screen("Let them arrive"));
+    // And what has not gone from here, by its path, with the word that lets it.
+    assert!(harness.is_on_screen(r"D:\Sessions\Elsewhere\guide vocal.wav"));
+    assert!(harness.is_on_screen("Let them go"));
+}
+
+#[test]
+fn before_a_song_is_shared_the_panel_says_what_goes_with_it_and_its_audio_arrives_at_whoever_joins() {
+    let folder = tempfile::tempdir().unwrap();
+    let vocal = super::sounds::tone(folder.path().join("Elsewhere").join("vocal take.wav"), 1.0);
+    let named = vocal.to_string_lossy().into_owned();
+    let mut ada = window("Ada", |session| {
+        let track = session.edit(|song| Ok(song.add_track("Vocal"))).unwrap();
+        let recording = trill_core::project::AudioContent::new(named.clone());
+        session.edit(|song| song.add_audio_clip(track, "Verse vocal", 0.0, 2.0, recording)).unwrap();
+    });
+    let mut ben = window("Ben", |_| {});
+    ada.idle(2);
+    ada.click_label("File");
+    ada.click_label("Share this song");
+    // What goes is looked at by a worker, and said before anything is shared.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ada.is_on_screen("From outside the song's folder, Trill's recordings and your sample library:") {
+        assert!(Instant::now() < deadline, "the panel never said what goes: {:?}", ada.labels);
+        std::thread::sleep(Duration::from_millis(5));
+        ada.idle(1);
+    }
+    assert!(ada.labels.iter().any(|(label, _)| label.starts_with("1 audio file, ")), "{:?}", ada.labels);
+    assert!(ada.is_on_screen(&vocal.to_string_lossy()), "the file outside the song's folder, by its path");
+    assert!(!ada.runtime.together().is_on(), "nothing is shared by looking");
+    ada.click_label("Share");
+    ada.idle(2);
+    let invitation = ada.runtime.together().invitation.expect("the song is shared");
+
+    ben.runtime.join(&invitation, false).unwrap();
+    let clip = ada.project().tracks.last().unwrap().clips[0].id;
+    let here = |window: &Harness| {
+        let files = window.runtime.session.lock().files_here();
+        let file = files.into_iter().find(|file| file.place == trill_core::FilePlace::Clip(clip));
+        file.is_some_and(|file| std::fs::read(&file.path).ok() == std::fs::read(&vocal).ok())
+    };
+    both_until(&mut ada, &mut ben, "the recording is at Ben's", |_, ben| here(ben));
+    both_until(&mut ada, &mut ben, "nothing is on its way", |_, ben| ben.app.live().together.files.is_empty());
+    // It was at no time a missing file there, and its clip is not marked.
+    ben.idle(3);
+    assert!(ben.app.snapshot().clip_problems.is_empty() && ben.app.snapshot().arriving.is_empty());
+    assert!(!ben.is_on_screen("File missing"));
+    assert!(!ben.project().to_json().contains("Elsewhere"), "and nothing Ben holds names where Ada keeps it");
+}
+
 /// A meeting point on this machine, as its keeper would hand it over.
 fn meeting_point_on(listener: std::net::TcpListener, key: &trill_meet::Key) -> trill_meet::Server {
     let keys = trill_meet::Keys::of(vec![trill_meet::keys::Given::of(key, "Ada")]);

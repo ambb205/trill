@@ -495,6 +495,46 @@ fn whole_rate(sample_rate: f64) -> Option<u32> {
 }
 
 #[cfg(test)]
+mod read_as_tests {
+    use super::*;
+    use crate::{WavFormat, write_wav};
+
+    #[test]
+    fn a_file_read_under_the_name_it_is_about_to_have_is_not_read_again_when_it_has_it() {
+        let folder = std::env::temp_dir().join(format!("trill-media-read-as-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (part, home) = (folder.join("take.wav.part"), folder.join("take.wav"));
+        let tone: Vec<f32> = (0..44_100).map(|n| (n as f32 * 0.05).sin() * 0.25).collect();
+        let buffer = AudioBuffer { sample_rate: 44_100.0, left: tone.clone(), right: tone };
+        write_wav(&part, &buffer, WavFormat::Int16).unwrap();
+        let cache = MediaCache::new(64 << 20);
+        // Nothing has that name yet: asked for, it is a failure, which the
+        // cache remembers for as long as nothing is there.
+        assert!(cache.audio(&home).is_err());
+        let read = cache.read_as(&part, &home, Some(48_000.0)).unwrap();
+        assert_eq!(read.sample_rate, 48_000.0, "what is returned is what will be asked for at that rate");
+        let decodes = cache.stats().decodes;
+        std::fs::rename(&part, &home).unwrap();
+        // It has its name: both what the file holds and what it is at the
+        // engine's rate are there, and nothing is read or converted again.
+        let at_rate = cache.audio_at_rate(&home, 48_000.0).unwrap();
+        assert!(Arc::ptr_eq(&at_rate, &read));
+        assert_eq!(cache.audio(&home).unwrap().sample_rate, 44_100.0);
+        assert_eq!(cache.stats().decodes, decodes, "it was not read again");
+        // Written again under that name, it is another file and is read.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let louder: Vec<f32> = (0..22_050).map(|n| (n as f32 * 0.05).sin() * 0.5).collect();
+        let other = AudioBuffer { sample_rate: 44_100.0, left: louder.clone(), right: louder };
+        write_wav(&home, &other, WavFormat::Int16).unwrap();
+        assert_eq!(cache.audio(&home).unwrap().frames(), 22_050);
+        // What cannot be read is an error, and nothing is kept for the name.
+        std::fs::write(&part, b"not audio").unwrap();
+        assert!(cache.read_as(&part, &folder.join("other.wav"), None).is_err());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{WavFormat, write_wav};

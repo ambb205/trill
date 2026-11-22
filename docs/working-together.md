@@ -39,17 +39,77 @@ edit could have made is let go of, with a sentence, and the song is as it was.
 A program joins wherever it can open a connection to the other: on one computer, on one network, over a VPN,
 through a port one of you forwarded, or through a meeting point.
 
-**What the other needs.** The song travels; its files and plugins do not. Whoever joins plays the song with their
-own copies of the audio files (by the paths the song names) and their own plugins. A plugin one of you has not
-got stays in the song as a place that is kept, with the sentence that says so, as in a song that is opened
-without it; its settings are carried untouched, and it sounds for whoever has it. So for now a friend on another
-computer needs **the same plugins, and the same audio files in the same places**: a recording that is not where
-the song names it is a missing file there (File, Missing files, where they can say where it is instead).
+**What the other needs.** The song travels, and so does its audio (below); plugins do not. Whoever joins plays
+the song with their own plugins. A plugin one of you has not got stays in the song as a place that is kept, with
+the sentence that says so, as in a song that is opened without it; its settings are carried untouched, and it
+sounds for whoever has it. So for now a friend on another computer needs **the same plugins**.
 
 **A build to hand to a friend.** `sh scripts/friend-bundle.sh` makes a release build and gathers it into one
 folder, `target/friend/Trill`: `trill.exe` (which starts no program but itself), `trill-mcp.exe`, the licences,
 and a page that says what their computer needs and how to join. Nothing of yours goes into it: no settings, no
 meeting point, no key, no song.
+
+## The song's audio arrives with the song
+
+What the song plays of audio goes to whoever is in it: what its audio clips and its takes play, and what its
+samplers and drum racks play. Whoever joins gets it without asking, and what is added later follows by itself:
+a take that landed, a clip that was dropped in, either way round. It comes from anyone in the song who has it,
+not only from whoever added it.
+
+**A file is known by what it is, and nobody is told where anyone keeps it.** The song says of each file its
+SHA-256, its length and its name. Where it lies is each computer's own: no path is said to anyone, and none is
+taken from anyone. A program that says one is let go of, a clip that arrives arrives without one, and what the
+state of a sampler or a drum rack names is given a place made on this computer before the state is taken in. So
+nothing another program says is ever opened, read, written or handed out. A file is asked for by its hash and
+by nothing else, and the answer to a hash a program does not hand out is the same whatever the reason: nobody
+learns by asking what someone has.
+
+**What arrives is kept apart for each song**, in Trill's own folder (`%LOCALAPPDATA%\trill\received`, a folder a
+shared song), under a name made here: its hash, and one of a fixed list of endings. It is a file of the song
+only once all of it is here and its bytes are what the song says; anything else is thrown away and said. In a
+song, a program hands out only what that song brought it and what its own person's files in that song are.
+
+**Only audio goes, and only what you were shown.** A file is read to be said and handed out only if Trill reads
+it as audio, by the reading that plays it: what is no audio is a clip that does not play, as it always was, and
+nobody hears of it or of its hash. A song file is a stranger too: what it names on your computer is held until
+you have been shown it.
+
+- *Before you share*, the Share panel says what goes: how many files, how large, the folders they lie in, and
+  one by one every file that lies outside the song's own folder, Trill's recordings and your sample library.
+  Sharing is your word that they go.
+- *A file your own hand brings into a shared song* (a clip you drop in, a sample you give a sampler, what you
+  record) goes without a question: that is the hand's act.
+- *Anything else that comes to name a file here* is **held**: a shared song you opened from a file and joined
+  again with, or a file the assistant gave a clip. The status bar and the panel say which files are held, and
+  *Let them go* is yours to click. Nothing of a held file is read, said or handed out.
+
+**It arrives within bounds you can see.** The panel and the status bar say what is on its way, from whom, how
+much and how far. A file on its way is not a missing file: its clip says *Its audio is on its way*, nobody goes
+looking for it, and it plays when it is there without the song being opened again. What a file may cost is
+settled before its first byte: one that is said to be longer than any file is (64 GB) is refused, one the disk
+has not the room for waits and is tried again, and above 500 MB waiting at once (`together.ask_above_mb` in the
+settings) the rest waits for your word, asked once, with *Let them arrive*.
+
+**An edit never waits for a file.** What is changed in the song, and who is here, go ahead of a file's bytes on
+every connection: behind one piece of 48 kB at the most. A file is read to be played before it has its name,
+away from the song, so that no edit that arrives meanwhile waits for it.
+
+**It survives the connection.** A file that was half here when a link dropped, or when Trill was closed, goes
+on from where it was when the song is in company again, from anyone who has it.
+
+**If you have the file already.** Point the clip at it (a relink): where the song says what the file is, yours
+is read and held against that. If it is the file it is taken and nothing is fetched, which is how two people
+with the same sample pack each play their own copy. If it is another file it is refused in a sentence.
+
+**A song that was saved opens whole, alone, later.** When you save, what the song brought you comes beside it
+as recordings do, into `<song> files/from others`, under the names the song says: a second name for the same
+file where the disk allows, a copy otherwise. A song's folder is then whole whoever recorded what is in it, and
+Trill's own folder can be cleared without a song losing anything. What arrived for a song you never saved stays
+in Trill's folder; nothing that arrived is ever deleted by Trill.
+
+**What does not travel.** A sampled instrument's recordings (hundreds of files) stay where they are: the other
+has the instrument's place, and a sentence that its file is not there. What a plugin names inside its own state
+travels as the plugin wrote it, with whatever it names. A file Trill does not read as audio.
 
 ## Through a meeting point
 
@@ -150,9 +210,8 @@ has landed, the others have it as the one step it is, in its lane beside the tra
 it, and its maker's `Ctrl+Z` takes it back for everyone, as with any step. Arming a track, hearing an input
 and choosing one stay in your own program, and nothing that arrives from anyone opens a microphone.
 
-**A recording is a file, and files do not travel yet.** The others have the take and the clip that plays it,
-naming the file where your computer has it. On their computer that file is missing, which is said once, as any
-missing file is, and it plays as soon as the file is there. (Two windows on one computer both find it.)
+**A recording is a file, and it follows.** The others have the take and the clip that plays it at once, and the
+recording itself a moment later, as any audio of the song arrives (above): on its way meanwhile, not missing.
 
 **Two recordings over one stretch.** A track that keeps takes plays one recording at a time. Where two of you
 put one over the same stretch at the same moment, each not knowing of the other (two takes that land there, or
@@ -308,10 +367,39 @@ connected directly in the same half hour:
 - What the meeting point itself takes is on [its own page](meeting-point.md#what-it-takes): a megabyte, and
   about 23 kB for each connection.
 
+**The song's audio**, measured with `cargo run -p trill-runtime --example files_cross -- MEGABYTES`, which makes
+a recording of that size, shares a song that plays it and times it crossing while a fader is set in the song
+every few dozen milliseconds. Two programs in one process on a machine that was building other things, so the
+figures swing:
+
+| | 50 MB | 300 MB | a fader set meanwhile, to the other's song |
+|---|---|---|---|
+| Directly | 0.4 to 1.4 s | 2.1 s | 16 ms in the middle, 29 ms for nine in ten, 34 ms at worst |
+| Through a meeting point in the same process | 0.8 s | 3.4 s | 50, 73, 79 ms |
+| Through the Linux program under WSL | 2.8 s | 8.5 s | 86, 135, 249 ms |
+
+With nothing crossing, the same edits took as long in each of those runs (17, 29, 31 ms directly; 77, 114, 131
+under WSL at the time): a file does not hold an edit up. Reading a file to say what it is costs its SHA-256, about
+a gigabyte a second (46 ms for 50 MB, 0.3 to 0.5 s for 300 MB), on a thread of its own, once a run for each
+file. While a file crosses, the two programs together hold about 10 MB more than before; what the receiver then
+holds is the recording read to be played, as for any audio of a song (600 MB for those 300 MB of 16-bit
+stereo).
+
+That measurement found two things that the tests with their small files had not. A file was asked for a piece
+at a time, which is thousands of questions a second for a long recording: more, faster, than a program that
+works in a song says, and the connection was let go of for it once in every 200 MB or so and came back a second
+later. And an edit that arrived while an arrived file was being read to be played waited for that reading, two
+seconds for 300 MB. A file is now asked for in strides, and read before it has its name.
+
 ## What is not built
 
-- Audio files travelling between machines. Each of you needs the files where the song names them, and a take
-  someone records is a file only they have.
+- A sampled instrument's recordings travelling, and telling the other which set of the catalogue an instrument
+  is from. The other has the instrument's place and a sentence that its file is not there.
+- A list of what arrived and was never saved with a song, with a way to remove it. It stays in Trill's folder.
+- What was read of a file (its hash) kept from one run to the next: every file a shared song names is read once
+  each time Trill is started and the song is in company.
+- A file that arrives while the meeting point's day is nearly spent waits for the next day; there is no asking
+  the keeper for more from inside Trill.
 - Giving way when its maker is not there: of two recordings put over one stretch at once, it is the program of
   whoever was earlier that makes room, so until that program is in the song again both play.
 - A plugin one of you has not got heard by them (a stem from whoever has it).

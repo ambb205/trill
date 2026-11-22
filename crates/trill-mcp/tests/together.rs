@@ -213,6 +213,15 @@ async fn the_audio_of_a_shared_song_is_said_before_it_goes_while_it_arrives_and_
     ok(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "name": "Ben" })).await;
     let missing = ok(&ben.client, "missing_files", json!({})).await;
     assert_eq!(missing["missing"], 0, "a file on its way is not a missing file: {missing}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let whole = |runtime: &Runtime| {
+        let files = runtime.session.lock().files_here();
+        files.len() == 1 && std::fs::read(&files[0].path).ok() == std::fs::read(&vocal).ok()
+    };
+    while !whole(&ben.runtime) {
+        assert!(Instant::now() < deadline, "the recording never arrived");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     let here = |reply: &Value| reply.get("arriving").is_none() && reply["connected_programs"] == 1;
     until(&ben.client, "shared_song", json!({ "action": "status" }), "nothing is on its way any more", here).await;
     let at_ben = ben.runtime.session.lock().files_here();

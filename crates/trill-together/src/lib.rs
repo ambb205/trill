@@ -64,9 +64,16 @@ mod tests {
         next_within(net, Duration::from_secs(10))
     }
 
-    /// (One thing at a time: two that happened at once are two.)
+    /// (One thing at a time: two that happened at once are two. What a
+    /// meeting point says of a key's day is not something that happened
+    /// to a connection, and is looked at by the test that is about it.)
     fn next_within(net: &mut Net, at_most: Duration) -> Event {
-        net.next(at_most).expect("nothing happened")
+        loop {
+            match net.next(at_most).expect("nothing happened") {
+                Event::Allowance { .. } => {}
+                event => return event,
+            }
+        }
     }
 
     fn person(name: &str) -> Person {
@@ -309,6 +316,28 @@ mod tests {
                 event => return event,
             }
         }
+    }
+
+    /// 1 connection.
+    #[test]
+    fn whoever_holds_a_meeting_is_told_what_its_key_may_still_pass_today() {
+        let (_server, point, _) = meeting_point();
+        let mut sharer = Net::new();
+        sharer.listen_through(&point).unwrap();
+        let mut held = false;
+        // The meeting is open, and with the first answer to "I am here"
+        // comes how much is left of the day, and until when it goes on.
+        let (left, over) = loop {
+            match sharer.next(Duration::from_secs(10)).expect("nothing happened") {
+                Event::Held => held = true,
+                Event::Allowance { left, over } => break (left, over),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(held, "the meeting was open first");
+        assert_eq!(left, trill_meet::Limits::default().bytes_a_day, "nothing has passed yet");
+        let day = over.saturating_duration_since(Instant::now());
+        assert!(day > Duration::from_secs(23 * 3600) && day <= Duration::from_secs(24 * 3600), "{day:?}");
     }
 
     #[test]
