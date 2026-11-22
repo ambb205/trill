@@ -51,6 +51,30 @@ pub struct TogetherSettings {
     /// The name this person goes by among the others. `None` is the name
     /// they are signed in to the machine by.
     pub name: Option<String>,
+    /// The meeting point this person shares songs through, where they
+    /// have one: what its keeper handed them.
+    pub meeting_point: Option<MeetingPointSettings>,
+}
+
+/// A meeting point as its keeper handed it over: where it is, and the
+/// key that lets this person open meetings there.
+///
+/// The key is a secret of this person's, and the settings are the one
+/// place it is kept: it is in no song, no journal and no log, and no
+/// reply of a tool says it. So it is not in what this shows of itself
+/// either (`Debug`).
+#[derive(Clone, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct MeetingPointSettings {
+    /// Its address as the keeper wrote it: `meet.example.org:443`.
+    pub address: String,
+    pub key: String,
+}
+
+impl std::fmt::Debug for MeetingPointSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = if self.key.is_empty() { "no key" } else { "a key" };
+        write!(f, "MeetingPointSettings({}, {key})", self.address)
+    }
 }
 
 /// The sound library's part of the settings; see
@@ -307,6 +331,7 @@ impl Reader {
         self.value(document, "fetched", &mut settings.fetched);
         if let Some(together) = self.section(document, "together") {
             self.value(together, "together.name", &mut settings.together.name);
+            self.value(together, "together.meeting_point", &mut settings.together.meeting_point);
         }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
@@ -501,7 +526,13 @@ mod tests {
             studies: StudySettings { folder: Some("/big disk/studies".into()) },
             fetched: [("models".to_owned(), PathBuf::from("/big disk/models"))].into_iter().collect(),
             ui: UiSettings { theme: "noir".into(), browser_width: 312.5, window_size: Some([1600.0, 900.0]) },
-            together: TogetherSettings { name: Some("Jo".into()) },
+            together: TogetherSettings {
+                name: Some("Jo".into()),
+                meeting_point: Some(MeetingPointSettings {
+                    address: "meet.example.org:443".into(),
+                    key: "0000-1111-2222-3333-4444-5555-6666-7777-8888-9999".into(),
+                }),
+            },
         }
     }
 

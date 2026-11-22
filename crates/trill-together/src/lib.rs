@@ -45,8 +45,11 @@ mod point;
 mod wire;
 
 pub use invite::Invitation;
-pub use net::{Event, LinkId, Net, Reach};
+pub use net::{Event, JoinId, LinkId, Net, Reach};
 pub use point::MeetingPoint;
+/// The meeting point's own crate: what it says to whoever it turns away,
+/// and, for a test, the meeting point itself.
+pub use trill_meet as meet;
 pub use trill_meet::secure;
 pub use wire::{MAX_HELD, MAX_MESSAGE, MAX_NAME, Message, PROTOCOL, Person, Presence};
 
@@ -77,8 +80,10 @@ mod tests {
         assert_eq!(sharer.listen(Reach::ThisMachine, 0).unwrap(), invitation, "listening again is the same invitation");
         // The invitation as text, as it is handed over.
         joiner.join(Invitation::parse(&invitation.to_string()).unwrap());
-        let Event::Open { link: theirs, joined: true } = next(&mut joiner) else { panic!("the joiner is connected") };
-        let Event::Open { link: ours, joined: false } = next(&mut sharer) else { panic!("and so is the sharer") };
+        let Event::Open { link: theirs, joined: Some(_) } = next(&mut joiner) else {
+            panic!("the joiner is connected")
+        };
+        let Event::Open { link: ours, joined: None } = next(&mut sharer) else { panic!("and so is the sharer") };
 
         let presence = Message::Presence(Presence::of(person("Jo")));
         joiner.say(theirs, &presence);
@@ -90,7 +95,7 @@ mod tests {
         // One of them leaves, and says why.
         joiner.close(theirs, "Jo left");
         assert!(matches!(next(&mut joiner), Event::Lost { why, .. } if why == "Jo left"));
-        let Event::Lost { link, why } = next(&mut sharer) else { panic!("the other hears of it") };
+        let Event::Lost { link, why, .. } = next(&mut sharer) else { panic!("the other hears of it") };
         assert_eq!(link, ours);
         assert!(why.contains("Jo left"), "{why}");
         assert!(sharer.links().is_empty() && joiner.links().is_empty());
@@ -103,7 +108,7 @@ mod tests {
         // The right place, the wrong secret.
         let other = Invitation::new("127.0.0.1", invitation.port).unwrap();
         joiner.join(other);
-        let Event::Failed { why } = next(&mut joiner) else { panic!("no connection") };
+        let Event::Failed { why, .. } = next(&mut joiner) else { panic!("no connection") };
         assert!(why.contains("did not take this invitation"), "{why}");
         assert!(sharer.events().is_empty() && sharer.links().is_empty(), "and the sharer has nothing of it");
 
@@ -112,7 +117,7 @@ mod tests {
         assert!(sharer.listening().is_none());
         std::thread::sleep(Duration::from_millis(150));
         joiner.join(invitation);
-        let Event::Failed { why } = next(&mut joiner) else { panic!("no connection") };
+        let Event::Failed { why, .. } = next(&mut joiner) else { panic!("no connection") };
         assert!(why.contains("not sharing its song") || why.contains("did not take"), "{why}");
     }
 
@@ -125,7 +130,7 @@ mod tests {
         let (mut say, _hear) = secure::secure(stream, &invitation.key(), true).unwrap();
         let Event::Open { link, .. } = next(&mut sharer) else { panic!("it is connected") };
         say.say(b"{\"presence\": \"of what\"}").unwrap();
-        let Event::Lost { link: lost, why } = next(&mut sharer) else { panic!("and let go of") };
+        let Event::Lost { link: lost, why, .. } = next(&mut sharer) else { panic!("and let go of") };
         assert_eq!(lost, link);
         assert!(why.contains("is no message"), "{why}");
         // Bounds on what a presence is hold whatever is said.
@@ -154,7 +159,7 @@ mod tests {
         loop {
             joiner.join(invitation.clone());
             match next(&mut joiner) {
-                Event::Open { joined: true, .. } => break,
+                Event::Open { joined: Some(_), .. } => break,
                 Event::Failed { .. } => {
                     assert!(Instant::now() < until, "nobody with the invitation was taken any more")
                 }
@@ -162,7 +167,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(500));
         }
-        let Event::Open { joined: false, .. } = next(&mut sharer) else { panic!("the sharer has it too") };
+        let Event::Open { joined: None, .. } = next(&mut sharer) else { panic!("the sharer has it too") };
     }
 
     /// A meeting point on this machine, on a port the system picks, at
@@ -220,8 +225,10 @@ mod tests {
         // Whoever has the invitation needs nothing else: neither a key
         // nor the meeting point's address, which the invitation carries.
         joiner.join(Invitation::parse(&text).unwrap());
-        let Event::Open { link: theirs, joined: true } = next(&mut joiner) else { panic!("the joiner is connected") };
-        let Event::Open { link: ours, joined: false } = next(&mut sharer) else { panic!("and so is the sharer") };
+        let Event::Open { link: theirs, joined: Some(_) } = next(&mut joiner) else {
+            panic!("the joiner is connected")
+        };
+        let Event::Open { link: ours, joined: None } = next(&mut sharer) else { panic!("and so is the sharer") };
         let presence = Message::Presence(Presence::of(person("Jo")));
         joiner.say(theirs, &presence);
         let Event::Heard { link, message } = next(&mut sharer) else { panic!("it is heard") };
@@ -238,14 +245,14 @@ mod tests {
         until(&server, "the meeting is over", |counts| counts.meetings == 0);
         let mut late = Net::new();
         late.join(invitation.clone());
-        let Event::Failed { why } = next(&mut late) else { panic!("no connection") };
+        let Event::Failed { why, .. } = next(&mut late) else { panic!("no connection") };
         assert!(why.contains("stopped sharing it"), "{why}");
         joiner.say(theirs, &presence);
         assert!(matches!(next(&mut sharer), Event::Heard { .. }));
         // One leaves, and says why, through the meeting point as directly.
         joiner.close(theirs, "Jo left");
         assert!(matches!(next(&mut joiner), Event::Lost { why, .. } if why == "Jo left"));
-        let Event::Lost { link, why } = next(&mut sharer) else { panic!("the other hears of it") };
+        let Event::Lost { link, why, .. } = next(&mut sharer) else { panic!("the other hears of it") };
         assert_eq!(link, ours);
         assert!(why.contains("Jo left"), "{why}");
         until(&server, "its pipe is gone", |counts| counts.pipes == 0);
@@ -290,8 +297,8 @@ mod tests {
         until(&server, "the one with another secret is let go of", |counts| counts.pipes == 1);
         // Whoever has the invitation joins meanwhile.
         joiner.join(invitation.clone());
-        assert!(matches!(next(&mut joiner), Event::Open { joined: true, .. }));
-        let Event::Open { joined: false, .. } = next(&mut sharer) else { panic!("the sharer has it") };
+        assert!(matches!(next(&mut joiner), Event::Open { joined: Some(_), .. }));
+        let Event::Open { joined: None, .. } = next(&mut sharer) else { panic!("the sharer has it") };
         // The one that never says anything has no longer than the
         // handshake has: ten seconds.
         until(&server, "the silent one is let go of", |counts| counts.pipes == 1 && counts.connections == 3);
@@ -309,8 +316,9 @@ mod tests {
         let other = MeetingPoint { key: trill_meet::Key::new().unwrap(), ..point.clone() };
         let mut sharer = Net::new();
         sharer.listen_through(&other).unwrap();
-        let Event::Unheld { why, again: false } = next(&mut sharer) else { panic!("it is not held") };
-        assert!(why.contains("did not take the key"), "{why}");
+        let Event::Unheld { turned, again: false } = next(&mut sharer) else { panic!("it is not held") };
+        assert_eq!(turned, trill_meet::Turned::No(trill_meet::No::Key));
+        assert!(turned.sentence().contains("did not take the key"), "{}", turned.sentence());
         sharer.stop_listening();
 
         // A meeting point that is not there: said, and tried again.
@@ -318,10 +326,10 @@ mod tests {
         let nowhere = MeetingPoint { port: free, ..point.clone() };
         let (mut sharer, mut joiner) = (Net::new(), Net::new());
         let invitation = sharer.listen_through(&nowhere).unwrap();
-        let Event::Unheld { why, again: true } = next(&mut sharer) else { panic!("it is not held") };
-        assert!(why.contains("did not answer"), "{why}");
+        let Event::Unheld { turned, again: true } = next(&mut sharer) else { panic!("it is not held") };
+        assert!(turned.sentence().contains("did not answer"), "{}", turned.sentence());
         joiner.join(invitation.clone());
-        let Event::Failed { why } = next(&mut joiner) else { panic!("no connection") };
+        let Event::Failed { why, .. } = next(&mut joiner) else { panic!("no connection") };
         assert!(why.contains("the meeting point did not answer"), "{why}");
 
         // It comes to be there, and the meeting is held without anyone
@@ -338,8 +346,8 @@ mod tests {
         let (server, _) = meeting_point_on(listen(), &point.key);
         held(&mut sharer);
         joiner.join(invitation.clone());
-        assert!(matches!(next(&mut joiner), Event::Open { joined: true, .. }));
-        assert!(matches!(next_of_a_link(&mut sharer), Event::Open { joined: false, .. }));
+        assert!(matches!(next(&mut joiner), Event::Open { joined: Some(_), .. }));
+        assert!(matches!(next_of_a_link(&mut sharer), Event::Open { joined: None, .. }));
 
         // The meeting point goes down and comes back, as when its keeper
         // puts a new one in its place: the connections through it are
@@ -351,8 +359,8 @@ mod tests {
         let (server, log) = meeting_point_on(listen(), &point.key);
         held(&mut sharer);
         joiner.join(invitation);
-        assert!(matches!(next(&mut joiner), Event::Open { joined: true, .. }));
-        assert!(matches!(next_of_a_link(&mut sharer), Event::Open { joined: false, .. }));
+        assert!(matches!(next(&mut joiner), Event::Open { joined: Some(_), .. }));
+        assert!(matches!(next_of_a_link(&mut sharer), Event::Open { joined: None, .. }));
         assert_eq!(server.counts().pipes, 1);
         assert!(log.lock().unwrap().join("\n").contains("Ada holds a meeting"));
     }

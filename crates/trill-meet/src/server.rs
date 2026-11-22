@@ -782,14 +782,10 @@ fn hold(
         (Ok((say, hear)), Some(given)) => (say, hear, given),
         (secured, _) => {
             match secured {
-                // It has not got the key. Nothing can be said under a key
-                // it has not got: an empty message, where this side's part
-                // of the handshake would be, is the answer.
-                Ok(_) | Err(Broken::NotTrusted) => {
-                    shared.refused(No::Key, from);
-                    let _ = stream.set_write_timeout(Some(ANSWERING));
-                    let _ = (&**stream).write_all(&[0, 0]);
-                }
+                // It has not got the key, and was told so by the
+                // handshake: an empty message where this side's part of it
+                // would be.
+                Ok(_) | Err(Broken::NotTrusted) => shared.refused(No::Key, from),
                 Err(Broken::Io(error)) if timed_out(&error) => shared.refused(No::Late, from),
                 Err(Broken::TooMuch(_)) => shared.refused(No::What, from),
                 Err(Broken::Io(_)) => {}
@@ -1085,6 +1081,16 @@ fn pass(shared: &Shared, pipe: &Pipe, from: &TcpStream, to: &TcpStream) {
                             pipe.name,
                             shared.limits.bytes_a_day >> 20
                         ));
+                        // Whoever holds a meeting with the key is told now,
+                        // and not only when it next says that it is there:
+                        // the people in it are out of it this moment.
+                        let holders: Vec<Arc<Mutex<Sayer>>> = (lock(&shared.state).meetings.values())
+                            .filter(|held| held.key == pipe.key)
+                            .filter_map(|held| held.holder.as_ref().map(|holder| holder.say.clone()))
+                            .collect();
+                        for say in holders {
+                            word(&say, Word::No(No::Spent));
+                        }
                     }
                     break "the key's bytes of the day are passed";
                 }

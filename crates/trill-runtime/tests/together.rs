@@ -8,8 +8,8 @@ use trill_core::merge::lot::note;
 use trill_core::merge::{Change, Floors, Op, Said, Stamp, TrackOp, TrackSet};
 use trill_core::{ChainRef, ClipId, TrackId, TrackKind};
 use trill_engine::AudioBackend;
-use trill_runtime::{Mine, Reach, Runtime, RuntimeOptions, Storage};
-use trill_together::{Invitation, Message, PROTOCOL, Person, secure};
+use trill_runtime::{Meeting, MeetingPointSet, Mine, Reach, Runtime, RuntimeOptions, Storage};
+use trill_together::{Invitation, Message, PROTOCOL, Person, meet, secure};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -388,4 +388,310 @@ fn a_join_whose_connection_ends_before_the_two_have_greeted_each_other_says_so()
         !together.joining && together.connected == 0 && together.people.is_empty()
     });
     assert!(!said(&ben).contains("You are in the song"), "{}", said(&ben));
+}
+
+/// A meeting point on this machine, on a port the system picks, at which
+/// one key is given: as its keeper would hand it over, and its log.
+struct MeetingPoint {
+    server: Option<meet::Server>,
+    port: u16,
+    /// Its address, as a keeper writes it.
+    address: String,
+    key: meet::Key,
+    limits: meet::Limits,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl MeetingPoint {
+    fn start(limits: meet::Limits) -> MeetingPoint {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut point = MeetingPoint {
+            server: None,
+            port,
+            address: format!("127.0.0.1:{port}"),
+            key: meet::Key::new().unwrap(),
+            limits,
+            log: Default::default(),
+        };
+        point.serve(listener);
+        point
+    }
+
+    fn serve(&mut self, listener: std::net::TcpListener) {
+        let lines = self.log.clone();
+        let said: meet::Log = std::sync::Arc::new(move |line: &str| lines.lock().unwrap().push(line.to_owned()));
+        let keys = meet::Keys::of(vec![meet::keys::Given::of(&self.key, "Ada")]);
+        self.server = Some(meet::Server::start(vec![listener], keys, self.limits.clone(), said).unwrap());
+    }
+
+    /// It goes down: every connection through it is lost on the way.
+    fn stop(&mut self) {
+        self.server.take().expect("it is running").stop();
+    }
+
+    /// Its keeper starts it again, where it was.
+    fn start_again(&mut self) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", self.port)).unwrap();
+        self.serve(listener);
+    }
+
+    fn log(&self) -> String {
+        self.log.lock().unwrap().join("\n")
+    }
+
+    /// `sharer` shares its song through this meeting point, with the key
+    /// its keeper gave: the invitation, once the meeting is open here.
+    fn shared_by(&self, sharer: &Runtime) -> String {
+        sharer.set_meeting_point(&self.address, Some(&self.key.to_string())).unwrap();
+        let invitation = sharer.share_through_meeting_point().unwrap();
+        eventually("the meeting is open", || sharer.together().meeting == Some((self.address.clone(), Meeting::Held)));
+        invitation
+    }
+}
+
+/// 3 connections.
+#[test]
+fn two_programs_share_a_song_through_a_meeting_point_whose_key_is_in_the_settings_and_nowhere_else() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, _, verse) = with_a_song(folder.path(), "Ada");
+    let ben = start(folder.path(), "Ben");
+    let point = MeetingPoint::start(meet::Limits::default());
+    let key = point.key.to_string();
+
+    // Nothing is shared through a meeting point until one is set: its
+    // address and the key its keeper gave, once.
+    assert!(ada.share_through_meeting_point().unwrap_err().contains("no meeting point is set"));
+    assert_eq!(ada.meeting_point(), None);
+    assert!(
+        ada.set_meeting_point("https://meet.example.org", Some(&key)).unwrap_err().contains("meet.example.org:443")
+    );
+    assert!(ada.set_meeting_point(&point.address, Some("not a key")).unwrap_err().contains("ten groups of four"));
+    assert!(ada.set_meeting_point(&point.address, None).unwrap_err().contains("takes the key"));
+    assert_eq!(ada.meeting_point(), None, "what is no meeting point is not kept");
+    ada.set_meeting_point(&format!("  {} ", point.address), Some(&key.to_lowercase().replace('-', " "))).unwrap();
+    let set = MeetingPointSet { address: point.address.clone(), has_key: true };
+    assert_eq!(ada.meeting_point(), Some(set.clone()));
+    // (The address alone is changed without the key being given again.)
+    ada.set_meeting_point(&point.address, None).unwrap();
+    assert_eq!(ada.meeting_point(), Some(set));
+
+    // Shared through it: the invitation is there at once and carries the
+    // meeting point's address, and the meeting is open there a moment on.
+    let invitation = ada.share_through_meeting_point().unwrap();
+    assert!(invitation.starts_with(&format!("trill:meet:{}:", point.address)), "{invitation}");
+    assert_eq!(ada.share_through_meeting_point().unwrap(), invitation, "sharing again is the same invitation");
+    eventually("the meeting is open", || ada.together().meeting == Some((point.address.clone(), Meeting::Held)));
+
+    // Whoever is handed the invitation sets nothing up.
+    assert_eq!(ben.meeting_point(), None);
+    ben.join(&invitation, false).unwrap();
+    eventually("Ben has the song", || same(&ada, &ben));
+    eventually("each sees the other", || ada.together().people.len() == 1 && ben.together().people.len() == 1);
+    assert!(said(&ben).contains("You are in the song with Ada."), "{}", said(&ben));
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    ben.session.lock().edit(|song| song.set_tempo(98.0)).unwrap();
+    eventually("both have all of it", || {
+        same(&ada, &ben) && ada.session.lock().project().clip(verse).is_ok_and(|clip| clip.notes().len() == 4)
+    });
+    assert_eq!(ada.session.lock().project().tempo, 98.0);
+    assert_eq!(ben.together().meeting, None, "whoever joined holds no meeting");
+
+    // The key is in the settings, and in nothing else that Ada's program
+    // writes or says: not the song's file, not the journal, not how
+    // things stand, not a sentence. The meeting point's log has neither
+    // it nor the invitation's secret.
+    let settings = std::fs::read_to_string(folder.path().join("Ada").join("settings.json")).unwrap();
+    assert!(settings.contains(&key) && settings.contains(&point.address), "{settings}");
+    let (song, journal) = (folder.path().join("song.trill"), folder.path().join("journal.json"));
+    ada.session.lock().save(&song).unwrap();
+    ada.session.lock().export_journal(&journal, true).unwrap();
+    let written = [std::fs::read_to_string(&song).unwrap(), std::fs::read_to_string(&journal).unwrap()];
+    let shown = [format!("{:?}", ada.together()), said(&ada), format!("{:?}", ada.meeting_point())];
+    let secret = invitation.rsplit(':').next().unwrap();
+    let log = point.log();
+    for text in written.iter().chain(&shown).chain([&log]) {
+        assert!(!text.contains(&key) && !text.contains(&key[10..]) && !text.contains(&key.replace('-', "")));
+    }
+    for text in &written {
+        assert!(!text.contains(&point.address) && !text.contains(secret), "nor is the meeting point in the song");
+    }
+    assert!(log.contains("Ada holds a meeting") && !log.contains(secret), "{log}");
+}
+
+/// About 8 connections.
+#[test]
+fn a_link_that_is_lost_comes_back_by_itself_and_what_each_did_meanwhile_is_merged() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, keys, verse) = with_a_song(folder.path(), "Ada");
+    let ben = start(folder.path(), "Ben");
+    let mut point = MeetingPoint::start(meet::Limits::default());
+    let invitation = point.shared_by(&ada);
+    ben.join(&invitation, false).unwrap();
+    eventually("Ben has the song", || same(&ada, &ben) && ben.together().people.len() == 1);
+
+    // The meeting point goes down. Neither of them left and neither said
+    // a word: the connections were lost on the way.
+    point.stop();
+    eventually("each knows the other is away", || {
+        ada.together().people.is_empty() && ben.together().people.is_empty() && ben.together().away.len() == 1
+    });
+    eventually("and Ada that the meeting point is", || matches!(ada.together().meeting, Some((_, Meeting::Away(_)))));
+    assert!(ben.together().is_on() && ben.together().away[0].name == "Ada", "{:?}", ben.together().away);
+    let (at_ben, at_ada) = (said(&ben), said(&ada));
+    assert!(at_ben.contains("The connection to Ada was lost") && at_ben.contains("asks for it again by itself"));
+    assert!(at_ada.contains("Ben is away: the connection was lost"), "{at_ada}");
+    assert!(at_ada.contains(&format!("The meeting point {} is away", point.address)), "{at_ada}");
+    assert!(!at_ben.contains("invitation again"), "nobody is asked to paste anything: {at_ben}");
+
+    // Each goes on alone meanwhile.
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    ada.session.lock().edit(|song| song.set_track_pan(keys, -0.5)).unwrap();
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    ben.session.lock().edit(|song| song.set_tempo(98.0)).unwrap();
+    assert!(!same(&ada, &ben));
+
+    // Its keeper starts it again. Nobody does anything: the meeting is
+    // held again under the invitation it had, Ben's program gets in
+    // again, and both sets of work are in the song.
+    point.start_again();
+    eventually("they are in the song together again", || {
+        same(&ada, &ben)
+            && ada.together().people.len() == 1
+            && ben.together().people.len() == 1
+            && ben.together().away.is_empty()
+    });
+    let song = ada.session.lock().project().clone();
+    assert_eq!((song.clip(verse).unwrap().notes().len(), song.tempo, song.track(keys).unwrap().pan), (4, 98.0, -0.5));
+    assert_eq!(ada.together().invitation.as_deref(), Some(invitation.as_str()), "the invitation is the one it was");
+    assert_eq!(ada.together().meeting, Some((point.address.clone(), Meeting::Held)));
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+    assert!(said(&ada).contains("is back: whoever has the invitation gets in again"), "{}", said(&ada));
+
+    // Leaving is not losing: said, and nothing is asked for again.
+    ben.leave();
+    eventually("Ben is gone", || ada.together().people.is_empty() && !ben.together().is_on());
+    assert!(said(&ada).ends_with("Ben left."), "{}", said(&ada));
+}
+
+/// What stands between two programs on a way that can be cut: it passes
+/// what each says to the other, and drops every connection when told to.
+struct Way {
+    port: u16,
+    passing: std::sync::Arc<std::sync::Mutex<Vec<std::sync::Arc<std::net::TcpStream>>>>,
+}
+
+impl Way {
+    fn to(port: u16) -> Way {
+        use std::net::{Shutdown, TcpListener, TcpStream};
+        use std::sync::Arc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let way = Way { port: listener.local_addr().unwrap().port(), passing: Default::default() };
+        let passing = way.passing.clone();
+        std::thread::spawn(move || {
+            for near in listener.incoming().flatten() {
+                let Ok(far) = TcpStream::connect(("127.0.0.1", port)) else { continue };
+                let (near, far) = (Arc::new(near), Arc::new(far));
+                passing.lock().unwrap().extend([near.clone(), far.clone()]);
+                for (from, to) in [(near.clone(), far.clone()), (far, near)] {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut &*from, &mut &*to);
+                        let _ = (from.shutdown(Shutdown::Both), to.shutdown(Shutdown::Both));
+                    });
+                }
+            }
+        });
+        way
+    }
+
+    fn cut(&self) {
+        for socket in self.passing.lock().unwrap().drain(..) {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+/// About 6 connections.
+#[test]
+fn a_lost_link_to_a_program_that_listens_itself_comes_back_too_until_its_invitation_is_no_longer_one() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, _, verse) = with_a_song(folder.path(), "Ada");
+    let ben = start(folder.path(), "Ben");
+    let invitation = ada.share(Reach::ThisMachine, 0).unwrap();
+    let port = Invitation::parse(&invitation).unwrap().port;
+    // Ben reaches Ada by a way that can be cut.
+    let way = Way::to(port);
+    let by_the_way = invitation.replace(&format!(":{port}:"), &format!(":{}:", way.port));
+    ben.join(&by_the_way, false).unwrap();
+    eventually("Ben has the song", || same(&ada, &ben) && ben.together().people.len() == 1);
+
+    // The way is cut, and is there again a moment later.
+    way.cut();
+    eventually("Ben's program knows", || ben.together().away.len() == 1);
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    eventually("they are in the song together again", || {
+        same(&ada, &ben) && ben.together().people.len() == 1 && ben.together().away.is_empty()
+    });
+    assert_eq!(ada.session.lock().project().clip(verse).unwrap().notes().len(), 4);
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+
+    // Ada stops sharing and shares again, where she listened before: that
+    // is another invitation. When the way is cut now, Ben's program asks
+    // again, is told that the invitation it has is no longer one, and
+    // stops asking: that is when someone has to ask for the invitation.
+    ada.stop_sharing();
+    eventually("the invitation is no longer one", || ada.together().invitation.is_none());
+    let mut another = None;
+    eventually("she shares again on the port she had", || {
+        another = ada.share(Reach::ThisMachine, port).ok();
+        another.is_some()
+    });
+    assert_ne!(another.as_deref(), Some(invitation.as_str()));
+    way.cut();
+    eventually("Ben is told that asking again is no use", || said(&ben).contains("Ask for the invitation again."));
+    assert!(said(&ben).contains("No longer in the song with Ada: the program at"), "{}", said(&ben));
+    assert!(ben.together().away.is_empty() && !ben.together().is_on(), "{:?}", ben.together());
+}
+
+/// About 6 connections.
+#[test]
+fn a_meeting_point_that_does_not_take_the_key_or_passes_no_more_today_is_said_in_a_sentence() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, _, verse) = with_a_song(folder.path(), "Ada");
+    let ben = start(folder.path(), "Ben");
+    let point = MeetingPoint::start(meet::Limits { bytes_a_day: 200_000, ..meet::Limits::default() });
+
+    // A key its keeper did not give: the invitation is there at once, as
+    // always, and a moment on sharing ends in the sentence that says why.
+    ada.set_meeting_point(&point.address, Some(&meet::Key::new().unwrap().to_string())).unwrap();
+    ada.share_through_meeting_point().unwrap();
+    eventually("it is said", || said(&ada).contains("Not shared through the meeting point"));
+    let told = said(&ada);
+    assert!(told.contains(&point.address) && told.contains("did not take the key"), "{told}");
+    assert!(told.contains("The song is not shared, and is yours as it was."), "{told}");
+    eventually("and nothing is shared", || ada.together().invitation.is_none() && ada.together().meeting.is_none());
+
+    // With the key it is shared, and Ben is in the song.
+    let invitation = point.shared_by(&ada);
+    ben.join(&invitation, false).unwrap();
+    eventually("Ben has the song", || same(&ada, &ben) && ben.together().people.len() == 1);
+
+    // More is said through the meeting point than its keeper lets a key
+    // pass in a day: a clip of thousands of notes.
+    let many: Vec<_> = (0..4000u32).map(|n| note(36 + (n / 800) as u8, f64::from(n % 800) * 0.01)).collect();
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&many)).unwrap();
+    eventually("the meeting point passes no more", || matches!(ada.together().meeting, Some((_, Meeting::Away(_)))));
+    let told = said(&ada);
+    let at = &point.address;
+    assert!(told.contains(&format!("The meeting point {at} passes no more for your key today")), "{told}");
+    assert!(told.contains("The song is yours to go on with alone meanwhile"), "{told}");
+    assert!(told.contains("is merged when you meet again"), "{told}");
+    // Ben's link was lost on the way, and his program goes on asking: it
+    // is tomorrow's to let in. The song is his to go on with as well.
+    eventually("Ben's program asks again", || ben.together().away.len() == 1 && ben.together().away[0].tries >= 1);
+    assert!(!said(&ben).contains("invitation again"), "{}", said(&ben));
+    ben.leave();
+    eventually("until he leaves", || !ben.together().is_on());
 }

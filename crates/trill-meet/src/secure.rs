@@ -216,7 +216,14 @@ pub fn secure_in(
         state.read_message(&heard, &mut nothing)?;
     } else {
         read_frame(&mut hearing, &mut heard, HANDSHAKE_FRAME)?;
-        state.read_message(&heard, &mut nothing)?;
+        if state.read_message(&heard, &mut nothing).is_err() {
+            // The other side has not got the secret. Nothing can be said
+            // under a secret it has not got: an empty message, where this
+            // side's part of the handshake would be, tells it so, and
+            // tells it apart from a connection that was lost on the way.
+            let _ = write_frame(&mut wire, &[]);
+            return Err(Broken::NotTrusted);
+        }
         let length = state.write_message(&[], &mut said)?;
         write_frame(&mut wire, &said[..length])?;
     }
@@ -396,7 +403,7 @@ mod tests {
     fn a_program_without_the_secret_gets_no_connection_and_one_that_says_too_much_is_cut_off() {
         let (ours, theirs) = pair([1u8; 32], [2u8; 32]);
         assert!(matches!(theirs, Err(Broken::NotTrusted)), "the side that listens refuses");
-        assert!(ours.is_err(), "and the side that connects is left with nothing");
+        assert!(matches!(ours, Err(Broken::NotTrusted)), "and the side that connects is told so, and has nothing");
 
         // Someone who speaks no Noise at all.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

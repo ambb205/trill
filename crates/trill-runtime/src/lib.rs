@@ -79,7 +79,7 @@ pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
 pub use studying::{MODELS_FOLDER, STUDIES_FOLDER, Studied, Studying};
-pub use together::{Here, Mine, Together};
+pub use together::{Away, Here, Meeting, MeetingPointSet, Mine, Together};
 pub use trill_together::{Person, Reach};
 
 use housekeeping::Housekeeper;
