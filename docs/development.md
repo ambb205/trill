@@ -94,6 +94,11 @@ What an installed Trill does with them is in [Installing and updating](installin
 - **The build** is apart from every other (`target/dist`), with the C runtime linked in, and is marked as a release
   by the commit it is given when it is compiled. Every other build is "a build of your own": it looks for no newer
   Trill and is never replaced, which is why no test and no run from the source ever asks a network anything.
+- **What is gathered is checked.** A program keeps the place in the source that each of its messages comes from,
+  and those places begin with the home folder of whoever built it: the script has them written as names
+  (`cargo`, `rustup`, `trill`), and refuses a program that still holds that folder, that asks for the C runtime's
+  DLL, or that does not say (`--version`) that it is this version at this commit. So `--no-build` gathers the
+  last build only if it is the one being released, never one of another commit or one made for a trial.
 - **The key.** An installed Trill takes an announcement only under a key that is built into it
   (`KEYS` in `crates/trill-update/src/release.rs`). `cargo run -p trill-update --example release -- key FILE`
   makes one: the secret half goes into `FILE`, which is not written over and is never printed, and the line for

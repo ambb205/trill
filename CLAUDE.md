@@ -470,7 +470,10 @@ on the samples.
   Trill still applies what a newer one's release is. What the installer registers is named in one place each
   (`INSTALLED_AS`, `RUNS_AS`, and the same two for a trial); a trial's hooks (`made_for_a_trial`: another key, a
   version, an address, a build from this machine) are compiled in only by `release.sh --trial` and a release has
-  none of them. Tests publish on a shelf under a key of their own (`trill_update::scripted::Makers`,
+  none of them. What a release is made of is checked where it is gathered (`release.sh`): each program says
+  which Trill it is (`trill_update::says`, held to the version and the commit), asks for no runtime DLL, and
+  names no folder of the machine that built it (`--remap-path-prefix`, then looked for); whatever else must
+  never ship is one more check there. Tests publish on a shelf under a key of their own (`trill_update::scripted::Makers`,
   `Parts::updating`); the real programs are tried with `release.sh --trial`, as `docs/development.md` says, after
   touching `place.rs`, `start` or the installer's script.
 - **Something that says a MIDI channel:** a note and a clip's controller curve are each on one of sixteen
