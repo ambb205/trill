@@ -16,8 +16,9 @@
 #
 # The version is the workspace's, in Cargo.toml: change it there, commit, and tag the commit
 # v<version>. The build is a release: it says its version and commit, links the C runtime in
-# (nobody needs Microsoft's redistributable for it), and is built apart from everything else
-# (target/dist), so that making one disturbs no other build.
+# (nobody needs Microsoft's redistributable for it), names no folder of the machine it was built
+# on, and is built apart from everything else (target/dist), so that making one disturbs no
+# other build.
 #
 # It publishes nothing and pushes nothing. What to publish, and how, is said at the end.
 #
@@ -106,6 +107,8 @@ fi
 out=${out:-$root/target/release-out/$name}
 dist="$root/target/dist"
 built="$dist/release"
+# The home folder of whoever makes the release, which no release is to name.
+home=$(cygpath -u "${USERPROFILE:-$HOME}")
 
 if [ "$build" = yes ]; then
     # What marks the build as a release, and what never does: a trial's key and version are given
@@ -115,8 +118,22 @@ if [ "$build" = yes ]; then
     if [ -n "$trial" ]; then
         export TRILL_UPDATE_TRIAL_KEY="$trial_public" TRILL_UPDATE_TRIAL_VERSION="$version"
     fi
-    cargo build --release -p trill-app -p trill-mcp --target-dir "$dist" \
-        --config 'target.x86_64-pc-windows-msvc.rustflags=["-C", "target-feature=+crt-static"]'
+    # No path of the machine a release is built on goes into it. A program keeps the place of the
+    # source each of its messages comes from, and those places begin with the folders of whoever
+    # built it: each is written as a name instead, in both ways Windows spells a path. (The last
+    # that fits is the one taken, so the most general comes first.)
+    remap=
+    for spelled in -w -m; do
+        for folder in "$home=home" "${RUSTUP_HOME:-$home/.rustup}=rustup" "${CARGO_HOME:-$home/.cargo}=cargo" "$root=trill"; do
+            from=$(cygpath "$spelled" "${folder%=*}")
+            case "$from" in
+                *"'"*) echo "release: a folder with ' in its name cannot be kept out of the programs: $from" >&2; exit 1 ;;
+            esac
+            remap="$remap, '--remap-path-prefix', '$from=${folder##*=}'"
+        done
+    done
+    cargo build --release -p trill-app -p trill-mcp --target-dir "$(cygpath -w "$dist")" \
+        --config "target.x86_64-pc-windows-msvc.rustflags=['-C', 'target-feature=+crt-static'$remap]"
     unset TRILL_RELEASE_COMMIT TRILL_UPDATE_TRIAL_KEY TRILL_UPDATE_TRIAL_VERSION
 fi
 expected="Trill $version (build $commit)"
@@ -141,6 +158,14 @@ for program in trill.exe trill-mcp.exe; do
         echo "         and what is being made is '$expected': run without --no-build" >&2
         exit 1
     fi
+    # And nothing in it names the folders of whoever built it.
+    for spelled in -w -m; do
+        if grep -a -q -F -- "$(cygpath "$spelled" "$home")" "$built/$program"; then
+            echo "release: $program holds a path of this machine ($(cygpath "$spelled" "$home")...):" >&2
+            echo "         it was not built by this script as it is now: run without --no-build" >&2
+            exit 1
+        fi
+    done
 done
 
 # Only a folder this script made is cleared.
