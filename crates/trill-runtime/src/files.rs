@@ -1132,26 +1132,50 @@ impl Files {
 
 // ---- what a front end asks --------------------------------------------------
 
+/// A path as the file system spelled it out, as it is shown to someone:
+/// without the mark Windows puts in front of such a path.
+fn as_shown(real: &Path) -> String {
+    let text = real.to_string_lossy();
+    match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+        (Some(rest), _) => format!(r"\\{rest}"),
+        (None, Some(rest)) => rest.to_owned(),
+        (None, None) => text.into_owned(),
+    }
+}
+
 impl Runtime {
     /// What the open song would hand to whoever joins it: the files it
     /// names on this computer, how large they are and where they lie. For
     /// showing before the song is shared. It looks at the disk for each
-    /// file (that it is there, how large it is) and reads none: call it
-    /// away from the thread that draws.
+    /// file (that it is there, how large it is, where it really lies) and
+    /// reads none: call it away from the thread that draws.
+    ///
+    /// Which folder a file lies in is asked of the file system, not read
+    /// off how its path is spelled: a song file that someone else wrote
+    /// may name a file anywhere on the disk by a path that begins with the
+    /// song's own folder and leaves it again (`..`), or through a link.
+    /// Such a file is shown where it is, by itself.
     pub fn files_to_go(&self) -> Going {
         let (files, song, recordings) = {
             let session = self.session.lock();
             let received = session.received_in();
-            let own =
-                |file: &FileHere| received.as_ref().is_none_or(|folder| !Path::new(&file.path).starts_with(folder));
+            let own = |file: &FileHere| {
+                received.as_ref().is_none_or(|folder| !trill_core::files::lies_in(Path::new(&file.path), folder))
+            };
             let files: Vec<String> = session.files_here().into_iter().filter(own).map(|file| file.path).collect();
             let song = session.path().and_then(|path| path.parent().map(Path::to_owned));
             (files, song, session.recordings_folders())
         };
         let files: std::collections::BTreeSet<String> = files.into_iter().collect();
-        let library: Vec<PathBuf> = self.library.roots();
+        // Every folder as the file system has it; one that is not there holds nothing.
+        let really = |path: &Path| std::fs::canonicalize(path).ok();
+        let song = song.as_deref().and_then(really);
+        let recordings: Vec<PathBuf> = recordings.iter().filter_map(|folder| really(folder)).collect();
+        let library: Vec<(PathBuf, PathBuf)> =
+            self.library.roots().into_iter().filter_map(|root| Some((really(&root)?, root))).collect();
         let mut going = Going::default();
         let mut folders: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+        let mut elsewhere = std::collections::BTreeSet::new();
         for path in files {
             let Some(found) = std::fs::metadata(&path).ok().filter(std::fs::Metadata::is_file) else {
                 going.gone += 1;
@@ -1159,12 +1183,14 @@ impl Runtime {
             };
             going.files += 1;
             going.bytes += found.len();
-            let within = |folder: &Path| Path::new(&path).starts_with(folder);
+            // (A file whose real place cannot be told is in no folder that is known.)
+            let real = really(Path::new(&path));
+            let within = |folder: &Path| real.as_deref().is_some_and(|real| real.starts_with(folder));
             let known = song.as_deref().filter(|folder| within(folder)).map(|_| "the song's folder".to_owned());
             let known = known
                 .or_else(|| recordings.iter().any(|folder| within(folder)).then(|| "Trill's recordings".to_owned()));
             let known = known.or_else(|| {
-                let root = library.iter().find(|root| within(root))?;
+                let (_, root) = library.iter().find(|(real, _)| within(real))?;
                 Some(format!("the sample library ({})", root.display()))
             });
             match known {
@@ -1172,9 +1198,10 @@ impl Runtime {
                     let entry = folders.entry(folder).or_default();
                     (entry.0, entry.1) = (entry.0 + 1, entry.1 + found.len());
                 }
-                None => going.elsewhere.push(path),
+                None => drop(elsewhere.insert(real.as_deref().map_or(path, as_shown))),
             }
         }
+        going.elsewhere = elsewhere.into_iter().collect();
         going.folders = folders.into_iter().map(|(folder, (count, bytes))| (folder, count, bytes)).collect();
         going
     }

@@ -170,6 +170,21 @@ impl FileIs {
 /// The longest name a file is said by.
 pub const MAX_FILE_NAME: usize = 255;
 
+/// Whether `path`, as it is written, lies in `folder`: it begins with the
+/// folder, and what follows names things in it and nothing else. A path
+/// that begins with a folder and leaves it again (`folder\..\elsewhere`)
+/// does not lie in it, whatever its first words say.
+///
+/// This is the test for "a place of this program's own making": a path
+/// someone else wrote (a song file, another program) must never pass for
+/// one by how it is spelled. It reads no disk, so it says nothing of
+/// links; the folders it is asked about are the program's own, where
+/// nobody else puts any.
+pub fn lies_in(path: &std::path::Path, folder: &std::path::Path) -> bool {
+    path.strip_prefix(folder)
+        .is_ok_and(|rest| rest.components().all(|part| matches!(part, std::path::Component::Normal(_))))
+}
+
 /// Where a song names a file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FilePlace {
@@ -732,6 +747,39 @@ pub fn read(json: &str) -> Result<(Project, FileTable), EditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_that_begins_with_a_folder_and_leaves_it_again_does_not_lie_in_it() {
+        use std::path::Path;
+        let folder = Path::new("profile").join("received").join("0a1b");
+        let lies = |path: std::path::PathBuf| lies_in(&path, &folder);
+        assert!(lies(folder.join("9f2c.wav")));
+        assert!(lies(folder.join("of devices").join("7").join("sample.wav")));
+        assert!(lies(folder.join(".").join("9f2c.wav")), "a dot names the folder it stands in");
+        // Out of it again, by any number of steps, and back in by another way.
+        assert!(!lies(folder.join("..").join("0a1b").join("9f2c.wav")));
+        assert!(!lies(folder.join("..").join("..").join("..").join("Music").join("memo.wav")));
+        assert!(!lies(folder.join("of devices").join("..").join("..").join("other song").join("9f2c.wav")));
+        // Beside it, above it, and the folder itself with nothing in it named.
+        assert!(!lies(Path::new("profile").join("received").join("0a1b more").join("9f2c.wav")));
+        assert!(!lies(Path::new("profile").join("received").join("9f2c.wav")));
+        assert!(!lies(Path::new("elsewhere").join("9f2c.wav")));
+        assert!(lies_in(&folder, &folder), "the folder lies in itself, and names no file");
+        #[cfg(windows)]
+        {
+            let folder = Path::new(r"C:\Users\Jo\AppData\Roaming\trill\received\0a1b");
+            assert!(lies_in(Path::new(r"C:\Users\Jo\AppData\Roaming\trill\received\0a1b\9f2c.wav"), folder));
+            assert!(!lies_in(
+                Path::new(r"C:\Users\Jo\AppData\Roaming\trill\received\0a1b\..\..\..\..\Music\memo.wav"),
+                folder
+            ));
+            assert!(!lies_in(
+                Path::new(r"C:/Users/Jo/AppData/Roaming/trill/received/0a1b/../../../../Music/memo.wav"),
+                folder
+            ));
+            assert!(!lies_in(Path::new(r"D:\Users\Jo\AppData\Roaming\trill\received\0a1b\9f2c.wav"), folder));
+        }
+    }
     use crate::project::{AudioContent, ChainRef, WarpMode};
 
     /// Devices whose state is their files, a line each: `slot=path`.

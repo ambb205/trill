@@ -54,7 +54,7 @@
 use super::Session;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use trill_core::files::{Content, FileIs, FilePlace, kind_of};
+use trill_core::files::{Content, FileIs, FilePlace, kind_of, lies_in};
 use trill_core::merge::{AudioSet, Blob, ClipOp, DeviceOp, DeviceSet, Kept, Op, SongId};
 use trill_core::project::ClipContent;
 use trill_core::{ClipId, Device, DeviceFiles, DeviceId, Project};
@@ -259,9 +259,12 @@ impl Session {
 
     /// Whether `path` is a place of this machine's: one in the open
     /// song's folder of files from other programs, or one that was named
-    /// here (by a song that was opened, an edit, a recording).
+    /// here (by a song that was opened, an edit, a recording). A path that
+    /// begins with the song's folder and leaves it again is none
+    /// ([`lies_in`]): another program knows that folder's name, and would
+    /// otherwise name any file of this machine's through it.
     fn is_a_place_here(&self, path: &str) -> bool {
-        self.named_here.contains(path) || self.received_in().is_some_and(|folder| Path::new(path).starts_with(folder))
+        self.named_here.contains(path) || self.received_in().is_some_and(|folder| lies_in(Path::new(path), &folder))
     }
 
     /// After anything arrived: gives what has none this machine's place
@@ -373,7 +376,7 @@ impl Session {
     pub fn files_here(&self) -> Vec<FileHere> {
         let folder = self.received_in();
         let may_go = |path: &str| {
-            self.let_go.contains(path) || folder.as_ref().is_some_and(|folder| Path::new(path).starts_with(folder))
+            self.let_go.contains(path) || folder.as_ref().is_some_and(|folder| lies_in(Path::new(path), folder))
         };
         let mut files = Vec::new();
         for track in &self.project.tracks {
@@ -546,7 +549,7 @@ impl Session {
     /// that wait for one, and the problems that are left.
     pub(super) fn arriving_among(&self, problems: Vec<crate::Problem>) -> (Vec<FilePlace>, Vec<crate::Problem>) {
         let Some(folder) = self.received_in() else { return (Vec::new(), problems) };
-        let within = |path: &str| Path::new(path).starts_with(&folder);
+        let within = |path: &str| lies_in(Path::new(path), &folder);
         let mut arriving = Vec::new();
         let mut left = Vec::new();
         for problem in problems {
@@ -588,7 +591,7 @@ impl Session {
         // (Not a place that was made for a device's file of which nobody
         // said what it is: nothing arrives there.)
         self.received_in().is_some_and(|folder| {
-            Path::new(path).starts_with(&folder) && !Path::new(path).starts_with(folder.join(OF_DEVICES))
+            lies_in(Path::new(path), &folder) && !lies_in(Path::new(path), &folder.join(OF_DEVICES))
         })
     }
 

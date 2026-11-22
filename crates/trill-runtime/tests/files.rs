@@ -586,6 +586,31 @@ fn doctored(folder: &Path) -> Doctored {
     }
 }
 
+/// Writes into the song file at `song`, by hand, `to` wherever a clip
+/// names `from`: the same file by another spelling.
+fn respell(song: &Path, from: &Path, to: &Path) {
+    fn walk(node: &mut serde_json::Value, from: &str, to: &str, found: &mut usize) {
+        match node {
+            serde_json::Value::String(text) if text == from => {
+                *text = to.to_owned();
+                *found += 1;
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|item| walk(item, from, to, found)),
+            serde_json::Value::Object(named) => named.values_mut().for_each(|item| walk(item, from, to, found)),
+            _ => {}
+        }
+    }
+    let mut held: serde_json::Value = serde_json::from_slice(&std::fs::read(song).unwrap()).unwrap();
+    // (Without the table of where its files were, which a file written
+    // by hand need not carry: with it, a file is found again from the
+    // song's folder and named as the file system spells it.)
+    held.as_object_mut().unwrap().remove("files");
+    let mut found = 0;
+    walk(&mut held, &from.to_string_lossy(), &to.to_string_lossy(), &mut found);
+    assert!(found >= 1, "the song file names {}", from.display());
+    std::fs::write(song, serde_json::to_vec_pretty(&held).unwrap()).unwrap();
+}
+
 fn clip_named(runtime: &Runtime, name: &str) -> ClipId {
     let session = runtime.session.lock();
     let clips = session.project().tracks.iter().flat_map(|track| &track.clips);
@@ -601,9 +626,17 @@ fn a_song_file_is_a_stranger_too_and_only_audio_its_user_let_go_is_ever_said_or_
         (doctored.strangers.iter()).filter_map(|(_, path)| content_of(path, |_| true).ok().flatten()).collect();
     assert!(hashes.len() >= 3, "what can be read of them has a hash someone could ask by");
 
+    // And the memo is named by a path that begins with the song's own
+    // folder and leaves it again, written into the file by hand: nothing
+    // Trill writes spells a path so, and a stranger's file may.
+    let through = folder.path().join("songs").join("..").join("voice memos").join("private.wav");
+    respell(&doctored.song, &doctored.elsewhere, &through);
+
     // Its owner opens it. Nothing of it has gone anywhere: there is nobody.
     let ada = start(folder.path(), "Ada");
     ada.session.lock().load(&doctored.song).unwrap();
+    let memo_as_named = file_of(&ada, clip_named(&ada, "Memo")).0;
+    assert!(memo_as_named.contains(".."), "the song names it as the file spells it: {memo_as_named}");
     // Before she shares she is shown what would go: how many, how large,
     // the folders, and each file that lies outside the song's own folder.
     let going = ada.files_to_go();

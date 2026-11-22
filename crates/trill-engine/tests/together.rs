@@ -671,6 +671,65 @@ fn what_a_sampler_plays_is_said_without_its_place_and_has_a_place_made_here_at_t
     };
     b.merge("Mallory", vec![Said { change, knew: None }], None, Some(99)).unwrap();
     assert_eq!(names(&b, sampler), [home.to_string_lossy()], "the slot keeps the place this machine had for it");
+
+    // Nor one that is spelled through the folder this machine keeps the
+    // song's files in, and out of it again. Whoever is in the song knows
+    // that folder's last name (it is the song's id), and so can spell any
+    // file of this machine's as if it lay there.
+    let through =
+        folder.path().join("at Ben's").join(&song).join("..").join("..").join("Ben's desk").join("letters.wav");
+    assert!(through.exists(), "the same letters, by another spelling");
+    let planted = trill_dsp::sampler::State::new(through.to_string_lossy()).to_bytes();
+    let change = Change {
+        stamp: Stamp(b.floors().0.values().max().copied().unwrap_or(0) + 50, 99),
+        ops: vec![Op::Device(
+            sampler,
+            trill_core::merge::DeviceOp::Set(trill_core::merge::DeviceSet::State(trill_core::merge::Blob(Some(
+                planted,
+            )))),
+        )],
+    };
+    b.merge("Mallory", vec![Said { change, knew: None }], None, Some(99)).unwrap();
+    assert_eq!(names(&b, sampler), [home.to_string_lossy()], "it is no place of this machine's, and is not taken");
+    assert!(b.files_here().iter().all(|file| !file.path.contains("letters")), "{:?}", b.files_here());
+    assert!(!b.is_awaited(&through.to_string_lossy()));
+}
+
+#[test]
+fn a_path_that_begins_with_the_songs_own_folder_and_leaves_it_again_is_held_like_any_other() {
+    let folder = tempfile::tempdir().unwrap();
+    let memo = folder.path().join("music").join("memo.wav");
+    tone_at(&memo);
+    let mut a = session();
+    a.keep_received_in(Some(folder.path().join("profile").join("received")));
+    let track = a.edit(|song| Ok(song.add_track("Audio"))).unwrap();
+    a.share();
+    // The folder what the song brings is kept in, and the memo spelled
+    // through it: what a song file someone else wrote can say, and what
+    // an assistant's edit can.
+    let own = a.received_in().unwrap();
+    std::fs::create_dir_all(&own).unwrap();
+    let through = own.join("..").join("..").join("..").join("music").join("memo.wav");
+    assert!(through.exists(), "the same memo, by another spelling");
+    let spelled = through.to_string_lossy().into_owned();
+    let recording = AudioContent::new(spelled.clone());
+    let clip = a.edit(|song| song.add_audio_clip(track, "Memo", 0.0, 2.0, recording)).unwrap();
+
+    // It is not what the song brought here: nobody's hand let it go, so
+    // it is held, nothing is said of it, and nothing is awaited there.
+    let named = a.files_here();
+    assert_eq!((named.len(), named[0].path.as_str(), named[0].may_go), (1, spelled.as_str(), false));
+    assert_eq!(a.files_held(), std::slice::from_ref(&spelled));
+    assert!(!a.is_awaited(&spelled));
+    assert!(!a.say_file(&FilePlace::Clip(clip), &spelled, found_to_be(7, &memo)), "nothing is said of it");
+    assert!(a.said_files().is_empty());
+    // What really lies in that folder is the song's to hand on, as before.
+    let brought = own.join(format!("{}.wav", found_to_be(8, &memo).sha256));
+    std::fs::copy(&memo, &brought).unwrap();
+    let recording = AudioContent::new(brought.to_string_lossy());
+    a.edit(|song| song.add_audio_clip(track, "Brought", 4.0, 2.0, recording)).unwrap();
+    assert!(a.is_awaited(&brought.to_string_lossy()));
+    assert_eq!(a.files_held(), [spelled], "only the one that leaves the folder again");
 }
 
 #[test]
