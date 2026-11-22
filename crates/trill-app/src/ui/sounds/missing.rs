@@ -283,6 +283,9 @@ fn nearest_folder(path: &Path) -> Option<PathBuf> {
 /// Relinks, and then moves the library's folders: the body of every way
 /// of putting the song right.
 fn relink(runtime: &Runtime, relinks: &[Relink], library: Vec<(PathBuf, PathBuf)>) -> Result<Relinked, String> {
+    // (The user's own hand says where the files are, though a worker
+    // carries it out: in a song others hold too, they may go to them.)
+    let _hand = trill_engine::hand::by_hand();
     let places = runtime.relink(relinks).map_err(|error| error.to_string())?;
     let mut files: Vec<&str> = relinks.iter().map(|relink| relink.path.as_str()).collect();
     files.sort_unstable();

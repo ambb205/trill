@@ -632,6 +632,30 @@ fn a_sound_dropped_on_an_empty_project_starts_the_song() {
 }
 
 #[test]
+fn a_sound_dropped_into_a_song_that_is_shared_goes_to_the_others_without_a_question() {
+    // The drop is the user's own hand's act, though a worker carries it
+    // out: its file is not among what is held until someone was shown it.
+    let pack = Pack::new();
+    let mut harness = Harness::new(sounds_tab(), |_| {});
+    harness.add_pack(&pack);
+    harness.runtime.share(trill_runtime::Reach::ThisMachine, 0).unwrap();
+    let middle = pos2(harness.work_left() + 500.0, 300.0);
+    harness.drop_sound("Drum Loop 120bpm F#m", middle);
+    let session = harness.runtime.session.lock();
+    let files = session.files_here();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].may_go, "what the hand dropped may go: {files:?}");
+    assert!(session.files_held().is_empty(), "{:?}", session.files_held());
+    drop(session);
+    // What something else puts into the song (not the hand) is held.
+    let track = harness.project().tracks[0].id;
+    let other = trill_core::project::AudioContent::new(pack.snare.to_string_lossy());
+    harness.session.lock().edit(|song| song.add_audio_clip(track, "Not by hand", 16.0, 1.0, other)).unwrap();
+    assert_eq!(harness.runtime.session.lock().files_held().len(), 1);
+    harness.runtime.leave();
+}
+
+#[test]
 fn groups_and_returns_refuse_sounds_and_escape_cancels_a_drag() {
     let (mut harness, _pack, _) = with_pack(sounds_tab());
     let group = harness.session.lock().edit(|project| Ok(project.add_track_of_kind("Bus", TrackKind::Group))).unwrap();
