@@ -27,6 +27,7 @@
 //! is so; a card that could not run the models says so in its row.
 
 use super::setup_instruments::{self, Instruments};
+use super::setup_program::{self, Program};
 use super::state::Cx;
 use eframe::egui::{self, Align, Align2, Id, Layout, Rect, Role, Sense, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use std::collections::HashMap;
@@ -90,13 +91,22 @@ struct Shown {
     /// The instruments of the catalogue that are in the sound library, by
     /// the checksum of their file: where each is.
     here: Arc<HashMap<String, PathBuf>>,
+    /// Which Trill this is, and what is known of a newer one.
+    program: Program,
 }
 
 /// The panel and what it is waiting for.
 pub struct Setup {
     open: bool,
-    /// The tab: a list by its place, and after the last list the machine.
+    /// The tab: a list by its place, after the last list the machine,
+    /// and after that Trill itself.
     tab: usize,
+    /// What there is to say of a newer Trill without being asked: the
+    /// line in the status bar. Read when what is known of one has moved.
+    notice: Option<trill_runtime::UpdateNotice>,
+    notice_at: Option<u64>,
+    /// What the user was last told of it in this run, so that it is said once.
+    told: Option<trill_runtime::UpdateNotice>,
     shown: Shown,
     /// False until what is shown has been read once since it was opened.
     read: bool,
@@ -131,6 +141,9 @@ impl Default for Setup {
         Self {
             open: false,
             tab: 0,
+            notice: None,
+            notice_at: None,
+            told: None,
             shown: Shown::default(),
             read: false,
             reading: false,
@@ -177,6 +190,44 @@ impl Setup {
         self.shown.here.clone()
     }
 
+    /// Which Trill this is and what is known of a newer one, as it was
+    /// last read.
+    pub(super) fn program(&self) -> &Program {
+        &self.shown.program
+    }
+
+    /// What there is to say of a newer Trill without being asked.
+    pub fn notice(&self) -> Option<&trill_runtime::UpdateNotice> {
+        self.notice.as_ref()
+    }
+
+    /// Brings the notice in step with what the runtime knows of a newer
+    /// Trill: asked of it only when that has moved, which a frame finds
+    /// out by one number. Answers with what there is to tell the user
+    /// once, the first time in this run that there is something new to
+    /// say: that a newer one is out, and that it is fetched.
+    pub fn see_updates(&mut self, runtime: &Runtime) -> Option<String> {
+        if self.staged {
+            return None;
+        }
+        let changes = runtime.updates().changes();
+        if self.notice_at == Some(changes) {
+            return None;
+        }
+        self.notice_at = Some(changes);
+        self.notice = runtime.update_notice();
+        let notice = self.notice.clone()?;
+        if self.told.as_ref() == Some(&notice) {
+            return None;
+        }
+        let words = match notice.ready {
+            true => notice.words(),
+            false => format!("{}: its line at the bottom of the window says what is new", notice.words()),
+        };
+        self.told = Some(notice);
+        Some(words)
+    }
+
     /// True while something that was asked for is being done.
     #[cfg(test)]
     pub fn is_busy(&self) -> bool {
@@ -193,11 +244,14 @@ impl Setup {
     pub fn show(&mut self, scene: super::setup_scene::SetupScene) {
         let staged = scene.staged();
         self.tab = match (staged.on_machine, &staged.instruments) {
+            // The tab of Trill itself is the last one.
+            _ if staged.on_program => usize::MAX,
             (true, _) => staged.lists.len(),
             // The tab of the instruments, where the scene is of them.
             (false, Some(_)) => staged.lists.len() - 1,
             (false, None) => 0,
         };
+        self.notice = staged.program.notice();
         for list in &staged.lists {
             self.selected.insert(list.id.clone(), staged.selected.to_owned());
         }
@@ -212,6 +266,7 @@ impl Setup {
             can_test: true,
             unavailable: None,
             here: Arc::new(staged.here),
+            program: staged.program,
         };
         (self.programs, self.studies) = (staged.programs, Some(staged.studies));
         (self.staged, self.read) = (true, true);
@@ -240,6 +295,8 @@ impl Setup {
                     // What was done shows at once, not at the next look.
                     self.read_at = f64::NEG_INFINITY;
                     self.stale = true;
+                    // It may have been about what is said of a newer Trill.
+                    self.notice_at = None;
                 }
                 Done::Testing(what, share) => self.testing = Some((what, share)),
                 Done::Tested(ended) => {
@@ -315,6 +372,7 @@ fn read(runtime: &Runtime) -> Shown {
         can_test: desk.program().is_some(),
         unavailable: None,
         here,
+        program: setup_program::read(runtime),
     }
 }
 
@@ -328,6 +386,13 @@ pub fn open(ctx: &egui::Context, cx: &mut Cx) {
 
 pub fn toggle(ctx: &egui::Context, cx: &mut Cx) {
     if cx.setup.open { close(cx) } else { open(ctx, cx) }
+}
+
+/// Opens the panel on the tab of Trill itself: which Trill this is, and
+/// the newer one where there is one.
+pub fn open_on_program(ctx: &egui::Context, cx: &mut Cx) {
+    open(ctx, cx);
+    cx.setup.tab = usize::MAX;
 }
 
 /// Puts the panel away. What is being fetched goes on; the timed test too.
@@ -622,7 +687,15 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
     let theme = cx.theme;
     // What is shown is read again every so often: sooner while something is on its way.
     let now = ctx.input(|input| input.time);
+    let newer_on_its_way = cx
+        .setup
+        .shown
+        .program
+        .status
+        .as_ref()
+        .is_some_and(|status| status.looking || matches!(status.step, trill_update::Step::Fetching { .. }));
     let on_its_way = cx.setup.working > 0
+        || newer_on_its_way
         || cx.setup.testing.is_some()
         || cx.setup.shown.lists.iter().flat_map(|list| &list.parts).any(|status| {
             matches!(
@@ -665,10 +738,11 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
             return;
         }
 
-        // The tabs: a list each, and the machine.
+        // The tabs: a list each, the machine, and Trill itself.
         let titles: Vec<String> = cx.setup.shown.lists.iter().map(|list| list.title.clone()).collect();
         let mut labels: Vec<&str> = titles.iter().map(String::as_str).collect();
         labels.push("This machine");
+        labels.push("Trill");
         cx.setup.tab = cx.setup.tab.min(labels.len() - 1);
         let (tabs, _) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.chip), Sense::hover());
         let id = ui.scope_id().with("tabs");
@@ -692,7 +766,8 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
                 // The catalogue of instruments is too many parts for a list: by kind, with a search.
                 Some(list) if list.id == trill_runtime::INSTRUMENTS => setup_instruments::body(ui, ctx, cx, &list),
                 Some(list) => parts(ui, ctx, cx, &list),
-                None => machine(ui, ctx, cx),
+                None if cx.setup.tab == cx.setup.shown.lists.len() => machine(ui, ctx, cx),
+                None => setup_program::body(ui, ctx, cx),
             }
             // What the last thing that was asked for said.
             if let Some((words, wrong)) = cx.setup.last.clone() {

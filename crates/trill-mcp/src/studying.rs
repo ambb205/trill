@@ -154,13 +154,18 @@ pub enum SetupAction {
     Test,
     /// Have the models run on something else the test timed (`run_on`).
     Choose,
+    /// Look whether a newer Trill is out: fetches its makers' announcement, a small text, and reads it under
+    /// their signature. What it found is in the answer, and in report under `trill`.
+    LookForNewer,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetupRequest {
-    /// "report", "fetch", "stop", "remove", "test" or "choose".
+    /// "report", "fetch", "stop", "remove", "test", "choose" or "look_for_newer".
     pub action: SetupAction,
-    /// fetch, stop, remove: the part, by its id as report lists it ("stems", "beats").
+    /// fetch, stop, remove: the part, by its id as report lists it ("stems", "beats"). "trill" is the newer
+    /// Trill that report says is out: fetch brings it and keeps it ready, stop stops that, remove puts it away.
+    /// It goes in when the window next starts while no Trill runs, never while this answers.
     pub part: Option<String>,
     /// report: only this list ("models"), with its parts paged.
     pub list: Option<String>,
@@ -175,6 +180,64 @@ pub struct SetupRequest {
 
 fn megabytes(bytes: u64) -> u64 {
     (bytes as f64 / (1u64 << 20) as f64).round() as u64
+}
+
+/// What the newer Trill is asked for by, where a part is named.
+pub(crate) const TRILL: &str = "trill";
+
+/// Which Trill this is and what it knows of a newer one, as a reply says it.
+pub(crate) fn trill_view(runtime: &trill_runtime::Runtime) -> Value {
+    use trill_update::Step;
+    let status = runtime.updates().status();
+    let mut out = json!({ "this": status.this.words(), "version": status.this.version.to_string() });
+    if let Some(why) = &status.off {
+        out["looks_for_newer"] = json!(false);
+        out["why_not"] = json!(why);
+        return out;
+    }
+    if let Some(newer) = &status.newer {
+        let mut view = json!({ "version": newer.version.to_string(), "made": newer.date, "new_in_it": newer.notes });
+        if !newer.page.is_empty() {
+            view["page"] = json!(newer.page);
+        }
+        match status.build() {
+            Some(build) => {
+                view["size_mb"] = json!(megabytes(build.size));
+                view["from"] = json!(build.url);
+            }
+            None => {
+                view["for_this_machine"] =
+                    json!("it has no build for this kind of machine: its page says what there is")
+            }
+        }
+        out["newer"] = view;
+    }
+    match &status.step {
+        Step::Ready(version) => {
+            out["state"] = json!("ready");
+            out["ready"] = json!(format!(
+                "Trill {version} is fetched. It goes in when the window next starts while no Trill runs (this server is one): tell the user to save, close every Trill and start it again. Nothing has changed yet."
+            ));
+        }
+        Step::Fetching { got, of } => {
+            out["state"] = json!("fetching");
+            out["percent"] = json!(if *of == 0 { 0 } else { got * 100 / of });
+        }
+        Step::Idle if status.newer.is_some() => {
+            out["state"] = json!("out");
+            out["fetch_it"] = json!(
+                "setup with action \"fetch\" and part \"trill\", only when the user asked for it and has been told what is new and how large it is"
+            );
+        }
+        Step::Idle if status.looking => out["state"] = json!("looking"),
+        Step::Idle => {
+            out["state"] = json!(if status.looked.is_some() { "newest known" } else { "has not looked" });
+        }
+    }
+    if let Some(problem) = &status.problem {
+        out["problem"] = json!(problem);
+    }
+    out
 }
 
 fn named<T: serde::Serialize>(value: &T) -> Value {
@@ -623,7 +686,77 @@ impl TrillServer {
         }
     }
 
+    /// What is asked of a newer Trill: looking for one, and fetching, stopping or putting away the
+    /// one that is known, which is asked for like a part, by the name [`TRILL`]. `None` for
+    /// anything else.
+    async fn set_up_trill(&self, request: &SetupRequest) -> Option<Reply> {
+        let of_trill = request.part.as_deref() == Some(TRILL);
+        let updates = self.runtime.updates().clone();
+        let from_here = "From here Trill neither looks for a newer version nor fetches one. The user does both in Setup, in the File menu, on the tab Trill.";
+        Some(match request.action {
+            SetupAction::LookForNewer => {
+                if self.is_guarded() {
+                    return Some(Err(from_here.to_owned()));
+                }
+                let looked = tokio::task::spawn_blocking({
+                    let updates = updates.clone();
+                    move || updates.look()
+                })
+                .await
+                .map_err(|error| format!("looking stopped: {error}"));
+                match looked {
+                    Ok(Ok(_)) => Ok(json!({ "trill": trill_view(&self.runtime) })),
+                    Ok(Err(why)) | Err(why) => Err(why),
+                }
+            }
+            SetupAction::Fetch if of_trill => {
+                if self.is_guarded() {
+                    return Some(Err(from_here.to_owned()));
+                }
+                let status = updates.status();
+                if let Some(why) = status.off {
+                    return Some(Err(why));
+                }
+                let Some(newer) = status.newer else {
+                    return Some(Err(
+                        "no newer Trill is known of: setup with action \"look_for_newer\" looks for one".to_owned()
+                    ));
+                };
+                // On a thread of its own: it answers at once, as the fetch of a part does.
+                let spawned = std::thread::Builder::new().name("trill-update".into()).spawn(move || {
+                    if let Err(why) = updates.fetch() {
+                        log::warn!("{why}");
+                    }
+                });
+                if let Err(error) = spawned {
+                    return Some(Err(format!("a thread could not be started to fetch it: {error}")));
+                }
+                Ok(json!({
+                    "fetching": format!("Trill {}", newer.version),
+                    "next": "setup with action \"report\" says how far it is, under `trill`. Once it is ready it goes in when the window next starts while no Trill runs (this server is one): nothing changes before.",
+                }))
+            }
+            SetupAction::Stop if of_trill => {
+                updates.stop();
+                Ok(
+                    json!({ "stopped": TRILL, "note": "what has come of it is kept, and fetching it again goes on from there" }),
+                )
+            }
+            SetupAction::Remove if of_trill => {
+                if self.is_guarded() {
+                    return Some(Err(from_here.to_owned()));
+                }
+                updates.forget();
+                Ok(json!({ "put_away": TRILL, "note": "Trill stays as it is until the newer one is fetched again" }))
+            }
+            _ => return None,
+        })
+    }
+
     async fn set_up(&self, request: SetupRequest) -> Reply {
+        if let Some(reply) = self.set_up_trill(&request).await {
+            return reply;
+        }
         let fetches = self.runtime.fetches()?.clone();
         let desk = self.runtime.studies()?;
         let setup = desk.setup().clone();
@@ -662,6 +795,7 @@ impl TrillServer {
                 .collect();
                 Ok(json!({
                     "lists": lists,
+                    "trill": trill_view(&self.runtime),
                     "models": machine_view(&setup),
                     "programs": programs,
                     "note": "Trill ships and hosts none of this: each part comes from where its makers publish it, when the user asks for it, and is checked against what it was when Trill was made.",
@@ -718,6 +852,8 @@ impl TrillServer {
                 setup.choose(run_on(wanted)?)?;
                 Ok(machine_view(&setup))
             }
+            // Answered before anything else was asked for.
+            SetupAction::LookForNewer => Ok(json!({ "trill": trill_view(&self.runtime) })),
         }
     }
 }

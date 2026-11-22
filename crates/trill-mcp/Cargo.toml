@@ -23,6 +23,7 @@ trill-plugins.workspace = true
 trill-runtime.workspace = true
 trill-stage.workspace = true
 trill-study.workspace = true
+trill-update.workspace = true
 trill-theory.workspace = true
 anyhow.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

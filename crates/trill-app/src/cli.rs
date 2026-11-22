@@ -79,7 +79,8 @@ Options:
   --study-take <WHAT,..>  Take these of it into the song once it is open: reference, tempo, parts, key, kit
   --study-dialog          Start with the dialog that asks for a recording to study open
   --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching,
-                          machine, instruments, instruments-fetching or instruments-search
+                          machine, instruments, instruments-fetching, instruments-search, update
+                          or update-ready
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
@@ -92,6 +93,7 @@ Options:
                           opens, whatever is still on its way then: a song in the middle of
                           being opened
   --exit-after <SECONDS>  Close the window by itself after this long
+  -V, --version           Say which Trill this is: its version, and for a release its build
   -h, --help              Show this help
 ";
 
@@ -200,6 +202,7 @@ pub struct Cli {
 pub enum Parsed {
     Run(Box<Cli>),
     Help,
+    Version,
 }
 
 /// Parses the arguments after the program name.
@@ -210,6 +213,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
         let mut value = |what: &str| args.next().ok_or_else(|| anyhow!("{arg} needs {what}"));
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
+            "-V" | "--version" => return Ok(Parsed::Version),
             "--demo" => cli.demo = true,
             "--making-of" => cli.making_of = true,
             "--making-of-scene" => cli.making_of_scene = true,
@@ -558,6 +562,7 @@ impl Cli {
                 None => MakingOfStart::default(),
             }),
             watch: self.watch.clone(),
+            said_at_start: None,
         }
     }
 
@@ -579,6 +584,7 @@ mod tests {
         match parse(args.iter().map(|arg| arg.to_string()))? {
             Parsed::Run(cli) => Ok(*cli),
             Parsed::Help => bail!("help requested"),
+            Parsed::Version => bail!("the version requested"),
         }
     }
 

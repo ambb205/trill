@@ -36,6 +36,7 @@ mod study;
 mod takes;
 mod together;
 mod tracks;
+mod updating;
 mod wavetable;
 
 use super::app::TrillApp;

@@ -26,6 +26,7 @@ trill-runtime.workspace = true
 trill-stage.workspace = true
 trill-listen.workspace = true
 trill-study.workspace = true
+trill-update.workspace = true
 
 anyhow.workspace = true
 log.workspace = true

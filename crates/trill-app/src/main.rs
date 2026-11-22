@@ -24,8 +24,17 @@ fn main() -> anyhow::Result<()> {
             print!("{}", cli::USAGE);
             return Ok(());
         }
+        cli::Parsed::Version => {
+            println!("{}", trill_update::this().words());
+            return Ok(());
+        }
     };
     trill_mcp::logging::init_stderr();
+    // An update that was fetched goes in here, while no Trill runs from
+    // this folder, and never under one that does: this program then ends
+    // and the new one starts with what this one was started with. Held
+    // until the window closes: it says that a Trill runs.
+    let began = trill_update::start(trill_update::Program::Window);
 
     // The session, the media cache, the sound library and the settings,
     // shared by the window and the MCP server. It lives until the window
@@ -46,6 +55,11 @@ fn main() -> anyhow::Result<()> {
     // And this is a program that may start itself to study a recording,
     // and fetch what the user asks it to with the system's curl.
     runtime.study_and_fetch_as_usual();
+    // And one that looks whether a newer Trill is out, where it is a
+    // release and its user has not switched that off. Never for a picture.
+    if cli.screenshot.is_none() {
+        runtime.look_for_updates_as_usual();
+    }
     if let Some(scene) = cli.audio_scene {
         scene.stage(&runtime);
     }
@@ -53,6 +67,7 @@ fn main() -> anyhow::Result<()> {
 
     // services
     let mut options = cli.ui_options();
+    options.said_at_start = began.said.clone();
     // Held until the window closes; dropping it stops the server.
     let _mcp = cli.mcp_address().and_then(|address| match trill_mcp::serve_http(runtime.clone(), address) {
         Ok(server) => {

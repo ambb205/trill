@@ -75,6 +75,46 @@ scratch, tests included, takes about four minutes on a 16-core machine; after an
 Working in a second checkout (`git worktree add`)? `sh scripts/warm-worktree.sh` there copies the libraries the
 first one has already built, and the first build compiles only Trill's own crates: a minute and a half.
 
+## Making a release
+
+A release is made on Windows by one script, which publishes nothing:
+
+```sh
+sh scripts/release.sh --key FILE --notes NOTES.txt    # into target/release-out/<version>
+```
+
+It builds `trill.exe` and `trill-mcp.exe` as a release, gathers them with the licences, and writes
+`Trill-<version>-setup.exe` (the installer), `trill-<version>-windows-x86_64.zip` (the same files: what an
+installed Trill fetches to update itself), `trill-release.json` (the announcement, signed) and `SHA256SUMS.txt`.
+What an installed Trill does with them is in [Installing and updating](installing-and-updating.md).
+
+- **The version** is the workspace's (`[workspace.package]` in `Cargo.toml`): change it there, commit, and tag
+  the commit `v<version>`. The script refuses a tree with changes that are not committed, because a release says
+  which commit it is.
+- **The build** is apart from every other (`target/dist`), with the C runtime linked in, and is marked as a release
+  by the commit it is given when it is compiled. Every other build is "a build of your own": it looks for no newer
+  Trill and is never replaced, which is why no test and no run from the source ever asks a network anything.
+- **The key.** An installed Trill takes an announcement only under a key that is built into it
+  (`KEYS` in `crates/trill-update/src/release.rs`). `cargo run -p trill-update --example release -- key FILE`
+  makes one: the secret half goes into `FILE`, which is not written over and is never printed, and the line for
+  `KEYS` is printed. Keep the file away from the repository and from any machine that builds unattended, and keep a
+  copy: a Trill that was built with a key hears of a release only under that key. A second key can be added at
+  the end of `KEYS` at any time, and is trusted by the builds made from then on.
+- **The installer** is compiled by Inno Setup 6.3 or later from `installer/trill.iss`, where its compiler
+  (`ISCC.exe`) is found: where `TRILL_ISCC` says, on the path, or where its own installer puts it. Without it the
+  script makes everything else and says so.
+- **Publishing** is by hand, and the script prints the command: the files go to a GitHub release of the tag. An
+  installed Trill reads `trill-release.json` of the newest release (`releases/latest/download/`), so the moment that
+  file is there every one of them hears of the release. A release without it is one nobody is told of.
+
+**Trying the updater out** takes no release and no network. `sh scripts/release.sh --trial KEYFILE` builds a
+Trill that trusts a key made for the trial beside its makers' (none yet), says the version `--trial-version`
+gives, looks where `TRILL_UPDATE_ADDRESS` says when it runs, takes a build from an address on this machine, and is
+installed as "Trill trial" under an id of its own, never as the Trill a machine really has. Make one, install it
+into a folder under `target`, make a second with a higher `--trial-version`, serve its folder on the loopback
+(`python -m http.server --bind 127.0.0.1 8765`), and let the first one look, fetch and start again. A trial's
+build is never published: the script names its folder `-trial` and says so.
+
 ## Architecture
 
 ```

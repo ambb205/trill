@@ -1,0 +1,30 @@
+[package]
+name = "trill-update"
+description = "Which Trill this is, whether a newer one is out, and putting it in place: a release announced under its makers' signature, fetched when its user asks, and swapped in only while no Trill runs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+trill-fetch.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The signature a release is announced under. No signature scheme is
+# written here. Built on the curve the meeting point's handshake brings in
+# already (BSD-3-Clause); without its tables, which only make it faster.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# The checksum of what a test publishes. In the tree already, through trill-fetch.
+sha2 = "0.11"
+# A new key, from the system's own source. In the tree already.
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# The name by which an installer sees that Trill is running. The same
+# crate and version the engine brings in.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"

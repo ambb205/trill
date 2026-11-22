@@ -62,6 +62,6 @@ pub use scan::{MissingRoot, ScanPhase, ScanSummary};
 pub use search::Query;
 pub use settings::{
     AudioSettings, JournalSettings, LibrarySettings, Loaded, MeetingPointSettings, MidiSettings, RoundTrip, SaveError,
-    Settings, StudySettings, TogetherSettings, UiSettings, cache_dir, config_dir, data_dir,
+    Settings, StudySettings, TogetherSettings, UiSettings, UpdateSettings, cache_dir, config_dir, data_dir,
 };
 pub use tags::{Tag, TagRule, Tags, VOCABULARY};

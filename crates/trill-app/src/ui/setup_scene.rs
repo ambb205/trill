@@ -9,6 +9,7 @@
 //! this run keeps nothing.
 
 use super::setup_instruments::Instruments;
+use super::setup_program::Program;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use trill_catalogue::{Catalogue, Kind};
@@ -37,6 +38,11 @@ pub enum SetupScene {
     /// The catalogue narrowed by a search, on a set with instruments that
     /// are not put forward.
     InstrumentsSearch,
+    /// A newer Trill is out: the tab of Trill itself, and the line in the
+    /// status bar.
+    Update,
+    /// The newer Trill is fetched and waits for the next start.
+    UpdateReady,
 }
 
 /// What a scene shows.
@@ -55,6 +61,33 @@ pub struct Staged {
     pub instruments: Option<Instruments>,
     /// The instruments of the catalogue that are in the library.
     pub here: HashMap<String, PathBuf>,
+    /// Which Trill the made-up machine has, and what it knows of a newer one.
+    pub program: Program,
+    /// Whether the tab of Trill itself is the one shown.
+    pub on_program: bool,
+}
+
+/// A release of Trill as its makers would announce it, made up: nothing
+/// of it is published anywhere.
+fn made_up_release() -> trill_update::Release {
+    let version: trill_update::Version = trill_update::Version::new(0, 3, 0);
+    trill_update::Release {
+        version,
+        date: "2026-12-04".to_owned(),
+        notes: "Takes of audio: record an input, keep every take, and comp them by dragging.\n\
+                A song that friends hold too, with its recordings arriving by themselves.\n\
+                Trill's own wavetable synth, with a bank of sounds chosen by what they are for."
+            .to_owned(),
+        page: format!("https://github.com/ambb205/trill/releases/tag/v{version}"),
+        builds: vec![trill_update::Build {
+            // For whatever machine the picture is made on.
+            runs_on: trill_update::release::runs_on(),
+            url: format!("https://github.com/ambb205/trill/releases/download/v{version}/trill-{version}.zip"),
+            sha256: "0".repeat(64),
+            size: 41 << 20,
+            files: vec![trill_update::Piece { path: "trill.exe".to_owned(), sha256: "0".repeat(64), size: 96 << 20 }],
+        }],
+    }
 }
 
 fn timed(provider: Provider, device: &str, seconds: f64, ready: f64, megabytes: u64) -> Timed {
@@ -73,13 +106,15 @@ fn timed(provider: Provider, device: &str, seconds: f64, ready: f64, megabytes: 
 }
 
 impl SetupScene {
-    pub const ALL: [(&'static str, SetupScene); 6] = [
+    pub const ALL: [(&'static str, SetupScene); 8] = [
         ("fresh", SetupScene::Fresh),
         ("fetching", SetupScene::Fetching),
         ("machine", SetupScene::Machine),
         ("instruments", SetupScene::Instruments),
         ("instruments-fetching", SetupScene::InstrumentsFetching),
         ("instruments-search", SetupScene::InstrumentsSearch),
+        ("update", SetupScene::Update),
+        ("update-ready", SetupScene::UpdateReady),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -100,7 +135,9 @@ impl SetupScene {
                 (SetupScene::Fresh | SetupScene::Instruments, _) => (PartState::Missing, 0.0, None),
                 (SetupScene::InstrumentsFetching | SetupScene::InstrumentsSearch, _) => (PartState::Ready, 1.0, None),
                 (SetupScene::Machine, "stems-best") => (PartState::Missing, 0.0, None),
-                (SetupScene::Machine, _) => (PartState::Ready, 1.0, None),
+                (SetupScene::Machine | SetupScene::Update | SetupScene::UpdateReady, _) => {
+                    (PartState::Ready, 1.0, None)
+                }
                 (SetupScene::Fetching, "runtime" | "any-card" | "beats") => (PartState::Ready, 1.0, None),
                 (SetupScene::Fetching, "stems") => (PartState::Fetching, 0.43, None),
                 (SetupScene::Fetching, "words") => (PartState::Waiting, 0.0, None),
@@ -232,7 +269,32 @@ impl SetupScene {
             path: path.map(PathBuf::from),
             get,
         };
+        // The Trill of the made-up machine: a release, which knows of a newer one where the scene is of that.
+        let on_program = matches!(self, SetupScene::Update | SetupScene::UpdateReady);
+        let newer = on_program.then(made_up_release);
+        let made_up = Program {
+            status: Some(trill_update::Status {
+                this: trill_update::This {
+                    version: trill_update::Version::new(0, 2, 0),
+                    commit: Some("0ce65fb".to_owned()),
+                },
+                runs_on: trill_update::release::runs_on(),
+                off: None,
+                looking: false,
+                looked: None,
+                step: match (self, &newer) {
+                    (SetupScene::UpdateReady, Some(release)) => trill_update::Step::Ready(release.version),
+                    _ => trill_update::Step::Idle,
+                },
+                newer,
+                problem: None,
+            }),
+            look_at_start: true,
+            quiet_about: None,
+        };
         Staged {
+            program: made_up,
+            on_program,
             lists,
             untested: machine.is_none(),
             runs_on: match &machine {
@@ -315,6 +377,14 @@ mod tests {
                 SetupScene::InstrumentsSearch => {
                     let view = staged.instruments.as_ref().expect("the scene is of the instruments");
                     assert!(!view.search.is_empty() && sets_here > 0);
+                }
+                SetupScene::Update | SetupScene::UpdateReady => {
+                    let notice = staged.program.notice().expect("a newer Trill is there to be said");
+                    assert!(staged.on_program && notice.ready == (scene == SetupScene::UpdateReady));
+                    // What the picture shows is an announcement a program would take.
+                    let status = staged.program.status.as_ref().unwrap();
+                    status.newer.as_ref().unwrap().check().unwrap();
+                    assert!(status.build().is_some());
                 }
                 SetupScene::Fresh => assert!(here == 0 && staged.untested && staged.machine.is_none()),
                 SetupScene::Fetching => {
