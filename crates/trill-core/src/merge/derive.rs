@@ -381,8 +381,10 @@ impl Doc {
                 }
             }
         }
-        for track in &mut tracks {
-            track.sends.sort_by_key(|send| send.to);
+        // Each track's sends in the order they are held in: the ones the
+        // order names as it names them, then the others by where they go.
+        for (track, held) in tracks.iter_mut().zip(&order) {
+            track.sends.sort_by(|a, b| held.send_order(a.to, b.to));
         }
 
         // Envelopes of what is there, that have a point.

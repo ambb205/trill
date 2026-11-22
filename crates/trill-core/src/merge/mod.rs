@@ -173,6 +173,10 @@ pub enum TrackOp {
     /// Whether it is the reference being listened to. One's own.
     Listening(bool),
     Set(TrackSet),
+    /// The order its sends are held in, by the returns they go to: one
+    /// property, the whole list. A send it does not name comes after the
+    /// ones it names.
+    Sends(Vec<TrackId>),
 }
 
 /// What a change does to a clip.
@@ -273,6 +277,8 @@ pub const KIND: u8 = 4;
 /// The property that says whether a clip is a take kept beside its track,
 /// and in which lane.
 pub const LANE: u8 = 5;
+/// The property that says in which order a track's sends are held.
+pub const SENDS: u8 = 6;
 
 /// One property: what a change sets, and what the later of two changes
 /// wins.
@@ -400,6 +406,7 @@ impl Op {
             Op::Track(id, TrackOp::Place(_)) => Key::Track(*id, PLACE),
             Op::Track(id, TrackOp::Reference(_)) => Key::Track(*id, REFERENCE),
             Op::Track(id, TrackOp::Listening(_)) => Key::Track(*id, LISTENING),
+            Op::Track(id, TrackOp::Sends(_)) => Key::Track(*id, SENDS),
             Op::Track(id, TrackOp::Set(set)) => Key::Track(*id, set.prop()),
             Op::Send(track, to, _) => Key::Send(*track, *to),
             Op::Clip(id, ClipOp::Alive(_)) => Key::Clip(*id, ALIVE),

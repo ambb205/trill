@@ -264,6 +264,14 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
                 }
             }
         }
+        // The order its sends are held in, where the edit left another
+        // than the one they are held in already: all of it. (A send that
+        // is new and the last is where one that is not named lies by
+        // itself.)
+        let now: Vec<TrackId> = track.sends.iter().map(|send| send.to).collect();
+        if now != doc.in_send_order(id, now.clone()) {
+            ops.push(Op::Track(id, TrackOp::Sends(now)));
+        }
     }
     for track in before.tracks.iter().filter(|track| !tracks_now.contains(&track.id)) {
         ops.push(Thing::Track(track.id).set_alive(false));

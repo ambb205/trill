@@ -4,7 +4,7 @@
 use super::props::{AudioSet, ClipSet, DeviceSet, LaneSet, MarkerSet, MidiSet, NoteSet, PointSet, SongSet, TrackSet};
 use super::{
     ALIVE, Beside, Change, ClipOp, DeviceOp, FIRST_AUDIO, FIRST_MIDI, Floors, Home, KIND, Key, LANE, LISTENING,
-    MarkerOp, NoteOp, Op, PLACE, Place, PointOp, REFERENCE, SongId, Stamp, Thing, TrackOp,
+    MarkerOp, NoteOp, Op, PLACE, Place, PointOp, REFERENCE, SENDS, SongId, Stamp, Thing, TrackOp,
 };
 use crate::channel::Channel;
 use crate::controllers::{ControllerCurve, ControllerKind};
@@ -42,6 +42,8 @@ pub(super) struct TrackHeld {
     pub place: Place,
     /// What it sends, by the return.
     pub sends: BTreeMap<TrackId, f32>,
+    /// The order its sends are held in ([`TrackOp::Sends`]).
+    pub sends_order: Vec<TrackId>,
 }
 
 /// A clip without its notes and curves, and those beside it.
@@ -237,13 +239,25 @@ impl ClipHeld {
 impl TrackHeld {
     fn of(track: &Track, place: Place, made: Stamp) -> Self {
         let sends = track.sends.iter().map(|send| (send.to, send.level_db)).collect();
-        Self { held: Held::new(track_shell(track), made), place, sends }
+        let sends_order = track.sends.iter().map(|send| send.to).collect();
+        Self { held: Held::new(track_shell(track), made), place, sends, sends_order }
     }
 
-    /// The track as a change that makes it says it: with what it sends.
+    /// The track as a change that makes it says it: with what it sends,
+    /// in the order its sends are held in.
     fn whole(&self) -> Track {
-        let sends = self.sends.iter().map(|(to, level_db)| crate::Send { to: *to, level_db: *level_db }).collect();
+        let mut sends: Vec<crate::Send> =
+            self.sends.iter().map(|(to, level_db)| crate::Send { to: *to, level_db: *level_db }).collect();
+        sends.sort_by(|a, b| self.send_order(a.to, b.to));
         Track { sends, ..self.held.it.clone() }
+    }
+
+    /// The order two of its sends are held in: the ones the order names
+    /// as it names them, then the others by the return they go to.
+    pub(super) fn send_order(&self, a: TrackId, b: TrackId) -> std::cmp::Ordering {
+        let place = |to: TrackId| self.sends_order.iter().position(|named| *named == to);
+        let (at_a, at_b) = (place(a), place(b));
+        at_a.is_none().cmp(&at_b.is_none()).then(at_a.cmp(&at_b)).then(a.cmp(&b))
     }
 }
 
@@ -402,6 +416,16 @@ impl Doc {
             let (at_a, at_b) = (named.get(a).copied(), named.get(b).copied());
             at_a.is_none().cmp(&at_b.is_none()).then(at_a.cmp(&at_b)).then_with(|| a.cmp(b))
         }
+    }
+
+    /// A track's sends as they are held in order: `sends`, sorted as the
+    /// song worked out from the properties has them.
+    pub fn in_send_order(&self, track: TrackId, mut sends: Vec<TrackId>) -> Vec<TrackId> {
+        match self.tracks.get(&track) {
+            Some(held) => sends.sort_by(|a, b| held.send_order(*a, *b)),
+            None => sends.sort(),
+        }
+        sends
     }
 
     /// The lane a clip is kept in as a take, for one that is held as one.
@@ -563,6 +587,7 @@ impl Doc {
                             TrackOp::Reference(it.reference.as_ref().map(|found| Beside { study: found.study.clone() }))
                         }
                         LISTENING => TrackOp::Listening(it.reference.as_ref().is_some_and(|found| found.listening)),
+                        SENDS => TrackOp::Sends(track.sends_order.clone()),
                         prop => TrackOp::Set(TrackSet::read(it, prop)?),
                     },
                 )
@@ -794,6 +819,7 @@ impl Doc {
                         }
                     }
                     TrackOp::Set(set) => set.put(it),
+                    TrackOp::Sends(order) => track.sends_order = order,
                     TrackOp::Whole(..) => {}
                 }
             }
@@ -906,6 +932,7 @@ impl Doc {
                             |to: TrackId| track.sends.iter().find(|send| send.to == to).map(|send| send.level_db);
                         let named = track.sends.iter().map(|send| send.to).chain(held);
                         sets.extend(named.map(|to| Op::Send(*id, to, level(to))));
+                        sets.push(Op::Track(*id, TrackOp::Sends(track.sends.iter().map(|send| send.to).collect())));
                         let mut any = self.remake(stamp, made, sets);
                         let rank = super::props::kind_rank;
                         let greater = rank(track.kind) > rank(self.tracks[id].held.it.kind);
@@ -1172,6 +1199,12 @@ impl Doc {
             });
             if !same {
                 hidden.push(Op::Track(*id, TrackOp::Whole(Box::new(track.whole()), track.place)));
+            }
+            // The order its sends are held in, where it names more or
+            // less than the song as written shows, or than the track as
+            // it is made again from here would.
+            if !same || base.tracks.get(id).map(|base| &base.sends_order) != Some(&track.sends_order) {
+                hidden.push(Op::Track(*id, TrackOp::Sends(track.sends_order.clone())));
             }
             removed(track.held.alive, Thing::Track(*id), &mut hidden);
         }

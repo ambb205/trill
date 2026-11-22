@@ -6,7 +6,15 @@
 //! ```sh
 //! cargo run -p trill-runtime --example opens -- long      # makes target/opens/long/long.trill
 //! cargo run -p trill-runtime --example together -- target/opens/long/long.trill
+//! cargo run -p trill-runtime --example together -- target/opens/long/long.trill --through-here
+//! cargo run -p trill-runtime --example together -- target/opens/long/long.trill --through ADDRESS KEY
 //! ```
+//!
+//! With `--through-here` the two meet through a meeting point that is
+//! started in this process, on the loopback; with `--through` through one
+//! that runs somewhere (its address and a key its keeper gave), which is
+//! how the Linux program is measured under WSL. Without either they are
+//! connected directly.
 //!
 //! Both programs are runtimes in this one process, without audio devices
 //! and without plugins, connected over the loopback as two programs are:
@@ -21,7 +29,8 @@ use trill_core::Note;
 use trill_core::merge::lot::Lot;
 use trill_dsp::BuiltinFactory;
 use trill_engine::{AudioBackend, Session};
-use trill_runtime::{Reach, Runtime, RuntimeOptions, Storage};
+use trill_runtime::{Meeting, Reach, Runtime, RuntimeOptions, Storage};
+use trill_together::meet;
 
 fn start(folder: &Path, name: &str) -> Runtime {
     let storage = Storage::At { settings: folder.join(name).join("settings.json"), library_index: None };
@@ -54,9 +63,27 @@ fn middle(mut times: Vec<Duration>) -> (f64, f64, f64) {
 }
 
 fn main() {
-    let Some(file) = std::env::args().nth(1) else {
-        eprintln!("usage: together SONG.trill");
-        std::process::exit(2);
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let usage = || -> ! {
+        eprintln!("usage: together SONG.trill [--through-here | --through ADDRESS KEY]");
+        std::process::exit(2)
+    };
+    let Some(file) = arguments.first().cloned() else { usage() };
+    // The meeting point the two meet through, where they do: its address
+    // and a key, and the meeting point itself where it is started here.
+    let through: Option<(String, String, Option<meet::Server>)> = match &arguments[1..] {
+        [] => None,
+        [here] if here == "--through-here" => {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port on the loopback");
+            let address = listener.local_addr().unwrap().to_string();
+            let key = meet::Key::new().expect("a key by lot");
+            let keys = meet::Keys::of(vec![meet::keys::Given::of(&key, "Ada")]);
+            let log: meet::Log = Arc::new(|line: &str| println!("    [the meeting point] {line}"));
+            let server = meet::Server::start(vec![listener], keys, meet::Limits::default(), log).expect("it starts");
+            Some((address, key.to_string(), Some(server)))
+        }
+        [through, address, key] if through == "--through" => Some((address.clone(), key.clone(), None)),
+        _ => usage(),
     };
     let folder = std::env::temp_dir().join(format!("trill-together-{}", std::process::id()));
     let (ada, ben) = (start(&folder, "Ada"), start(&folder, "Ben"));
@@ -70,7 +97,22 @@ fn main() {
     println!("{file}: {tracks} tracks, {notes} notes, {:.1} MB as a file", bytes as f64 / 1e6);
 
     // ---- joining ---------------------------------------------------------
-    let invitation = ada.share(Reach::ThisMachine, 0).expect("sharing starts");
+    let invitation = match &through {
+        None => ada.share(Reach::ThisMachine, 0).expect("sharing starts"),
+        Some((address, key, _)) => {
+            ada.set_meeting_point(address, Some(key)).expect("what a keeper handed over");
+            let began = Instant::now();
+            let invitation = ada.share_through_meeting_point().expect("sharing starts");
+            until("the meeting is open at the meeting point", || {
+                matches!(ada.together().meeting, Some((_, Meeting::Held)))
+            });
+            println!(
+                "through the meeting point at {address}: the meeting was open there {:.0} ms after sharing",
+                began.elapsed().as_secs_f64() * 1e3
+            );
+            invitation
+        }
+    };
     let began = Instant::now();
     ben.join(&invitation, true).expect("the invitation is read");
     until("the one who joined has the song", || ben.session.lock().project().tracks.len() == tracks);
@@ -166,6 +208,10 @@ fn main() {
     println!("nothing changed for 4 s: {:.0} bytes a second (who is here)", (after.0 - before.0) as f64 / 4.0);
 
     drop((ada, ben));
+    // (Where the meeting point is this process's, its last lines say how
+    // much it passed.)
+    std::thread::sleep(Duration::from_millis(300));
+    drop(through);
 
     // ---- what taking a change in costs the one who hears it ----------------
     // Two sessions without a wire between them: what one says is handed to

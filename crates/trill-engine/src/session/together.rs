@@ -267,6 +267,7 @@ fn what(doc: &merge::Doc, key: &Key, op: &Op) -> String {
                 TrackOp::Set(TrackSet::Profile(_)) => format!("what the notes of {track} mean"),
                 TrackOp::Place(_) => format!("where {track} is among the tracks"),
                 TrackOp::Reference(_) => format!("whether {track} is a reference"),
+                TrackOp::Sends(_) => format!("the order of what {track} sends"),
                 _ => track,
             }
         }
