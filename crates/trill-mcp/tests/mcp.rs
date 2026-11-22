@@ -2917,6 +2917,14 @@ async fn the_assistants_door_neither_shares_a_song_nor_sets_or_learns_a_meeting_
         assert!(refusal.contains("it is the user's to do, in the window"), "{arguments}: {refusal}");
     }
     assert!(!fixture.runtime.together().is_on(), "nothing is shared and nothing was asked for");
+    // Which of the user's files go to other people, and how much arrives
+    // here, is the user's to say too. What would go can be read.
+    for action in ["let_files_go", "let_files_arrive"] {
+        let refusal = call(client, "shared_song", json!({ "action": action })).await.unwrap_err();
+        assert!(refusal.contains("is the user's to say, in the window"), "{action}: {refusal}");
+    }
+    let goes = ok(client, "shared_song", json!({ "action": "what_goes" })).await;
+    assert_eq!(goes["files"], 0, "{goes}");
 
     // Who is here can be read, and says nothing of the meeting point's
     // key; neither does anything else a tool says at this door.

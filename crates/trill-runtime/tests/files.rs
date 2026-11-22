@@ -14,7 +14,7 @@
 //!
 //! The strangers here hold the invitation and speak the protocol by hand.
 //!
-//! Connections made by a run of this file: 27.
+//! Connections made by a run of this file: 28.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -848,6 +848,41 @@ fn what_arrives_is_a_file_of_the_song_only_if_it_is_what_was_asked_for() {
     assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 0, "nothing of it was asked for");
     let kept = files_in(&at("Gus"));
     assert!(kept.iter().all(|name| !name.contains(&vast.sha256)), "no name was made for it: {kept:?}");
+}
+
+/// 1 connection.
+#[test]
+fn a_file_is_asked_for_in_strides_and_not_a_piece_at_a_time() {
+    // (One question for every piece that arrived is thousands a second
+    // for a long recording: more, faster, than a program that works in a
+    // song says, and the connection was let go of for it once.)
+    let folder = tempfile::tempdir().unwrap();
+    let (eve, track, verse, _) = with_a_recording(folder.path(), "Eve");
+    let long = tone(folder.path().join("Eve's music").join("a longer take.wav"), 300.0, 12.0);
+    let second = clip_by_hand(&eve, track, "Longer", 8.0, &long);
+    let _ = eve.share(Reach::ThisMachine, 0).unwrap();
+    eventually("Eve's program has said what the files are", || {
+        file_of(&eve, verse).1.is_some() && file_of(&eve, second).1.is_some()
+    });
+    let song = eve.session.lock().whole_song();
+    let real = std::fs::read(&long).unwrap();
+    let file = content(&long);
+    let pieces = real.len().div_ceil(MAX_PIECE);
+    assert!(pieces >= 40, "a file of many pieces: {pieces}");
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = asked.clone();
+    let invitation = shared_by_hand(song, file, move |at, len| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (from, to) = (at as usize, (at + len).min(real.len() as u64) as usize);
+        let pieces = real[from..to].chunks(MAX_PIECE).enumerate();
+        pieces.map(|(n, piece)| (at + (n * MAX_PIECE) as u64, piece.to_vec())).collect()
+    });
+    let ben = start(folder.path(), "Ben");
+    ben.join(&invitation, false).unwrap();
+    eventually("the long take is at Ben's", || arrived(&ben, second, &long));
+    let asked = asked.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(asked >= 2 && asked <= pieces / 2, "{asked} questions for {pieces} pieces");
+    assert!(!said(&ben).contains("no longer") && !said(&ben).contains("lost"), "{}", said(&ben));
 }
 
 /// 2 connections.

@@ -43,7 +43,7 @@ use std::time::{Duration, Instant, SystemTime};
 use trill_core::files::{Content, FileIs, FilePlace};
 use trill_engine::FileHere;
 use trill_media::MediaCache;
-use trill_together::files::{Begun, Bounds, Offered, Received, Shelved, Took, Waits, content_of};
+use trill_together::files::{BeforeNamed, Begun, Bounds, Offered, Received, Shelved, Took, Waits, content_of};
 use trill_together::{LinkId, MAX_PIECE, MAX_WANT, Message, Pieces};
 
 /// The folder files from other programs are kept in, in the program's own
@@ -324,19 +324,24 @@ enum Job {
 
 /// What it says back.
 enum Done {
-    /// How much of a file that was begun is here, that it is here whole,
-    /// or why it waits.
+    /// How much of a file that was begun is here, that it is here whole
+    /// (with what was read of it to play it), or why it waits.
     Begun {
         file: Content,
         begun: Result<Begun, String>,
+        read: Option<Played>,
     },
     Took {
         file: Content,
         took: Took,
+        read: Option<Played>,
     },
     /// A program asked for more than it took.
     TooMuch(LinkId),
 }
+
+/// A file as it was read to be played: held until the song has it.
+pub(crate) type Played = Arc<trill_core::audio::AudioBuffer>;
 
 /// A stretch of a file that someone asked for and that is not read yet.
 struct Owed {
@@ -349,7 +354,29 @@ struct Owed {
 pub(crate) type Room = fn(&Path) -> Option<u64>;
 
 /// The thread that reads files for whoever asked and writes what arrives.
-fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds, room: Room) {
+fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds, room: Room, media: Arc<MediaCache>) {
+    // A file that has arrived is read as the song will play it here, on
+    // this thread, *before it has its name*: the song names it by that
+    // name, and whatever makes the song anew meanwhile (an edit that
+    // arrives) would otherwise find the file and wait for it to be read,
+    // with the song held. What was read is handed on with the word that
+    // the file is here, and held until the song has taken it up: the
+    // cache keeps what someone holds. (Reading a long recording takes
+    // seconds, and an edit never waits for a file.)
+    let just_read: Arc<parking_lot::Mutex<Option<Played>>> = Arc::default();
+    let before_named = |media: Arc<MediaCache>, read: Arc<parking_lot::Mutex<Option<Played>>>| -> BeforeNamed {
+        Box::new(move |part: &Path, home: &Path| {
+            media.forget(home);
+            *read.lock() = media.read_as(part, home, media.loader_rate()).ok();
+        })
+    };
+    // (One that was whole when it was asked about has its name already.)
+    let read_to_play = |path: &Path| -> Option<Played> {
+        match media.loader_rate() {
+            Some(rate) => media.audio_at_rate(path, rate).ok(),
+            None => media.audio(path).ok(),
+        }
+    };
     let mut offered = Offered::default();
     let mut received: Option<Received> = None;
     let mut any_amount = false;
@@ -378,7 +405,9 @@ fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds,
             Ok(Job::Gone(link)) => drop(owed.remove(&link)),
             Ok(Job::Into(dir)) => {
                 if received.as_ref().is_none_or(|received| received.dir() != dir) {
-                    let mut into = Received::new(dir).bounded(bounds.clone(), Some(Box::new(room)));
+                    let mut into = Received::new(dir)
+                        .bounded(bounds.clone(), Some(Box::new(room)))
+                        .before_named(before_named(media.clone(), just_read.clone()));
                     if any_amount {
                         into.allow_any_amount();
                     }
@@ -390,11 +419,16 @@ fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds,
                     Some(received) => received.begin(&is).map_err(|error| error.to_string()),
                     None => Err("there is no shared song to keep it for".to_owned()),
                 };
-                let _ = done.send(Done::Begun { file: is.content(), begun });
+                let read = match &begun {
+                    Ok(Begun::Here(path)) => read_to_play(path),
+                    _ => None,
+                };
+                let _ = done.send(Done::Begun { file: is.content(), begun, read });
             }
             Ok(Job::Piece { file, at, bytes }) => {
                 let took = received.as_mut().map_or(Took::NotAsked, |received| received.take(&file, at, &bytes));
-                let _ = done.send(Done::Took { file, took });
+                let read = just_read.lock().take().filter(|_| matches!(took, Took::Whole(_)));
+                let _ = done.send(Done::Took { file, took, read });
             }
             Ok(Job::LetGo(file)) => {
                 if let Some(received) = received.as_mut() {
@@ -522,8 +556,9 @@ pub(crate) enum Tended {
     SayFile(FilePlace, String, FileIs),
     /// Where this machine was found to have which bytes.
     Read(HashMap<Content, String>),
-    /// A file arrived: the song plays it from here on.
-    Here(PathBuf),
+    /// A file arrived: the song plays it from here on. With what was
+    /// read of it, to be held until the song has taken it up.
+    Here(PathBuf, Option<Played>),
     /// A program is to be let go of, and why.
     LetGo(LinkId, &'static str),
 }
@@ -583,13 +618,16 @@ impl Files {
     pub fn new(pieces: Pieces, media: Arc<MediaCache>, bounds: Bounds, room: Room) -> std::io::Result<Self> {
         let (looks, to_look) = channel();
         let (say_looked, looked) = channel();
-        std::thread::Builder::new().name("trill-files-read".into()).spawn(move || read(to_look, say_looked, media))?;
+        let reading = media.clone();
+        std::thread::Builder::new()
+            .name("trill-files-read".into())
+            .spawn(move || read(to_look, say_looked, reading))?;
         let (jobs, to_do) = channel();
         let (say_done, done) = channel();
-        let saying = pieces.clone();
+        let (saying, playing) = (pieces.clone(), media.clone());
         std::thread::Builder::new()
             .name("trill-files-pass".into())
-            .spawn(move || pass(to_do, say_done, saying, bounds, room))?;
+            .spawn(move || pass(to_do, say_done, saying, bounds, room, playing))?;
         Ok(Self {
             looks,
             looked,
@@ -849,8 +887,8 @@ impl Files {
         }
         while let Ok(done) = self.done.try_recv() {
             match done {
-                Done::Begun { file, begun } => self.begun(file, begun, &mut out),
-                Done::Took { file, took } => self.took(file, took, name, &mut out),
+                Done::Begun { file, begun, read } => self.begun(file, begun, read, &mut out),
+                Done::Took { file, took, read } => self.took(file, took, read, name, &mut out),
                 Done::TooMuch(link) => {
                     out.push(Tended::LetGo(link, "it asked for more of the song's files than it took"));
                 }
@@ -878,14 +916,14 @@ impl Files {
     }
 
     /// How much of a file that was begun is here.
-    fn begun(&mut self, file: Content, begun: Result<Begun, String>, out: &mut Vec<Tended>) {
+    fn begun(&mut self, file: Content, begun: Result<Begun, String>, read: Option<Played>, out: &mut Vec<Tended>) {
         let Some(incoming) = self.incoming.get_mut(&file) else { return };
         match begun {
             Ok(Begun::Here(path)) => {
                 self.incoming.remove(&file);
                 self.have.insert(file.clone(), Shelved { path: path.clone(), written: None });
                 let _ = self.jobs.send(Job::Offer(Offered::new(self.have.clone())));
-                out.push(Tended::Here(path));
+                out.push(Tended::Here(path, read));
             }
             Ok(Begun::From(here)) => {
                 (incoming.here, incoming.expect, incoming.asked_to) = (here, here, here);
@@ -923,7 +961,14 @@ impl Files {
     }
 
     /// What came of bytes that arrived.
-    fn took(&mut self, file: Content, took: Took, name: &dyn Fn(LinkId) -> String, out: &mut Vec<Tended>) {
+    fn took(
+        &mut self,
+        file: Content,
+        took: Took,
+        read: Option<Played>,
+        name: &dyn Fn(LinkId) -> String,
+        out: &mut Vec<Tended>,
+    ) {
         let Some(incoming) = self.incoming.get_mut(&file) else { return };
         match took {
             Took::More(here) => incoming.here = here,
@@ -931,7 +976,7 @@ impl Files {
                 self.incoming.remove(&file);
                 self.have.insert(file.clone(), Shelved { path: path.clone(), written: None });
                 let _ = self.jobs.send(Job::Offer(Offered::new(self.have.clone())));
-                out.push(Tended::Here(path));
+                out.push(Tended::Here(path, read));
             }
             Took::Other => {
                 let (named, from) = (incoming.is.name.clone(), incoming.source);
@@ -1006,8 +1051,20 @@ impl Files {
                 Stage::Asked | Stage::Waits(..) => {}
                 Stage::Arriving => {
                     let Some(source) = incoming.source else { continue };
-                    while incoming.asked_to < file.bytes && incoming.asked_to - incoming.expect < incoming.window {
-                        let room = incoming.window - (incoming.asked_to - incoming.expect);
+                    // Ahead of what is *written* here, not of what has
+                    // arrived: where the disk is slower than the way,
+                    // nothing piles up in memory waiting to be written.
+                    let ahead = |incoming: &Incoming| incoming.asked_to.saturating_sub(incoming.here);
+                    // And in strides: asked again once half of what was
+                    // asked for ahead is here. A file is then a few
+                    // questions a second, and not one for every piece
+                    // that arrived (which is more, faster, than a program
+                    // that works in a song says, and is let go of for it).
+                    if ahead(incoming) > incoming.window / 2 {
+                        continue;
+                    }
+                    while incoming.asked_to < file.bytes && ahead(incoming) < incoming.window {
+                        let room = incoming.window - ahead(incoming);
                         let len = room.min(MAX_WANT).min(file.bytes - incoming.asked_to);
                         let want = Message::Want { file: file.clone(), at: incoming.asked_to, len };
                         out.push(Tended::Say(source, want));

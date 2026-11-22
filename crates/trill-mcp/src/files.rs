@@ -438,13 +438,22 @@ impl TrillServer {
             let mut paths: Vec<String> = relinks.iter().map(|relink| relink.path.clone()).collect();
             paths.sort_unstable();
             paths.dedup();
+            let (shared, pointed) = (self.session.clone(), relinks.clone());
             let reading = tokio::task::spawn_blocking(move || {
                 for path in &paths {
                     // What cannot be read is said by the session, which refuses it.
                     let _ = media.audio(Path::new(path));
                 }
+                // In a song others hold too, a file that is pointed at
+                // is taken where its bytes are what the song says.
+                trill_runtime::the_songs_files(&shared, &pointed)
             });
-            let _ = reading.await;
+            if let Ok(Err(not_the_file)) = reading.await {
+                return Err(not_the_file);
+            }
+            // (A client the user set up is the user's hand: a file it
+            // points the song at may go to whoever else has the song.)
+            let _hand = (!self.is_guarded()).then(trill_engine::hand::by_hand);
             let mut session = self.session.lock();
             match session.relink(&relinks) {
                 Ok(changed) => changed,

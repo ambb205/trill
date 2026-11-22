@@ -769,7 +769,7 @@ impl Driver {
         synced.sort_unstable();
         let names: HashMap<LinkId, String> = self.peers.keys().map(|link| (*link, self.name_of(*link))).collect();
         let name = |link: LinkId| names.get(&link).cloned().unwrap_or_else(|| "Someone".to_owned());
-        let mut here = Vec::new();
+        let (mut here, mut kept) = (Vec::new(), Vec::new());
         for tended in self.files.tend(&synced, &name) {
             match tended {
                 Tended::Say(link, message) => self.net.say(link, &message),
@@ -778,13 +778,19 @@ impl Driver {
                     self.session.lock().say_file(&place, &path, is);
                 }
                 Tended::Read(read) => self.session.lock().files_read(read),
-                Tended::Here(path) => here.push(path),
+                Tended::Here(path, read) => {
+                    here.push(path);
+                    kept.extend(read);
+                }
                 Tended::LetGo(link, why) => self.let_go(link, why),
             }
         }
         if !here.is_empty() {
-            self.session.lock().files_are_here(&here);
+            // (Each was read as it arrived, by the thread that took it in:
+            // the song is not held while a long recording is read.)
+            self.session.lock().files_were_read(&here);
         }
+        drop(kept);
     }
 
     fn say_to_synced(&mut self, message: &Message, except: Option<LinkId>) {

@@ -79,6 +79,10 @@ pub struct FileHere {
     pub may_go: bool,
 }
 
+/// The folder, in a song's folder of files from other programs, of the
+/// places made for devices' files of which nobody said what they are.
+const OF_DEVICES: &str = "of devices";
+
 /// The folder files from other programs are named in where nobody has
 /// said which: nothing is ever written there by the session.
 fn nowhere_yet() -> PathBuf {
@@ -141,7 +145,7 @@ impl Session {
     /// arrived, of which only the kind of file is read.
     fn slot_home(folder: &Path, device: DeviceId, slot: &str, said: &str) -> String {
         let name = format!("{}.{}", slot_name(slot), kind_of(said));
-        folder.join("of devices").join(device.0.to_string()).join(name).to_string_lossy().into_owned()
+        folder.join(OF_DEVICES).join(device.0.to_string()).join(name).to_string_lossy().into_owned()
     }
 
     // ---- what leaves -------------------------------------------------------
@@ -434,10 +438,22 @@ impl Session {
 
     /// Files of the song arrived at `paths`: they are played from here
     /// on. No edit, and whether the song has unsaved changes is as it was.
+    ///
+    /// What was known of the files is forgotten here and they are read
+    /// anew, with the session held: whoever can read them first, away
+    /// from the session (through [`Session::media`]), calls
+    /// [`Session::files_were_read`] instead.
     pub fn files_are_here(&mut self, paths: &[PathBuf]) {
         for path in paths {
             self.audio.media().forget(path);
         }
+        self.files_were_read(paths);
+    }
+
+    /// [`Session::files_are_here`], for files the caller has read through
+    /// the session's media cache since they arrived: the song takes them
+    /// up without reading them again.
+    pub fn files_were_read(&mut self, paths: &[PathBuf]) {
         // A device that plays one of them is made anew: it looked for its
         // file when it was made, and found none.
         let arrived = |path: &String| paths.iter().any(|here| here == Path::new(path));
@@ -537,8 +553,14 @@ impl Session {
             let place = match &problem {
                 crate::Problem::AudioFile { clip, path, .. } if within(path) => Some(FilePlace::Clip(*clip)),
                 crate::Problem::Sample { device, slot: Some(slot), .. } => {
-                    let named = self.project.device(*device).map(named_by).unwrap_or_default();
-                    let awaited = named.iter().any(|(named, path)| named == slot && within(path));
+                    // Only a file of which the song says what it is can
+                    // arrive: one that nobody said anything of (it stayed
+                    // with its maker, or is no audio) is a file that is
+                    // not here, said as that.
+                    let held = self.project.device(*device).ok();
+                    let said = held.is_some_and(|device| device.files.contains_key(slot));
+                    let named = held.map(named_by).unwrap_or_default();
+                    let awaited = said && named.iter().any(|(named, path)| named == slot && within(path));
                     awaited.then(|| FilePlace::Sample { device: *device, slot: slot.clone() })
                 }
                 _ => None,
@@ -563,7 +585,11 @@ impl Session {
     /// Whether `path` is where a file of the open song lies once it has
     /// arrived from another program.
     pub fn is_awaited(&self, path: &str) -> bool {
-        self.received_in().is_some_and(|folder| Path::new(path).starts_with(folder))
+        // (Not a place that was made for a device's file of which nobody
+        // said what it is: nothing arrives there.)
+        self.received_in().is_some_and(|folder| {
+            Path::new(path).starts_with(&folder) && !Path::new(path).starts_with(folder.join(OF_DEVICES))
+        })
     }
 
     /// The name the open song says the file at `path` by, where it says:

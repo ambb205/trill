@@ -520,6 +520,39 @@ fn difference(was: &KnownFile, is: &KnownFile) -> String {
     }
 }
 
+/// Holds the files `relinks` points places of the open song at to what
+/// the song says those places' files are, where it says: each is read
+/// (all of it, with the session free) and compared. An error is the
+/// sentence that says which is not the song's file. See
+/// [`Runtime::relink`]; for a front end that relinks on a thread of its
+/// own choosing.
+pub fn the_songs_files(session: &crate::SharedSession, relinks: &[Relink]) -> Result<(), String> {
+    // What the song says each place's file is.
+    let said: BTreeMap<trill_core::FilePlace, trill_core::FileIs> =
+        session.lock().files_here().into_iter().filter_map(|file| Some((file.place, file.is?))).collect();
+    let mut read: BTreeMap<&str, Option<trill_core::Content>> = BTreeMap::new();
+    for relink in relinks {
+        let Some(is) = said.get(&relink.place) else { continue };
+        let found = read
+            .entry(relink.path.as_str())
+            .or_insert_with(|| trill_together::files::content_of(Path::new(&relink.path), |_| true).ok().flatten());
+        // (One that cannot be read at all is the session's to refuse.)
+        if let Some(found) = found
+            && *found != is.content()
+        {
+            return Err(format!(
+                "'{}' is not the file the song names as '{}': its bytes are others ({} against the song's {}). \
+                 Nothing was relinked. The song's own file arrives from whoever has it",
+                relink.path,
+                is.name,
+                found,
+                is.content()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The files the song open in `session` names that are not there:
 /// [`Runtime::files_missing`], for a caller that holds the session.
 pub fn files_missing_in(session: &Session) -> Missing {
@@ -567,7 +600,7 @@ impl Runtime {
             let session = self.session.lock();
             let tracks: Vec<(TrackId, String)> =
                 session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
-            (session.files(), tracks, session.known_files().clone(), session.path().map(Path::to_path_buf))
+            (not_awaited(&session), tracks, session.known_files().clone(), session.path().map(Path::to_path_buf))
         };
         let mut missing = whole(uses, tracks, &table);
         let index = self.library.index();
@@ -755,31 +788,7 @@ impl Runtime {
             // What cannot be read is said by the session, which refuses it.
             let _ = self.media.audio(Path::new(path));
         }
-        // What the song says each place's file is.
-        let said: BTreeMap<trill_core::FilePlace, trill_core::FileIs> = {
-            let session = self.session.lock();
-            session.files_here().into_iter().filter_map(|file| Some((file.place, file.is?))).collect()
-        };
-        let mut read: BTreeMap<&str, Option<trill_core::Content>> = BTreeMap::new();
-        for relink in relinks {
-            let Some(is) = said.get(&relink.place) else { continue };
-            let found = read
-                .entry(relink.path.as_str())
-                .or_insert_with(|| trill_together::files::content_of(Path::new(&relink.path), |_| true).ok().flatten());
-            // (One that cannot be read at all is the session's to refuse.)
-            if let Some(found) = found
-                && *found != is.content()
-            {
-                return Err(SessionError::Io(format!(
-                    "'{}' is not the file the song names as '{}': its bytes are others ({} against the song's {}). \
-                     Nothing was relinked. The song's own file arrives from whoever has it",
-                    relink.path,
-                    is.name,
-                    found,
-                    is.content()
-                )));
-            }
-        }
+        the_songs_files(&self.session, relinks).map_err(SessionError::Io)?;
         self.session.lock().relink(relinks)
     }
 

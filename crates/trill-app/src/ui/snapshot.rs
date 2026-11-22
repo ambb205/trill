@@ -48,6 +48,9 @@ pub struct Snapshot {
     /// Why each audio clip that is not playing as it should is not: its
     /// file is missing or unreadable, or could not be stretched.
     pub clip_problems: HashMap<ClipId, String>,
+    /// The audio clips whose file is on its way from someone else who has
+    /// the song: silent until it is here, and no problem.
+    pub arriving: std::collections::HashSet<ClipId>,
     /// The files of the sample-playing devices `params` covers, with what
     /// is wrong with each.
     pub samples: HashMap<DeviceId, Vec<SampleFile>>,
@@ -207,6 +210,12 @@ impl Snapshot {
             path: session.path().map(PathBuf::from),
             problems: session.problems().iter().map(ToString::to_string).collect(),
             clip_problems,
+            arriving: (session.files_arriving().iter())
+                .filter_map(|place| match place {
+                    trill_core::FilePlace::Clip(clip) => Some(*clip),
+                    trill_core::FilePlace::Sample { .. } => None,
+                })
+                .collect(),
             samples,
             instruments,
             params_tracks: shown.iter().map(|track| track.id).collect(),
@@ -283,6 +292,7 @@ impl Snapshot {
             path: None,
             problems: Vec::new(),
             clip_problems: HashMap::new(),
+            arriving: Default::default(),
             samples: HashMap::new(),
             instruments: HashMap::new(),
             params_tracks,

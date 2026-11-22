@@ -209,6 +209,10 @@ struct Arriving {
 pub struct Received {
     dir: PathBuf,
     arriving: HashMap<Content, Arriving>,
+    /// Called with a file that is whole and is what was asked for, under
+    /// the name it has as a part and the name it is about to be given:
+    /// for whoever reads it before anyone can find it under its name.
+    before_named: Option<BeforeNamed>,
     bounds: Bounds,
     /// How much room the disk a folder is on has free, where the machine
     /// can be asked.
@@ -219,12 +223,23 @@ pub struct Received {
 /// where the machine cannot be asked.
 pub type Room = Box<dyn Fn(&Path) -> Option<u64> + Send>;
 
+/// What is done with a file that has arrived whole, before it is given
+/// its name: it is handed the name the file has now and the one it gets.
+pub type BeforeNamed = Box<dyn FnMut(&Path, &Path) + Send>;
+
 impl Received {
     /// The files that came from other programs are kept in `dir`: a
     /// folder of this program's own. Nothing is made until a file is
     /// begun.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), arriving: HashMap::new(), bounds: Bounds::default(), room: None }
+        Self { dir: dir.into(), arriving: HashMap::new(), before_named: None, bounds: Bounds::default(), room: None }
+    }
+
+    /// Has `before` called with every file that arrived whole and is what
+    /// was asked for, before it is given its name.
+    pub fn before_named(mut self, before: BeforeNamed) -> Self {
+        self.before_named = Some(before);
+        self
     }
 
     /// With what taking in may cost, and how the room on a disk is asked.
@@ -353,7 +368,7 @@ impl Received {
         let mut arriving = Arriving { home, part, file, have, hash };
         // (A file of no bytes is whole as it is begun.)
         if have == is.bytes {
-            return match finish(&mut arriving, &content) {
+            return match finish(&mut arriving, &content, &mut self.before_named) {
                 Took::Whole(home) => Ok(Begun::Here(home)),
                 Took::Failed(why) => Err(io::Error::other(why)),
                 _ if is.bytes == 0 => Err(io::Error::new(io::ErrorKind::InvalidInput, "no file of no bytes is that")),
@@ -386,7 +401,7 @@ impl Received {
             return Took::More(arriving.have);
         }
         let mut arriving = self.arriving.remove(file).expect("it was found above");
-        finish(&mut arriving, file)
+        finish(&mut arriving, file, &mut self.before_named)
     }
 
     /// Lets go of a file that is on its way. What arrived of it stays as
@@ -404,7 +419,7 @@ pub fn home_in(dir: &Path, is: &FileIs) -> PathBuf {
 
 /// All of a file has arrived: it is what was asked for, and is given its
 /// name, or it is not, and is thrown away.
-fn finish(arriving: &mut Arriving, file: &Content) -> Took {
+fn finish(arriving: &mut Arriving, file: &Content, before_named: &mut Option<BeforeNamed>) -> Took {
     let hash: [u8; 32] = std::mem::take(&mut arriving.hash).finalize().into();
     if Some(hash) != file.hash() {
         let _ = arriving.file.set_len(0);
@@ -413,6 +428,9 @@ fn finish(arriving: &mut Arriving, file: &Content) -> Took {
     }
     if let Err(error) = arriving.file.sync_all() {
         return Took::Failed(error.to_string());
+    }
+    if let Some(before) = before_named {
+        before(&arriving.part, &arriving.home);
     }
     // (What lies under its name already is not known to be it: a file
     // that was cut short there, say. This one is.)

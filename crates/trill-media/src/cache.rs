@@ -216,6 +216,50 @@ impl MediaCache {
         self.state.lock().loader_rate.map(f64::from)
     }
 
+    /// Reads the audio file at `read` and keeps what was read as the
+    /// audio of `known_as`: a name the file is about to be given by a
+    /// rename, which leaves what a file is known by here (its size and
+    /// when it was written) as it is. Whoever asks for `known_as` once
+    /// the file has that name finds it read, and never waits for a
+    /// reading that began when the name appeared.
+    ///
+    /// With `sample_rate`, the audio converted to that rate is kept too,
+    /// and is what is returned: what [`MediaCache::audio_at_rate`] then
+    /// answers. Hold what is returned until whoever is to use the file
+    /// has it: the cache keeps audio above its budget only while someone
+    /// does.
+    pub fn read_as(
+        &self,
+        read: &Path,
+        known_as: &Path,
+        sample_rate: Option<f64>,
+    ) -> Result<Arc<AudioBuffer>, MediaError> {
+        let stamp = FileStamp::of(read);
+        let original = Arc::new(decode(read)?);
+        let converted = sample_rate.and_then(whole_rate).and_then(|rate| {
+            let resampler = self.resampler(original.sample_rate, f64::from(rate))?;
+            Some((rate, Arc::new(resampler.process(&original))))
+        });
+        let mut state = self.state.lock();
+        state.decodes += 1;
+        let keep = |product: Product, audio: &Arc<AudioBuffer>, state: &mut State| {
+            state.clock += 1;
+            let used = state.clock;
+            let key = Key { path: known_as.to_path_buf(), product };
+            // (A reading of that name that is under way is left to finish.)
+            if !matches!(state.items.get(&key), Some(Slot::Loading)) {
+                state.items.insert(key, Slot::Ready(Item { stamp, used, content: Content::Audio(audio.clone()) }));
+            }
+        };
+        keep(Product::Audio, &original, &mut state);
+        if let Some((rate, converted)) = &converted {
+            keep(Product::AudioAt(*rate), converted, &mut state);
+        }
+        state.recount();
+        state.trim();
+        Ok(converted.map_or(original, |(_, converted)| converted))
+    }
+
     /// Changes the memory budget, letting go of entries if it shrank.
     pub fn set_budget(&self, budget_bytes: usize) {
         let mut state = self.state.lock();

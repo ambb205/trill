@@ -76,7 +76,9 @@ pub use instruments::{Arrived, Ask, INSTRUMENTS, SETS_FOLDER, fetch_list, part_o
 pub use jobs::{Jobs, Program};
 pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
-pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
+pub use missing::{
+    Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in, the_songs_files,
+};
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};

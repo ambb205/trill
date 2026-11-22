@@ -1609,6 +1609,9 @@ impl TrillServer {
     /// its beats land on the song's beats and stay there when the tempo changes.
     #[tool(annotations(title = "Create audio clip"))]
     fn create_audio_clip(&self, Parameters(request): Parameters<CreateAudioClipRequest>) -> CallToolResult {
+        // A client the user set up is the user's hand: a file it brings
+        // into a shared song goes to the others, as one they drop in does.
+        let _hand = (!self.is_guarded()).then(trill_engine::hand::by_hand);
         let sound = SoundClip {
             length: request.length,
             name: request.name.clone(),
@@ -2566,6 +2569,8 @@ impl TrillServer {
     /// values, and the change is one undo step.
     #[tool(annotations(title = "Set sample"))]
     fn set_sample(&self, Parameters(request): Parameters<SetSampleRequest>) -> CallToolResult {
+        // (The user's hand, as for an audio clip: see `create_audio_clip`.)
+        let _hand = (!self.is_guarded()).then(trill_engine::hand::by_hand);
         let mut session = self.session.lock();
         let reply = (|| {
             let id = DeviceId(request.device);
