@@ -119,6 +119,8 @@ if [ "$build" = yes ]; then
         --config 'target.x86_64-pc-windows-msvc.rustflags=["-C", "target-feature=+crt-static"]'
     unset TRILL_RELEASE_COMMIT TRILL_UPDATE_TRIAL_KEY TRILL_UPDATE_TRIAL_VERSION
 fi
+expected="Trill $version (build $commit)"
+[ -z "$trial" ] || expected="$expected, made to try the updater out: not a release"
 for program in trill.exe trill-mcp.exe; do
     if [ ! -f "$built/$program" ]; then
         echo "release: $built/$program is not built: run without --no-build" >&2
@@ -128,6 +130,15 @@ for program in trill.exe trill-mcp.exe; do
     # machine that has never had Microsoft's redistributable installed.
     if grep -a -q -i 'VCRUNTIME140' "$built/$program"; then
         echo "release: $program still asks for VCRUNTIME140.dll: it was not built by this script" >&2
+        exit 1
+    fi
+    # What is gathered is what is being released: each program says which Trill it is. One that was
+    # built from another commit, as another version, or to try the updater out (which trusts a
+    # trial's key) is never taken for it, whatever the last run left here.
+    says=$("$built/$program" --version 2>/dev/null | tr -d '\r' || true)
+    if [ "$says" != "$expected" ]; then
+        echo "release: $program says it is '$says'," >&2
+        echo "         and what is being made is '$expected': run without --no-build" >&2
         exit 1
     fi
 done

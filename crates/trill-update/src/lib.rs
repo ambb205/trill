@@ -107,6 +107,19 @@ pub fn this() -> This {
     }
 }
 
+/// What the program that is running says it is to whoever asks
+/// (`--version`): which Trill, and of a build that was made to try the
+/// updater out, that it is one. `scripts/release.sh` holds what it gathers
+/// to this line, so that a build of another commit, or one that trusts a
+/// trial's key, is never taken for the release that is being made.
+pub fn says() -> String {
+    let words = this().words();
+    match release::made_for_a_trial() {
+        true => format!("{words}, made to try the updater out: not a release"),
+        false => words,
+    }
+}
+
 /// Which of Trill's programs is starting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Program {
@@ -259,6 +272,8 @@ mod tests {
         // A test is never a release: nothing that is tested here looks, fetches or is updated.
         assert!(!this.is_release());
         assert_eq!(this.words(), format!("Trill {}, a build of your own", env!("CARGO_PKG_VERSION")));
+        // What it says of itself when asked is that and no more: only a build made to try the updater out adds to it.
+        assert_eq!(says(), this.words());
         let release = This { version: Version::new(0, 2, 0), commit: Some("0ce65fb".to_owned()) };
         assert_eq!(release.words(), "Trill 0.2.0 (build 0ce65fb)");
     }

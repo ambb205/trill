@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         cli::Parsed::Version => {
-            println!("{}", trill_update::this().words());
+            println!("{}", trill_update::says());
             return Ok(());
         }
     };

@@ -92,7 +92,7 @@ fn main() -> anyhow::Result<()> {
     trill_runtime::jobs::run_as_job_if_requested();
 
     if std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V") {
-        println!("{}", trill_update::this().words());
+        println!("{}", trill_update::says());
         return Ok(());
     }
     let Some(options) = parse_args()? else {
