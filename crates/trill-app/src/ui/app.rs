@@ -798,7 +798,10 @@ impl TrillApp {
         self.editors.poll(&mut self.state.toasts);
         self.settings.poll();
         self.setup.poll();
-        self.setup.see_updates(&self.sounds.runtime);
+        // A newer Trill that has just become known, or has just been fetched, is said once.
+        if let Some(words) = self.setup.see_updates(&self.sounds.runtime) {
+            self.state.toasts.lasting(super::toast::ToastKind::Info, words, Duration::from_secs(10));
+        }
         self.filming.poll(ctx, &mut self.state);
         self.take_reports();
         self.sync(ctx);

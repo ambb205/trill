@@ -41,7 +41,10 @@ impl UpdateNotice {
     pub fn words(&self) -> String {
         match self.ready {
             true => {
-                format!("Trill {} is fetched: it goes in the next time Trill starts while no other is open", self.version)
+                format!(
+                    "Trill {} is fetched: it goes in the next time Trill starts while no other is open",
+                    self.version
+                )
             }
             false => format!("Trill {} is out", self.version),
         }

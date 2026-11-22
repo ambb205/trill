@@ -105,6 +105,8 @@ pub struct Setup {
     /// line in the status bar. Read when what is known of one has moved.
     notice: Option<trill_runtime::UpdateNotice>,
     notice_at: Option<u64>,
+    /// What the user was last told of it in this run, so that it is said once.
+    told: Option<trill_runtime::UpdateNotice>,
     shown: Shown,
     /// False until what is shown has been read once since it was opened.
     read: bool,
@@ -141,6 +143,7 @@ impl Default for Setup {
             tab: 0,
             notice: None,
             notice_at: None,
+            told: None,
             shown: Shown::default(),
             read: false,
             reading: false,
@@ -200,16 +203,29 @@ impl Setup {
 
     /// Brings the notice in step with what the runtime knows of a newer
     /// Trill: asked of it only when that has moved, which a frame finds
-    /// out by one number.
-    pub fn see_updates(&mut self, runtime: &Runtime) {
+    /// out by one number. Answers with what there is to tell the user
+    /// once, the first time in this run that there is something new to
+    /// say: that a newer one is out, and that it is fetched.
+    pub fn see_updates(&mut self, runtime: &Runtime) -> Option<String> {
         if self.staged {
-            return;
+            return None;
         }
         let changes = runtime.updates().changes();
-        if self.notice_at != Some(changes) {
-            self.notice_at = Some(changes);
-            self.notice = runtime.update_notice();
+        if self.notice_at == Some(changes) {
+            return None;
         }
+        self.notice_at = Some(changes);
+        self.notice = runtime.update_notice();
+        let notice = self.notice.clone()?;
+        if self.told.as_ref() == Some(&notice) {
+            return None;
+        }
+        let words = match notice.ready {
+            true => notice.words(),
+            false => format!("{}: its line at the bottom of the window says what is new", notice.words()),
+        };
+        self.told = Some(notice);
+        Some(words)
     }
 
     /// True while something that was asked for is being done.
@@ -671,9 +687,13 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
     let theme = cx.theme;
     // What is shown is read again every so often: sooner while something is on its way.
     let now = ctx.input(|input| input.time);
-    let newer_on_its_way = cx.setup.shown.program.status.as_ref().is_some_and(|status| {
-        status.looking || matches!(status.step, trill_update::Step::Fetching { .. })
-    });
+    let newer_on_its_way = cx
+        .setup
+        .shown
+        .program
+        .status
+        .as_ref()
+        .is_some_and(|status| status.looking || matches!(status.step, trill_update::Step::Fetching { .. }));
     let on_its_way = cx.setup.working > 0
         || newer_on_its_way
         || cx.setup.testing.is_some()

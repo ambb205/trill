@@ -140,10 +140,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         }
     }
     if let Some(response) = update_item {
-        cx.hint(
-            &response,
-            "A newer Trill \u{00B7} click for what is new in it, to fetch it, or to hear no more of it",
-        );
+        cx.hint(&response, "A newer Trill \u{00B7} click for what is new in it, to fetch it, or to hear no more of it");
         if response.clicked() {
             let ctx = ui.ctx().clone();
             super::setup::open_on_program(&ctx, cx);

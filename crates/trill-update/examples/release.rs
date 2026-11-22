@@ -36,9 +36,11 @@ fn main() {
         ["announce", rest @ ..] => announce(rest),
         ["read", file] => read(Path::new(file), None),
         ["read", file, key] => read(Path::new(file), Some(key)),
-        _ => Err("usage: release key FILE | public FILE | pack FOLDER OUT.zip | announce ... | read FILE [PUBLIC-KEY] \
+        _ => {
+            Err("usage: release key FILE | public FILE | pack FOLDER OUT.zip | announce ... | read FILE [PUBLIC-KEY] \
                   (see the top of crates/trill-update/examples/release.rs)"
-            .to_owned()),
+                .to_owned())
+        }
     };
     if let Err(why) = done {
         eprintln!("release: {why}");
@@ -77,7 +79,8 @@ fn files_below(folder: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     fn walk(folder: &Path, below: &str, found: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
         for entry in std::fs::read_dir(folder).map_err(said(folder))? {
             let entry = entry.map_err(said(folder))?;
-            let name = entry.file_name().into_string().map_err(|name| format!("{name:?} is no name a release can hold"))?;
+            let name =
+                entry.file_name().into_string().map_err(|name| format!("{name:?} is no name a release can hold"))?;
             let path = if below.is_empty() { name } else { format!("{below}/{name}") };
             if entry.path().is_dir() {
                 walk(&entry.path(), &path, found)?;
@@ -117,9 +120,7 @@ fn size(path: &Path) -> Result<u64, String> {
 }
 
 fn announce(args: &[&str]) -> Result<(), String> {
-    let value = |name: &str| {
-        args.iter().position(|arg| *arg == name).and_then(|at| args.get(at + 1)).copied()
-    };
+    let value = |name: &str| args.iter().position(|arg| *arg == name).and_then(|at| args.get(at + 1)).copied();
     let needed = |name: &str| value(name).ok_or_else(|| format!("announce needs {name}"));
     let key = read_key(Path::new(needed("--key")?))?;
     let (zip, folder, out) = (Path::new(needed("--zip")?), Path::new(needed("--folder")?), Path::new(needed("--out")?));

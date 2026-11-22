@@ -160,3 +160,18 @@ Only Windows has been run so far.
 - What is in front of the instrument.
 - A plugin that is not installed kept in the song until it is. The sound is made without it.
 - Taking back the deletion of a saved one. It is asked about first, and is then for good.
+
+## Installing and updating
+
+- A release. None has been published yet, and the key releases are announced under has not been made: until
+  its public half is written into the program, a build knows no key and takes no announcement.
+- A certificate. The installer and the programs are not signed, and Windows says so the first time one is run.
+- Anything but Windows on x86-64. A release has a build for each kind of machine it names, and names one.
+- Starting again from the window. A newer Trill that was fetched goes in at the next start; the window does not
+  close and start itself, and says to close every Trill.
+- `trill-mcp` putting a newer Trill in place. It leaves that to the window's next start, and while a client keeps
+  it running nothing goes in.
+- Fetching only what changed. An update is the whole build.
+- Going back to an older Trill from the window. The older version's installer does that.
+- Taking a key out of trust in the Trills that are installed. A key that was built into a release is trusted by
+  that release for as long as it runs; a second key can be added to the releases after it.

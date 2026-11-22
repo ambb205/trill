@@ -294,9 +294,8 @@ impl Updates {
         });
         let length = std::fs::metadata(&to).map_or(0, |metadata| metadata.len());
         let text = match ended {
-            Ok(()) if length <= release::LONGEST as u64 => {
-                std::fs::read_to_string(&to).map_err(|_| "what was fetched is not the announcement of a release".to_owned())
-            }
+            Ok(()) if length <= release::LONGEST as u64 => std::fs::read_to_string(&to)
+                .map_err(|_| "what was fetched is not the announcement of a release".to_owned()),
             Ok(()) | Err(Ended::Stopped) => {
                 Err("what was fetched is too long to be the announcement of a release".to_owned())
             }
@@ -457,7 +456,8 @@ fn clear_other_archives(folder: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_one = entry.file_name().to_str().is_some_and(|name| name.starts_with("trill-") && name.ends_with(".zip"));
+        let is_one =
+            entry.file_name().to_str().is_some_and(|name| name.starts_with("trill-") && name.ends_with(".zip"));
         if is_one && path != keep {
             let _ = std::fs::remove_file(path);
         }

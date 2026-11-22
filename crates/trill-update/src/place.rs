@@ -193,11 +193,7 @@ impl Place {
         let text = std::fs::read_to_string(self.work().join(READY)).ok()?;
         let staged: Staged = serde_json::from_str(&text).ok()?;
         let folder = staged.version.to_string();
-        staged
-            .files
-            .iter()
-            .all(|piece| self.below_work(&folder, &piece.path).is_file())
-            .then_some(staged)
+        staged.files.iter().all(|piece| self.below_work(&folder, &piece.path).is_file()).then_some(staged)
     }
 
     /// Forgets what is staged, and clears away what was unpacked for it.
@@ -395,9 +391,15 @@ impl Place {
 
     /// Starts the program that was just put in place, with what this one
     /// was started with, and waits to see it up. `from` is the version it
-    /// took the place of. Nobody clears `old` away meanwhile.
-    pub fn try_out(&self, program: &Path, args: &[std::ffi::OsString], from: Version) -> Tried {
+    /// took the place of.
+    ///
+    /// Whoever applied the update hands over that it is `alone`: the new
+    /// program is to find that no Trill runs, as this one did. That is
+    /// let go of only once it is settled that nobody clears away what was
+    /// replaced, so that no start between the two finds it for the taking.
+    pub fn try_out(&self, alone: Alone, program: &Path, args: &[std::ffi::OsString], from: Version) -> Tried {
         let trying = self.lock_file(TRYING).filter(|trying| trying.lock().is_ok());
+        drop(alone);
         Tried { ended: self.watch_come_up(program, args, from), _trying: trying }
     }
 
@@ -687,16 +689,25 @@ mod tests {
         // (One line: the script is read once, and is gone with the test's folder before it ends.)
         let script = format!("@echo up> \"%{TRIAL}%\" & ping -n 3 127.0.0.1 > nul & exit /b 9\r\n");
         std::fs::write(&up, script).unwrap();
-        assert_eq!(place.try_out(&up, &[], from).ended, Trial::CameUp);
+        assert_eq!(place.try_out(place.alone().unwrap(), &up, &[], from).ended, Trial::CameUp);
         // One that ends at once with a fault.
-        let Trial::Failed(why) = place.try_out(&shell, &["/c".into(), "exit 3".into()], from).ended else {
+        let Trial::Failed(why) =
+            place.try_out(place.alone().unwrap(), &shell, &["/c".into(), "exit 3".into()], from).ended
+        else {
             panic!("a program that ends with a fault did not come up")
         };
         assert!(why.contains("ended before it was up"), "{why}");
         // One that was asked for something short and did it.
-        assert_eq!(place.try_out(&shell, &["/c".into(), "exit 0".into()], from).ended, Trial::CameUp);
+        assert_eq!(
+            place.try_out(place.alone().unwrap(), &shell, &["/c".into(), "exit 0".into()], from).ended,
+            Trial::CameUp
+        );
         // One that is not there.
-        let Trial::Failed(why) = place.try_out(&home.path().join("no-such.exe"), &[], from).ended else { panic!() };
+        let Trial::Failed(why) =
+            place.try_out(place.alone().unwrap(), &home.path().join("no-such.exe"), &[], from).ended
+        else {
+            panic!()
+        };
         assert!(why.contains("could not be started"), "{why}");
     }
 }

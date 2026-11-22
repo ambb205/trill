@@ -146,7 +146,15 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx) {
             let bar = Rect::from_min_max(pos2(row.left(), row.bottom() - 2.0), row.max);
             let share = if *of == 0 { 0.0 } else { (*got as f64 / *of as f64) as f32 };
             paint::progress(ui.painter(), bar, share, theme.well, theme.signal);
-            if row_button(ui, cx, row, "Stop", "Stop fetching the update", false, "What has come is kept, and is gone on with") {
+            if row_button(
+                ui,
+                cx,
+                row,
+                "Stop",
+                "Stop fetching the update",
+                false,
+                "What has come is kept, and is gone on with",
+            ) {
                 cx.sounds.runtime.updates().stop();
             }
         }
@@ -193,7 +201,9 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx) {
         (Step::Idle, None) => {
             let words = match (status.looking, status.looked) {
                 (true, _) => "Looking whether a newer Trill is out\u{2026}".to_owned(),
-                (false, Some(looked)) => format!("This is the newest Trill its makers have announced. Looked {}.", ago(looked)),
+                (false, Some(looked)) => {
+                    format!("This is the newest Trill its makers have announced. Looked {}.", ago(looked))
+                }
                 (false, None) => "Trill has not looked yet whether a newer one is out.".to_owned(),
             };
             paragraph(ui, theme, theme.ink_dim, &words, WIDTH);
@@ -218,8 +228,10 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx) {
     text::paint(ui.painter(), row, Align2::LEFT_CENTER, theme.text.body, words, theme.ink);
     let chip = Chip::new(if on { "On" } else { "Off" }, on).dimmed(busy).named("Whether Trill looks when it starts");
     let width = chip.width(ui, theme);
-    let rect =
-        Rect::from_min_size(pos2(row.right() - width, row.center().y - theme.metric.chip / 2.0), vec2(width, theme.metric.chip));
+    let rect = Rect::from_min_size(
+        pos2(row.right() - width, row.center().y - theme.metric.chip / 2.0),
+        vec2(width, theme.metric.chip),
+    );
     let response = trill_noir::chip(ui, theme, rect, ui.scope_id().with("look-at-start"), &chip);
     cx.hint(&response, "Whether Trill looks for a newer one by itself. Switched off, it looks only when you ask here");
     if response.clicked() && !busy {

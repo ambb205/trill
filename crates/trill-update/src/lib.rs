@@ -53,6 +53,19 @@ pub const INSTALLED_AS: &str = "{B4E0A3C2-7D5F-4E19-9C1A-5A6D2F8E3B71}";
 /// The name every Trill that runs holds, by which an installer sees that
 /// one does: the `AppMutex` of `installer/trill.iss`.
 pub const RUNS_AS: &str = "TrillIsRunning";
+/// The same two for a build that was made for a trial of the updater
+/// (`scripts/release.sh --trial`), which is installed beside the Trill a
+/// machine really has and is never taken for it.
+pub const TRIAL_INSTALLED_AS: &str = "{7A1D6C5E-3B2F-4D48-8E67-1C9A0F5B2D34}";
+pub const TRIAL_RUNS_AS: &str = "TrillTrialIsRunning";
+
+/// What this build is installed as, and the name it holds while it runs.
+fn names() -> (&'static str, &'static str) {
+    match release::made_for_a_trial() {
+        true => (TRIAL_INSTALLED_AS, TRIAL_RUNS_AS),
+        false => (INSTALLED_AS, RUNS_AS),
+    }
+}
 
 /// The program that is running.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,9 +94,15 @@ impl This {
 /// What the program that is running is. The version is the workspace's;
 /// the commit is what `scripts/release.sh` built it with
 /// (`TRILL_RELEASE_COMMIT` when it was compiled).
+///
+/// A build made for a trial of the updater may say another version than
+/// the workspace's (`TRILL_UPDATE_TRIAL_VERSION` when it was compiled), so
+/// that an update from one version to the next can be tried out without
+/// a release being made of either. A release never does.
 pub fn this() -> This {
+    let trial = option_env!("TRILL_UPDATE_TRIAL_VERSION").filter(|_| release::made_for_a_trial());
     This {
-        version: env!("CARGO_PKG_VERSION").parse().unwrap_or_default(),
+        version: trial.unwrap_or(env!("CARGO_PKG_VERSION")).parse().unwrap_or_default(),
         commit: option_env!("TRILL_RELEASE_COMMIT").filter(|commit| !commit.is_empty()).map(str::to_owned),
     }
 }
@@ -117,7 +136,7 @@ fn hold_the_name() {
         use windows::core::HSTRING;
         // SAFETY: the name is a string that ends. The handle is never closed: the system closes it
         // when the program ends, which is how long the name is to be held.
-        let _ = unsafe { CreateMutexW(None, false, &HSTRING::from(RUNS_AS)) };
+        let _ = unsafe { CreateMutexW(None, false, &HSTRING::from(names().1)) };
     }
 }
 
@@ -127,7 +146,7 @@ fn hold_the_name() {
 fn note_what_is_installed(version: Version) {
     #[cfg(windows)]
     {
-        let key = format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{INSTALLED_AS}_is1");
+        let key = format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{}_is1", names().0);
         let Some(reg) = trill_fetch::find_program("reg") else { return };
         let run = |args: &[&str]| {
             let mut command = std::process::Command::new(&reg);
@@ -182,10 +201,10 @@ pub fn start(program: Program) -> Started {
             }
             Some(staged) if program == Program::Window => match place.apply(&staged, &alone) {
                 Ok(()) => {
-                    // The new one is to find that no Trill runs, as this one did.
-                    drop(alone);
+                    // The new one is to find that no Trill runs, as this one did: that this one is
+                    // alone is handed over, and let go of once what was replaced is safe.
                     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-                    let tried = place.try_out(&me, &args, this.version);
+                    let tried = place.try_out(alone, &me, &args, this.version);
                     match &tried.ended {
                         Trial::CameUp | Trial::StillStarting => std::process::exit(0),
                         Trial::Failed(why) => {

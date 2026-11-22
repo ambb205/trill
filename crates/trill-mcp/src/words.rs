@@ -597,7 +597,12 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "setup" => {
             let part =
                 call.text("part").map_or_else(|| "a part".to_owned(), |part| format!("the part {}", quoted(part)));
+            let newer = call.text("part") == Some("trill");
             match call.text("action") {
+                Some("look_for_newer") => about("Looking", "Looked", "whether a newer Trill is out"),
+                Some("fetch") if newer => about("Fetching", "Began fetching", "the newer Trill"),
+                Some("stop") if newer => about("Stopping", "Stopped", "the fetch of the newer Trill"),
+                Some("remove") if newer => about("Putting away", "Put away", "the newer Trill that was fetched"),
                 Some("fetch") => about("Fetching", "Began fetching", &part),
                 Some("stop") => about("Stopping", "Stopped", &format!("the fetch of {part}")),
                 Some("remove") => about("Removing", "Removed", &part),
@@ -1019,6 +1024,13 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
             answer.get("key").and_then(Value::as_str).or(answer.get("label").and_then(Value::as_str)).map(str::to_owned)
         }
         "setup" => {
+            // A newer Trill, where the call was about one and nothing else.
+            if let Some(trill) = answer.get("trill").filter(|_| answer.get("models").is_none()) {
+                return Some(match trill.pointer("/newer/version").and_then(Value::as_str) {
+                    Some(version) => format!("Trill {version} is out"),
+                    None => "no newer Trill is known of".to_owned(),
+                });
+            }
             // What runs the models, where the answer says.
             let models = answer.get("models").unwrap_or(&answer);
             let on = models.get("runs_on").and_then(Value::as_str)?;

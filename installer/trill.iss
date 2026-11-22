@@ -15,7 +15,8 @@
 ; - Taking Trill off again takes the programs and what was written here, and nothing of
 ;   the user's: songs, settings, studies and what was fetched stay where they are.
 ;
-; AppId is what Windows knows this Trill by in its list of installed programs
+; AppId is what Windows knows this Trill by in its list of installed programs, and Mutex the
+; name a Trill that runs holds
 ; (trill_update::INSTALLED_AS, with braces round it): a trial gives another, so that it
 ; is never taken for the Trill that is installed.
 
@@ -30,6 +31,9 @@
 #endif
 #ifndef AppId
   #define AppId "B4E0A3C2-7D5F-4E19-9C1A-5A6D2F8E3B71"
+#endif
+#ifndef Mutex
+  #define Mutex "TrillIsRunning"
 #endif
 #ifndef Name
   #define Name "Trill"
@@ -58,7 +62,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesAssociations=yes
-AppMutex=TrillIsRunning
+AppMutex={#Mutex}
 CloseApplications=no
 
 [Languages]

@@ -12,9 +12,7 @@
 #                                                      # with what is new read from the other
 #   sh scripts/release.sh --no-build                   # gathers what the last run built
 #   sh scripts/release.sh --changed                    # from a tree with changes that are not committed
-#   sh scripts/release.sh --trial-key HEX --out DIR    # a build that also trusts this public key and may be
-#                                                      # told another place to look: to try the updater out,
-#                                                      # never to publish (see docs/development.md)
+#   sh scripts/release.sh --out DIR                    # into DIR instead
 #
 # The version is the workspace's, in Cargo.toml: change it there, commit, and tag the commit
 # v<version>. The build is a release: it says its version and commit, links the C runtime in
@@ -22,6 +20,15 @@
 # (target/dist), so that making one disturbs no other build.
 #
 # It publishes nothing and pushes nothing. What to publish, and how, is said at the end.
+#
+# A trial of the updater, on this machine and with nothing published (docs/development.md):
+#
+#   sh scripts/release.sh --trial KEYFILE [--trial-version X.Y.Z] [--trial-from http://127.0.0.1:8765/]
+#
+# builds a Trill that trusts the key in KEYFILE beside its makers', says the version given, looks
+# where TRILL_UPDATE_ADDRESS says when it runs, and is installed under a name of its own, never
+# as the Trill a machine really has. Its announcement is signed with that key and names the
+# archive below the address given. Such a build is never published.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -32,6 +39,8 @@ changed=no
 key=
 notes=
 trial=
+trial_version=
+trial_from=http://127.0.0.1:8765/
 out=
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,7 +48,9 @@ while [ $# -gt 0 ]; do
         --changed) changed=yes ;;
         --key) key=$2; shift ;;
         --notes) notes=$2; shift ;;
-        --trial-key) trial=$2; shift ;;
+        --trial) trial=$2; shift ;;
+        --trial-version) trial_version=$2; shift ;;
+        --trial-from) trial_from=$2; shift ;;
         --out) out=$2; shift ;;
         *) echo "release: '$1' is not something this script knows: see its first lines" >&2; exit 1 ;;
     esac
@@ -53,7 +64,7 @@ if [ -z "$version" ]; then
 fi
 commit=$(git rev-parse --short HEAD)
 if [ -n "$(git status --porcelain)" ]; then
-    if [ "$changed" = no ]; then
+    if [ "$changed" = no ] && [ -z "$trial" ]; then
         echo "release: there are changes that are not committed, and a release says which commit it is:" >&2
         echo "         commit them, or say --changed for a build that is not to be published" >&2
         exit 1
@@ -68,26 +79,36 @@ if [ -n "$key" ] && [ -n "$trial" ]; then
     echo "release: a build that trusts a trial's key is not announced under the real one" >&2
     exit 1
 fi
+if [ -z "$trial" ] && [ -n "$trial_version" ]; then
+    echo "release: only a trial's build says another version than the workspace's" >&2
+    exit 1
+fi
 
-runs_on=windows-x86_64
-name=$version
-[ -z "$trial" ] || name="$version-trial"
-out=${out:-$root/target/release-out/$name}
-dist="$root/target/dist"
-built="$dist/release"
 tool() {
     cargo run --quiet -p trill-update --example release -- "$@"
 }
+runs_on=windows-x86_64
+name=$version
+if [ -n "$trial" ]; then
+    trial_public=$(tool public "$trial")
+    version=${trial_version:-$version}
+    name="$version-trial"
+fi
+out=${out:-$root/target/release-out/$name}
+dist="$root/target/dist"
+built="$dist/release"
 
 if [ "$build" = yes ]; then
-    # What marks the build as a release, and what never does: a trial's key is given by its flag
-    # and by nothing that happens to be set where this runs.
+    # What marks the build as a release, and what never does: a trial's key and version are given
+    # by this script's own flags and by nothing that happens to be set where it runs.
     export TRILL_RELEASE_COMMIT="$commit"
-    unset TRILL_UPDATE_TRIAL_KEY RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
-    [ -z "$trial" ] || export TRILL_UPDATE_TRIAL_KEY="$trial"
+    unset TRILL_UPDATE_TRIAL_KEY TRILL_UPDATE_TRIAL_VERSION RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+    if [ -n "$trial" ]; then
+        export TRILL_UPDATE_TRIAL_KEY="$trial_public" TRILL_UPDATE_TRIAL_VERSION="$version"
+    fi
     cargo build --release -p trill-app -p trill-mcp --target-dir "$dist" \
         --config 'target.x86_64-pc-windows-msvc.rustflags=["-C", "target-feature=+crt-static"]'
-    unset TRILL_RELEASE_COMMIT TRILL_UPDATE_TRIAL_KEY
+    unset TRILL_RELEASE_COMMIT TRILL_UPDATE_TRIAL_KEY TRILL_UPDATE_TRIAL_VERSION
 fi
 for program in trill.exe trill-mcp.exe; do
     if [ ! -f "$built/$program" ]; then
@@ -155,6 +176,16 @@ if [ -n "$key" ]; then
         --page "https://github.com/ambb205/trill/releases/tag/v$version" \
         --url "https://github.com/ambb205/trill/releases/download/v$version/trill-$version-$runs_on.zip" \
         --zip "$zip" --folder "$files" --runs-on "$runs_on" --out "$out/trill-release.json"
+elif [ -n "$trial" ]; then
+    if [ -z "$notes" ]; then
+        notes="$out/notes.txt"
+        echo "A trial of the updater: Trill $version, which nobody released." > "$notes"
+    fi
+    # Read by a build that trusts the trial's key: only such a one takes an address on this machine.
+    TRILL_UPDATE_TRIAL_KEY="$trial_public" cargo run --quiet -p trill-update --example release -- \
+        announce --key "$trial" --version "$version" --date "$(date +%Y-%m-%d)" --notes "$notes" --page "" \
+        --url "${trial_from}trill-$version-$runs_on.zip" \
+        --zip "$zip" --folder "$files" --runs-on "$runs_on" --out "$out/trill-release.json"
 fi
 
 # Inno Setup's compiler, found when a release is made and never shipped: where TRILL_ISCC
@@ -174,8 +205,14 @@ if [ -z "$iscc" ]; then
 fi
 if [ -n "$iscc" ]; then
     # MSYS would take an option that begins with a slash for a path, and rewrite it.
-    MSYS2_ARG_CONV_EXCL='*' "$iscc" /Qp "/DVersion=$version" "/DSource=$(cygpath -w "$files")" \
-        "/DOutput=$(cygpath -w "$out")" ${TRILL_ISCC_DEFINES:-} "$(cygpath -w "$root/installer/trill.iss")"
+    if [ -n "$trial" ]; then
+        MSYS2_ARG_CONV_EXCL='*' "$iscc" /Qp "/DVersion=$version" "/DSource=$(cygpath -w "$files")" \
+            "/DOutput=$(cygpath -w "$out")" "/DAppId=7A1D6C5E-3B2F-4D48-8E67-1C9A0F5B2D34" \
+            "/DMutex=TrillTrialIsRunning" "/DName=Trill trial" "$(cygpath -w "$root/installer/trill.iss")"
+    else
+        MSYS2_ARG_CONV_EXCL='*' "$iscc" /Qp "/DVersion=$version" "/DSource=$(cygpath -w "$files")" \
+            "/DOutput=$(cygpath -w "$out")" "$(cygpath -w "$root/installer/trill.iss")"
+    fi
 else
     echo "release: Inno Setup's compiler (ISCC.exe) was not found, so no installer was made:"
     echo "         install Inno Setup 6 (https://jrsoftware.org/isdl.php), or name ISCC.exe in TRILL_ISCC"

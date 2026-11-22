@@ -137,6 +137,7 @@ owes the makers of the sampled instruments it plays.
 | [Writing music](docs/writing-music.md) | Chords, grooves, melodies, drum maps and articulations |
 | [Sounds, listening and studies](docs/sounds-and-studies.md) | The sample library, and taking a recording apart |
 | [A song's files](docs/files.md) | Missing files and relinking |
+| [Installing and updating](docs/installing-and-updating.md) | The installer, where Trill keeps things, and how a newer Trill goes in |
 | [The engine](docs/engine.md) | Automation, tempo changes, rendering and measuring |
 | [Working with an AI](docs/ai-and-mcp.md) | MCP clients, the assistant in the window, the tools |
 | [The making-of, the stage and films](docs/making-of-and-film.md) | The session journal, the stage view, film export |

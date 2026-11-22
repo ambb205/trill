@@ -192,7 +192,10 @@ impl Release {
         }
         for build in &self.builds {
             let of = &build.runs_on;
-            if !build.url.starts_with("https://") {
+            // (A build made for a trial of the updater takes one from this machine itself, too: what
+            // is fetched is held to the checksum that was signed, wherever it comes from.)
+            let on_this_machine = made_for_a_trial() && build.url.starts_with("http://127.0.0.1:");
+            if !build.url.starts_with("https://") && !on_this_machine {
                 return Err(format!("the build of {version} for {of} is not at an https address"));
             }
             if !is_sha256(&build.sha256) {

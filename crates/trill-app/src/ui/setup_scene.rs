@@ -135,7 +135,9 @@ impl SetupScene {
                 (SetupScene::Fresh | SetupScene::Instruments, _) => (PartState::Missing, 0.0, None),
                 (SetupScene::InstrumentsFetching | SetupScene::InstrumentsSearch, _) => (PartState::Ready, 1.0, None),
                 (SetupScene::Machine, "stems-best") => (PartState::Missing, 0.0, None),
-                (SetupScene::Machine | SetupScene::Update | SetupScene::UpdateReady, _) => (PartState::Ready, 1.0, None),
+                (SetupScene::Machine | SetupScene::Update | SetupScene::UpdateReady, _) => {
+                    (PartState::Ready, 1.0, None)
+                }
                 (SetupScene::Fetching, "runtime" | "any-card" | "beats") => (PartState::Ready, 1.0, None),
                 (SetupScene::Fetching, "stems") => (PartState::Fetching, 0.43, None),
                 (SetupScene::Fetching, "words") => (PartState::Waiting, 0.0, None),
@@ -272,7 +274,10 @@ impl SetupScene {
         let newer = on_program.then(made_up_release);
         let made_up = Program {
             status: Some(trill_update::Status {
-                this: trill_update::This { version: trill_update::Version::new(0, 2, 0), commit: Some("0ce65fb".to_owned()) },
+                this: trill_update::This {
+                    version: trill_update::Version::new(0, 2, 0),
+                    commit: Some("0ce65fb".to_owned()),
+                },
                 off: None,
                 looking: false,
                 looked: None,

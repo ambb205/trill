@@ -31,7 +31,8 @@ fn fixture() -> Fixture {
     let storage = Storage::At { settings: config.join("settings.json"), library_index: None };
     let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
     let updating = makers.program("0.2.0", &home, Some(config.join("update")));
-    let runtime = Arc::new(Runtime::start_custom(options, Parts { updating: Some(updating), ..Parts::default() }).unwrap());
+    let runtime =
+        Arc::new(Runtime::start_custom(options, Parts { updating: Some(updating), ..Parts::default() }).unwrap());
     runtime.updates().fetch_by(makers.shelf.clone());
     let harness = Harness::on(runtime, UiOptions::default(), |_| {});
     Fixture { harness, makers, folder }
