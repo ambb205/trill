@@ -513,6 +513,8 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
         });
     if modal.should_close() {
         cx.state.together.panel = None;
+        // (A key that was typed and not kept is not kept by the window either.)
+        cx.state.together.point_key.clear();
     }
 }
 
