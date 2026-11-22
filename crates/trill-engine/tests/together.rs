@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{CompositeFactory, DeviceFactory, EditorOptions};
+use trill_core::files::{Content, FileIs};
 use trill_core::journal::Author;
 use trill_core::merge::lot::{Lot, any_edit, check, note};
 use trill_core::merge::{Change, Op, Said, Stamp, TrackOp, TrackSet};
@@ -42,14 +43,11 @@ fn two() -> (Session, Session) {
 }
 
 /// The song a session holds, as one who compares two sessions' reads it:
-/// to the last id, and without what is each one's own.
+/// to the last id, and without what is each one's own (its listening, and
+/// where it has the song's files).
 fn text(session: &Session) -> String {
-    let mut song = session.project().clone();
+    let mut song = trill_core::merge::said_song(session.project());
     song.count_ids_from(0);
-    song.loop_region.enabled = false;
-    for track in &mut song.tracks {
-        (track.solo, track.input) = (false, None);
-    }
     song.to_json()
 }
 
@@ -196,10 +194,12 @@ fn what_is_changed_in_a_plugins_own_window_reaches_the_other_once_it_has_settled
 
 // ---- what is recorded --------------------------------------------------------
 
-/// What a track plays of recordings: where each lies, and its file.
+/// What a track plays of recordings: where each lies, and its file by
+/// the name the song says it by (where each program has it is its own).
 fn plays(session: &Session, track: TrackId) -> Vec<(f64, f64, String)> {
     let track = session.project().track(track).unwrap();
-    track.clips.iter().filter_map(|clip| Some((clip.start, clip.end(), clip.audio()?.path.clone()))).collect()
+    let named = |audio: &AudioContent| audio.is.as_ref().map_or_else(|| audio.path.clone(), |is| is.name.clone());
+    track.clips.iter().filter_map(|clip| Some((clip.start, clip.end(), named(clip.audio()?)))).collect()
 }
 
 /// The takes kept beside a track: each one's lane and name, lane by lane.
@@ -210,8 +210,12 @@ fn lanes(session: &Session, track: TrackId) -> Vec<(u32, String)> {
     takes
 }
 
+/// A recording whose maker has read it already: the song says what it is.
 fn recording(name: &str) -> AudioContent {
-    AudioContent::new(format!("{name}.wav"))
+    let mut recording = AudioContent::new(format!("{name}.wav"));
+    let of_its_name = [name.bytes().fold(7u8, |sum, byte| sum.wrapping_mul(31).wrapping_add(byte)); 32];
+    recording.is = Some(FileIs::new(Content::new(&of_its_name, 48_000), &recording.path));
+    recording
 }
 
 #[test]
@@ -347,39 +351,183 @@ fn of_two_recordings_put_over_one_stretch_at_the_same_moment_the_later_plays_and
     assert_eq!(plays(&b, bass), with("two"));
 }
 
-#[test]
-fn a_take_whose_file_the_other_has_not_got_is_a_missing_file_there_and_plays_when_the_file_is() {
-    let (mut a, mut b) = two();
-    let bass = track(&a, "Bass");
-    let folder = tempfile::tempdir().unwrap();
-    let file = folder.path().join("takes").join("Bass.wav");
-    let named = AudioContent::new(file.to_string_lossy());
-    let take = a.edit(|song| song.add_take(bass, "Take", 0.0, 4.0, named)).unwrap();
-    a.edit(|song| song.choose_take(take).map(drop)).unwrap();
-    meet(&mut a, &mut b);
-    // The other has the take and what the track plays of it; the file it
-    // has not got is a file that is missing, said of the clip that plays
-    // it, and the song goes on.
-    assert_eq!(lanes(&b, bass), [(0, "Take".to_owned())]);
-    let missing = |session: &Session| -> Vec<String> {
-        let files = session.problems().iter().filter_map(|problem| match problem {
-            Problem::AudioFile { path, .. } => Some(path.clone()),
-            _ => None,
-        });
-        files.collect()
-    };
-    assert_eq!(missing(&b), [file.to_string_lossy()], "{:?}", b.problems());
-    b.edit(|song| song.set_track_volume(bass, -3.0)).unwrap();
-    b.edit(|song| song.rename_take(take, "Ada's take")).unwrap();
-    meet(&mut a, &mut b);
-    assert_eq!(lanes(&a, bass), [(0, "Ada's take".to_owned())]);
-    // The file is there: it plays.
+/// The paths of the audio files a session's song cannot play.
+fn missing(session: &Session) -> Vec<String> {
+    let files = session.problems().iter().filter_map(|problem| match problem {
+        Problem::AudioFile { path, .. } => Some(path.clone()),
+        _ => None,
+    });
+    files.collect()
+}
+
+/// Where a session has the file of a clip or a take, and what the song
+/// says the file is.
+fn file_of(session: &Session, clip: ClipId) -> (String, Option<FileIs>) {
+    let found = session.files_here().into_iter().find(|file| file.clip == clip);
+    found.map(|file| (file.path, file.is)).unwrap_or_default()
+}
+
+fn tone_at(file: &std::path::Path) {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     let tone: Vec<f32> = (0..48_000).map(|n| (n as f32 * 0.05).sin() * 0.2).collect();
     let buffer = trill_core::audio::AudioBuffer { sample_rate: 48_000.0, left: tone.clone(), right: tone };
-    trill_media::write_wav(&file, &buffer, trill_media::WavFormat::Float32).unwrap();
-    b.edit(|song| song.set_track_volume(bass, -4.0)).unwrap();
+    trill_media::write_wav(file, &buffer, trill_media::WavFormat::Float32).unwrap();
+}
+
+#[test]
+fn a_take_whose_file_the_other_has_not_got_has_a_place_of_the_others_own_and_plays_when_the_file_is_there() {
+    let (mut a, mut b) = two();
+    let bass = track(&a, "Bass");
+    let folder = tempfile::tempdir().unwrap();
+    b.keep_received_in(Some(folder.path().join("at Ben's")));
+    let file = folder.path().join("Ada's takes").join("Bass.wav");
+    tone_at(&file);
+    let named = AudioContent::new(file.to_string_lossy());
+    let take = a.edit(|song| song.add_take(bass, "Take", 0.0, 4.0, named)).unwrap();
+    a.edit(|song| song.choose_take(take).map(drop)).unwrap();
+    let played = plays(&a, bass).len();
+    meet(&mut a, &mut b);
+    // The other has the take and what the track plays of it, and no place
+    // for the file: where its maker has it was not said, and nothing on
+    // this disk is looked at for it.
+    assert_eq!(lanes(&b, bass), [(0, "Take".to_owned())]);
+    assert_eq!(plays(&b, bass).len(), played);
+    assert_eq!(file_of(&b, take), (String::new(), None), "no place, and nothing said of what it is yet");
+    assert_eq!(file_of(&a, take).0, file.to_string_lossy(), "its maker has it where it is");
+    assert!(missing(&a).is_empty() && !missing(&b).is_empty(), "{:?}", b.problems());
+    assert!(
+        !format!("{:?} {}", b.problems(), b.project().to_json()).contains("Ada's takes"),
+        "nothing names her folder"
+    );
+
+    // Its maker says what it is, once it has read it: the other gives it
+    // a place of its own for that, in its folder of files from others.
+    let is = FileIs::new(Content::new(&[0xab; 32], std::fs::metadata(&file).unwrap().len()), &file.to_string_lossy());
+    assert!(!a.say_file(take, "another file.wav", is.clone()), "only of the file the clip names");
+    // (Of the take, and of the clips the track plays of it.)
+    let named: Vec<ClipId> = a.files_here().into_iter().map(|here| here.clip).collect();
+    assert!(named.contains(&take) && named.len() > 1, "{named:?}");
+    for clip in &named {
+        assert!(a.say_file(*clip, &file.to_string_lossy(), is.clone()));
+        assert!(!a.say_file(*clip, &file.to_string_lossy(), is.clone()), "said once");
+    }
+    meet(&mut a, &mut b);
+    let home = folder.path().join("at Ben's").join(format!("{}.wav", is.sha256));
+    assert_eq!(file_of(&b, take), (home.to_string_lossy().into_owned(), Some(is.clone())));
+    assert_eq!(file_of(&a, take).0, file.to_string_lossy(), "the maker's place is as it was");
+    // (The clips the track plays of the take name the same file.)
+    assert_eq!(b.files_here().len(), named.len());
+    assert!(b.files_here().iter().all(|here| here.path == home.to_string_lossy()), "{:?}", b.files_here());
+    assert_eq!(missing(&b), [home.to_string_lossy()], "it is not here yet");
+    assert_eq!(b.said_files(), [(is.clone(), home.clone())]);
+
+    // The other goes on working meanwhile, and what it does is the maker's too.
+    b.edit(|song| song.set_track_volume(bass, -3.0)).unwrap();
+    b.edit(|song| song.rename_take(take, "Ada's take")).unwrap();
+    // A clip the other makes of the recording plays, at its maker's, the
+    // maker's own file: nobody is asked for what one has.
+    let played = b.project().track(bass).unwrap().clips[0].id;
+    let copy = b.edit(|song| song.duplicate_clip(played, 32.0, None)).unwrap();
+    meet(&mut a, &mut b);
+    assert_eq!(lanes(&a, bass), [(0, "Ada's take".to_owned())]);
+    assert_eq!(file_of(&a, take).0, file.to_string_lossy());
+    assert_eq!(file_of(&a, copy), (file.to_string_lossy().into_owned(), Some(is.clone())));
+    assert_eq!(file_of(&b, copy).0, home.to_string_lossy());
+
+    // The file arrives: it plays, without the song being opened again,
+    // and that is no change to the song.
+    let (revision, said) = (b.revision(), b.take_said().len());
+    std::fs::copy(&file, &home).unwrap_or_else(|_| {
+        std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+        std::fs::copy(&file, &home).unwrap()
+    });
+    b.files_are_here(std::slice::from_ref(&home));
     assert!(missing(&b).is_empty(), "{:?}", b.problems());
+    assert!(b.revision() > revision && b.take_said().is_empty(), "{said}");
+
+    // A place one gives a file oneself is one's own too: nobody hears of
+    // it, and what the file is stays what the song says until it is read.
+    let elsewhere = folder.path().join("found again").join("Bass.wav");
+    tone_at(&elsewhere);
+    let relink =
+        trill_core::Relink { place: trill_core::FilePlace::Clip(take), path: elsewhere.to_string_lossy().into() };
+    assert_eq!(b.relink(&[relink]).unwrap(), 1);
+    assert_eq!(pass(&mut b, &mut a, "Ben"), 0, "where one has a file is said to nobody");
+    assert_eq!(file_of(&a, take).0, file.to_string_lossy());
+
+    // A song that is handed over whole names no place either.
+    let handed = a.whole_song();
+    assert!(!handed.contains("Ada's takes") && !handed.contains("\"files\""), "{handed}");
+    let mut c = session();
+    c.keep_received_in(Some(folder.path().join("at Cy's")));
+    c.take_song(&handed).unwrap();
+    let at_cy = folder.path().join("at Cy's").join(format!("{}.wav", is.sha256));
+    assert_eq!(file_of(&c, take), (at_cy.to_string_lossy().into_owned(), Some(is)));
+    assert_eq!(text(&a), text(&c));
+}
+
+#[test]
+fn the_files_a_devices_state_names_are_given_places_made_here_when_the_state_arrives() {
+    // (Sessions whose sample players can read files.)
+    let reading = || {
+        let media = Arc::new(trill_media::MediaCache::new(64 << 20));
+        let factory = Arc::new(trill_dsp::Builtins::with_loader(media.clone()));
+        let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+        session.hear_changes(true);
+        session
+    };
+    let mut a = reading();
+    let keys = a.edit(|song| Ok(song.add_track("Keys"))).unwrap();
+    a.share();
+    let mut b = reading();
+    let folder = tempfile::tempdir().unwrap();
+    b.keep_received_in(Some(folder.path().join("at Ben's")));
+    b.take_song(&a.whole_song()).unwrap();
+    a.take_said();
+    // A file of Ada's, on this very disk, that her program names in a
+    // state: the place is not taken.
+    let kick = folder.path().join("Ada's samples").join("kick.wav");
+    tone_at(&kick);
+    let sampler = a.add_device(ChainRef::Track(keys), "builtin:sampler", None, None).unwrap();
+    a.set_device_state(sampler, Some(trill_dsp::sampler::State::new(kick.to_string_lossy()).to_bytes())).unwrap();
+    pass(&mut a, &mut b, "Ada");
+    let named_by = |device: &trill_core::Device| -> Vec<String> {
+        trill_core::DeviceFiles::files(&trill_dsp::SampleFiles, device).into_iter().map(|(_, path)| path).collect()
+    };
+    let names = |session: &Session| named_by(session.project().device(sampler).unwrap());
+    assert_eq!(names(&a), [kick.to_string_lossy()], "the maker's state names its file");
+    let at_ben = names(&b);
+    let made = folder.path().join("at Ben's").join("of devices").join(sampler.0.to_string()).join("sample.wav");
+    assert_eq!(at_ben, [made.to_string_lossy()], "the other's names a place made there, by the device and the slot");
+    assert!(!format!("{:?} {}", b.problems(), b.project().to_json()).contains("Ada's samples"));
+    assert!(kick.exists(), "though the file is on this very disk, where the state said");
+
+    // The same for a device that arrives whole, and for a song that is
+    // handed over.
+    let rack = a.add_device(ChainRef::Track(keys), "builtin:sampler", None, None).unwrap();
+    a.set_device_state(rack, Some(trill_dsp::sampler::State::new(kick.to_string_lossy()).to_bytes())).unwrap();
+    let mut c = reading();
+    c.keep_received_in(Some(folder.path().join("at Cy's")));
+    c.take_song(&a.whole_song()).unwrap();
+    let at_cy = folder.path().join("at Cy's").join("of devices");
+    for (device, name) in [(sampler, "the first"), (rack, "the second")] {
+        let named = named_by(c.project().device(device).unwrap());
+        let made = at_cy.join(device.0.to_string()).join("sample.wav");
+        assert_eq!(named, [made.to_string_lossy()], "{name} names a place made at Cy's");
+    }
+    // What Ben was told he passes on as he holds it: nothing of Ada's
+    // places reaches a third through him.
+    let mut passed_on = 0;
+    for said in b.since(&trill_core::merge::Floors::default()) {
+        for op in said.change.ops {
+            if let Op::Device(_, trill_core::merge::DeviceOp::Whole(device, ..)) = op {
+                let named = named_by(&device);
+                passed_on += named.len();
+                assert!(named.iter().all(|path| !path.contains("Ada's samples")), "{named:?}");
+            }
+        }
+    }
+    assert_eq!(passed_on, 1, "the device and its file are among what is passed on");
 }
 
 #[test]

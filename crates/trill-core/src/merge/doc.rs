@@ -150,9 +150,7 @@ impl Kept {
         }
         self.stamps.retain(|(_, keys)| !keys.is_empty());
         for op in &mut self.hidden {
-            if let Op::Track(_, TrackOp::Whole(track, _)) = op {
-                **track = impersonal((**track).clone());
-            }
+            op.forget_what_is_ones_own();
         }
         self.hidden.retain(|op| !op.is_personal());
         self
@@ -1126,7 +1124,8 @@ impl Doc {
         }
         for (id, clip) in &self.clips {
             if lacks(clip.held.made) {
-                let whole = Box::new(clip.held.it.clone());
+                let mut whole = Box::new(clip.held.it.clone());
+                forget_place(&mut whole);
                 let made = changes.entry(clip.held.made).or_default();
                 made.push(Op::Clip(*id, ClipOp::Whole(whole, clip.track)));
                 // A take that was made one, and is as old as that.
@@ -1434,7 +1433,17 @@ pub(super) fn impersonal(mut track: Track) -> Track {
     if let Some(reference) = &mut track.reference {
         reference.listening = false;
     }
+    track.clips.iter_mut().for_each(forget_place);
+    track.takes.iter_mut().for_each(|take| forget_place(&mut take.clip));
     track
+}
+
+/// A clip as it is said to anyone else: without where its file lies,
+/// which is each machine's own. What the file is stays.
+pub(super) fn forget_place(clip: &mut Clip) {
+    if let ClipContent::Audio(audio) = &mut clip.content {
+        audio.path.clear();
+    }
 }
 
 fn points_since(home: &Home, points: &Points, lacks: &impl Fn(Stamp) -> bool, changes: &mut BTreeMap<Stamp, Vec<Op>>) {

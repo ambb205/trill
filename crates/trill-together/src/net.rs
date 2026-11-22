@@ -8,16 +8,23 @@
 //! thread that drives the song therefore never touches the network, and a
 //! program that is slow to hear holds nobody up but itself: one that
 //! falls too far behind is let go of.
+//!
+//! **What is said of the song never waits for a file.** A connection has
+//! two queues: what is said of the song and of who is here, and the bytes
+//! of files ([`Message::Piece`]). The thread that says takes a piece only
+//! when nothing else waits, and a piece is one frame: whatever is changed
+//! in the song goes out behind one frame at the most, however large the
+//! file that is crossing.
 
 use crate::invite::Invitation;
 use crate::point::MeetingPoint;
 use crate::wire::{MAX_MESSAGE, Message};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use trill_meet::secure::{Broken, Hearer, Sayer, secure};
 use trill_meet::{Door, Holding, Key, Meeting, No, Ticket, Turned};
@@ -105,11 +112,139 @@ pub enum Event {
 
 /// One connection, as the program that drives the song holds it.
 struct Link {
-    say: Sender<Arc<Vec<u8>>>,
+    queue: Arc<Queue>,
     /// The connection's one handle, to end it by.
     socket: Arc<TcpStream>,
-    /// How many bytes wait to be said.
-    waiting: Arc<AtomicUsize>,
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        // What waits to be said of the song is said first, where the
+        // other side takes it; the thread that says ends then.
+        self.queue.close();
+    }
+}
+
+/// What waits to be said to one program: what is said of the song, and
+/// behind all of it the bytes of files.
+#[derive(Default)]
+struct Queue {
+    waiting: Mutex<Waiting>,
+    more: Condvar,
+}
+
+#[derive(Default)]
+struct Waiting {
+    first: VecDeque<Arc<Vec<u8>>>,
+    pieces: VecDeque<Arc<Vec<u8>>>,
+    /// How many bytes of each wait.
+    first_bytes: usize,
+    piece_bytes: usize,
+    closed: bool,
+}
+
+impl Queue {
+    /// Puts `bytes` in the queue it belongs to, and returns how many bytes
+    /// wait there now. `None` for a connection that says nothing more.
+    fn put(&self, bytes: Arc<Vec<u8>>, piece: bool) -> Option<usize> {
+        let mut waiting = self.waiting.lock().unwrap();
+        if waiting.closed {
+            return None;
+        }
+        let now = match piece {
+            true => {
+                waiting.piece_bytes += bytes.len();
+                waiting.pieces.push_back(bytes);
+                waiting.piece_bytes
+            }
+            false => {
+                waiting.first_bytes += bytes.len();
+                waiting.first.push_back(bytes);
+                waiting.first_bytes
+            }
+        };
+        self.more.notify_one();
+        Some(now)
+    }
+
+    /// The next thing to say, waited for: what is said of the song while
+    /// any of it waits, and a piece of a file otherwise. `None` once the
+    /// connection is to end and nothing of the song waits (the pieces
+    /// that do are let go of).
+    fn next(&self) -> Option<Arc<Vec<u8>>> {
+        let mut waiting = self.waiting.lock().unwrap();
+        loop {
+            if let Some(bytes) = waiting.first.pop_front() {
+                waiting.first_bytes -= bytes.len();
+                return Some(bytes);
+            }
+            if waiting.closed {
+                return None;
+            }
+            if let Some(bytes) = waiting.pieces.pop_front() {
+                waiting.piece_bytes -= bytes.len();
+                return Some(bytes);
+            }
+            waiting = self.more.wait(waiting).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        let mut waiting = self.waiting.lock().unwrap();
+        waiting.closed = true;
+        waiting.pieces.clear();
+        waiting.piece_bytes = 0;
+        self.more.notify_all();
+    }
+
+    /// Nothing more is said, not what waits either.
+    fn end(&self) {
+        let mut waiting = self.waiting.lock().unwrap();
+        waiting.closed = true;
+        (waiting.first_bytes, waiting.piece_bytes) = (0, 0);
+        waiting.first.clear();
+        waiting.pieces.clear();
+        self.more.notify_all();
+    }
+
+    fn piece_bytes(&self) -> usize {
+        self.waiting.lock().unwrap().piece_bytes
+    }
+}
+
+/// A way to say bytes of files to the programs this one is connected to,
+/// for a thread that reads files and is not the one that drives the song.
+/// It can say nothing else.
+#[derive(Clone)]
+pub struct Pieces {
+    links: Arc<Mutex<HashMap<LinkId, Link>>>,
+    said: Arc<AtomicU64>,
+}
+
+impl Pieces {
+    /// Queues a piece of a file for one program, behind everything that
+    /// is said of the song. Returns how many bytes of files wait for that
+    /// program now; `None` for a connection that is gone, and for
+    /// anything that is no piece.
+    pub fn say(&self, link: LinkId, piece: &Message) -> Option<usize> {
+        if !piece.is_piece() {
+            return None;
+        }
+        let bytes = Arc::new(piece.encode());
+        let queue = self.links.lock().unwrap().get(&link)?.queue.clone();
+        self.said.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        queue.put(bytes, true)
+    }
+
+    /// How many bytes of files wait to be said to one program.
+    pub fn waiting(&self, link: LinkId) -> Option<usize> {
+        Some(self.links.lock().unwrap().get(&link)?.queue.piece_bytes())
+    }
+
+    /// How many bytes of pieces have been said, to every program together.
+    pub fn said(&self) -> u64 {
+        self.said.load(Ordering::Relaxed)
+    }
 }
 
 struct Listening {
@@ -225,8 +360,10 @@ impl Hold {
 pub struct Net {
     links: Arc<Mutex<HashMap<LinkId, Link>>>,
     /// How many bytes of messages were said, to every program together,
-    /// and how many messages: for whoever measures.
+    /// and how many messages: for whoever measures. Bytes of files are
+    /// counted apart.
     said: (u64, u64),
+    pieces_said: Arc<AtomicU64>,
     last: Arc<AtomicU64>,
     events: Receiver<Event>,
     /// What had happened when this was waited for, not yet asked for.
@@ -252,23 +389,21 @@ fn open(
 ) -> io::Result<()> {
     let link = last.fetch_add(1, Ordering::Relaxed) + 1;
     let socket = hearer.socket();
-    let (say, to_say) = channel::<Arc<Vec<u8>>>();
-    let waiting = Arc::new(AtomicUsize::new(0));
-    links.lock().unwrap().insert(link, Link { say, socket: socket.clone(), waiting: waiting.clone() });
+    let queue = Arc::new(Queue::default());
+    links.lock().unwrap().insert(link, Link { queue: queue.clone(), socket: socket.clone() });
     // Open is said before anything can be heard.
     let _ = happened.send(Event::Open { link, joined });
 
     let saying_socket = socket.clone();
     std::thread::Builder::new().name("trill-together-say".into()).spawn(move || {
-        for message in to_say {
-            let said = sayer.say(&message);
-            waiting.fetch_sub(message.len(), Ordering::Relaxed);
-            if said.is_err() {
+        while let Some(message) = queue.next() {
+            if sayer.say(&message).is_err() {
                 break;
             }
         }
-        // Everything that was to be said is said, or cannot be: the
-        // connection ends here, and the side that hears says why.
+        // Everything that was to be said of the song is said, or cannot
+        // be: the connection ends here, and the side that hears says why.
+        queue.end();
         let _ = saying_socket.shutdown(Shutdown::Both);
     })?;
 
@@ -289,7 +424,10 @@ fn open(
             if since.elapsed() > WINDOW {
                 (since, count) = (Instant::now(), 0);
             }
-            count += 1;
+            // (Bytes of a file are not counted here: whoever asked for
+            // them knows how many it asked for, and lets go of a program
+            // that sends one it did not ask for.)
+            count += u32::from(!matches!(&message, Ok(message) if message.is_piece()));
             if count > MAX_IN_WINDOW {
                 let why = "the other program said more, faster, than anything it could be doing to a song";
                 break (why.to_owned(), true);
@@ -332,8 +470,14 @@ fn address_on_the_network() -> Option<String> {
 impl Net {
     pub fn new() -> Self {
         let (happened, events) = channel();
-        let early = Vec::new();
-        Self { links: Arc::default(), said: (0, 0), last: Arc::default(), events, early, happened, listening: None }
+        let (early, pieces_said) = (Vec::new(), Arc::default());
+        let links = Arc::default();
+        Self { links, said: (0, 0), pieces_said, last: Arc::default(), events, early, happened, listening: None }
+    }
+
+    /// A way to say bytes of files from another thread: see [`Pieces`].
+    pub fn pieces(&self) -> Pieces {
+        Pieces { links: self.links.clone(), said: self.pieces_said.clone() }
     }
 
     /// Starts listening for programs that have the invitation, and
@@ -532,8 +676,13 @@ impl Net {
     }
 
     /// Says `message` to one program. Nothing waits: it is said when the
-    /// connection gets to it.
+    /// connection gets to it, and a piece of a file when nothing else
+    /// waits to be said.
     pub fn say(&mut self, link: LinkId, message: &Message) {
+        if message.is_piece() {
+            let _ = self.pieces().say(link, message);
+            return;
+        }
         self.say_encoded(&[link], Arc::new(message.encode()));
     }
 
@@ -565,8 +714,7 @@ impl Net {
             let links = self.links.lock().unwrap();
             for link in to {
                 let Some(held) = links.get(link) else { continue };
-                let full = held.waiting.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len() > MAX_WAITING;
-                if full || held.say.send(bytes.clone()).is_err() {
+                if held.queue.put(bytes.clone(), false).is_none_or(|waiting| waiting > MAX_WAITING) {
                     behind.push(*link);
                 }
             }

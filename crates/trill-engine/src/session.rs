@@ -24,6 +24,7 @@ use trill_media::MediaCache;
 
 mod beside;
 mod bin;
+mod content;
 mod controllers;
 mod cores;
 mod editors;
@@ -47,6 +48,7 @@ pub use wavetable::{TableReport, factory_tables};
 
 pub use beside::{ComingBeside, spelled as spelled_path};
 pub use bin::{Bin, REMOVED_FOLDER, Removed};
+pub use content::FileHere;
 pub use controllers::SilentInstrument;
 pub use cores::{Costs, KeepingUp, Shortfall, TrackCost};
 pub use files::file_facts;
@@ -226,6 +228,9 @@ pub struct Session {
     /// What was written down about the files the song plays when it was
     /// last saved or opened; see `session/files.rs`.
     files: trill_core::FileTable,
+    /// The folder files that come from other programs are kept in, where
+    /// whoever fetches them has said; see `session/content.rs`.
+    received: Option<std::path::PathBuf>,
     /// What is kept of the song being one that others hold too.
     sharing: together::Sharing,
 }
@@ -303,6 +308,7 @@ impl Session {
             another_song: false,
             opening,
             files: trill_core::FileTable::default(),
+            received: None,
             sharing: together::Sharing::new(),
         };
         session.replace_project(Self::blank_project("Untitled"));

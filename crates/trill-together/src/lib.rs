@@ -39,19 +39,20 @@
 //! here, and held to the model's own rules where it is taken in
 //! (`trill_core::merge::Change::checked`).
 
+pub mod files;
 mod invite;
 mod net;
 mod point;
 mod wire;
 
 pub use invite::Invitation;
-pub use net::{Event, JoinId, LinkId, Net, Reach};
+pub use net::{Event, JoinId, LinkId, Net, Pieces, Reach};
 pub use point::MeetingPoint;
 /// The meeting point's own crate: what it says to whoever it turns away,
 /// and, for a test, the meeting point itself.
 pub use trill_meet as meet;
 pub use trill_meet::secure;
-pub use wire::{MAX_HELD, MAX_MESSAGE, MAX_NAME, Message, PROTOCOL, Person, Presence};
+pub use wire::{MAX_HAVE, MAX_HELD, MAX_MESSAGE, MAX_NAME, MAX_PIECE, MAX_WANT, Message, PROTOCOL, Person, Presence};
 
 #[cfg(test)]
 mod tests {
@@ -99,6 +100,104 @@ mod tests {
         assert_eq!(link, ours);
         assert!(why.contains("Jo left"), "{why}");
         assert!(sharer.links().is_empty() && joiner.links().is_empty());
+    }
+
+    #[test]
+    fn a_piece_of_a_file_is_written_as_bytes_and_a_file_is_named_by_a_hash_and_by_nothing_else() {
+        use trill_core::files::Content;
+        let file = Content::new(&[0x5a; 32], 123_456_789_012);
+        let piece = Message::Piece { file: file.clone(), at: 99_000_000_000, bytes: (0..=255).collect() };
+        let written = piece.encode();
+        assert_eq!(written.len(), 256 + 49, "the bytes, and 49 that say which they are: not text");
+        assert_eq!(Message::decode(&written).unwrap(), piece);
+        let whole = Message::Piece { file: file.clone(), at: 0, bytes: vec![7; MAX_PIECE] };
+        assert_eq!(Message::decode(&whole.encode()).unwrap(), whole, "as much as a piece carries");
+        // No bytes, more than a piece carries, and one cut short.
+        assert!(Message::decode(&Message::Piece { file: file.clone(), at: 0, bytes: Vec::new() }.encode()).is_err());
+        let long = Message::Piece { file: file.clone(), at: 0, bytes: vec![7; MAX_PIECE + 1] };
+        assert!(Message::decode(&long.encode()).unwrap_err().contains("more than"));
+        assert!(Message::decode(&written[..40]).is_err());
+        // Written as text a piece is no message: nothing reads megabytes
+        // of numbers.
+        assert!(Message::decode(br#"{"piece":{"file":{"sha256":"00","bytes":1},"at":0,"bytes":[1,2,3]}}"#).is_err());
+
+        // The rest is text, and names a file by what it is.
+        for said in [
+            Message::Have { files: vec![file.clone()] },
+            Message::Want { file: file.clone(), at: 5, len: MAX_WANT },
+            Message::Nothing { file: file.clone() },
+        ] {
+            assert_eq!(Message::decode(&said.encode()).unwrap(), said);
+        }
+        // There is nowhere to say a path but where the hash goes, and what
+        // is said there has to be a hash.
+        for path in [r"C:\Users\Ada\Music\take.wav", "/home/ada/take.wav", "../take.wav", "", &"A".repeat(64)] {
+            let by_path = Content { sha256: path.to_owned(), bytes: 10 };
+            for said in [
+                Message::Want { file: by_path.clone(), at: 0, len: 10 },
+                Message::Nothing { file: by_path.clone() },
+                Message::Have { files: vec![file.clone(), by_path.clone()] },
+            ] {
+                let refused = Message::decode(&said.encode()).unwrap_err();
+                assert!(refused.contains("something that is no hash"), "{path:?}: {refused}");
+            }
+            // (A piece of it is a piece of the file whose hash is nothing.)
+            let piece = Message::Piece { file: by_path, at: 0, bytes: vec![1] };
+            let Message::Piece { file: of, .. } = Message::decode(&piece.encode()).unwrap() else { panic!() };
+            assert_eq!(of.sha256, "0".repeat(64));
+        }
+        let many = Message::Have { files: vec![file; MAX_HAVE + 1] };
+        assert!(Message::decode(&many.encode()).unwrap_err().contains("more than"));
+    }
+
+    #[test]
+    fn what_is_said_of_the_song_goes_ahead_of_the_bytes_of_a_file() {
+        use trill_core::files::Content;
+        let (mut sharer, mut joiner) = (Net::new(), Net::new());
+        let invitation = sharer.listen(Reach::ThisMachine, 0).unwrap();
+        joiner.join(invitation);
+        let Event::Open { link: theirs, .. } = next(&mut joiner) else { panic!("the joiner is connected") };
+        let Event::Open { link: ours, .. } = next(&mut sharer) else { panic!("and so is the sharer") };
+        // A file of 96 MB is queued for the other, piece by piece, from a
+        // thread that is not the song's; then something is said of the song.
+        const PIECES: usize = 2000;
+        let file = Content::new(&[1; 32], (PIECES * MAX_PIECE) as u64);
+        let pieces = sharer.pieces();
+        for at in 0..PIECES {
+            let piece =
+                Message::Piece { file: file.clone(), at: (at * MAX_PIECE) as u64, bytes: vec![at as u8; MAX_PIECE] };
+            assert!(pieces.say(ours, &piece).is_some());
+        }
+        assert!(pieces.say(ours, &Message::Gone { person: 1 }).is_none(), "it says pieces and nothing else");
+        assert!(pieces.waiting(ours).unwrap() > 50 * MAX_PIECE, "most of the file waits");
+        sharer.say(ours, &Message::Gone { person: 7 });
+        // The other hears it after the few pieces that were on their way,
+        // and not after the file.
+        let mut before = 0;
+        loop {
+            match next(&mut joiner) {
+                Event::Heard { message: Message::Piece { at, .. }, .. } => {
+                    assert_eq!(at, (before * MAX_PIECE) as u64, "pieces arrive in the order they were said in");
+                    before += 1;
+                }
+                Event::Heard { message: Message::Gone { person: 7 }, .. } => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(before < PIECES / 4, "the song waited for {before} of {PIECES} pieces");
+        // A connection that is ended does not say the rest of a file first.
+        let began = Instant::now();
+        sharer.close(ours, "enough");
+        loop {
+            match next(&mut joiner) {
+                Event::Heard { message: Message::Piece { .. }, .. } => before += 1,
+                Event::Lost { why, .. } => break assert!(why.contains("enough"), "{why}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(before < PIECES / 2, "{before} pieces were said before the goodbye");
+        assert!(began.elapsed() < Duration::from_secs(5));
+        let _ = theirs;
     }
 
     #[test]

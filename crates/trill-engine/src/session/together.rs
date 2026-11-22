@@ -432,15 +432,11 @@ impl Session {
         self.absorb_editor_edits();
         self.capture_device_state();
         let kept = self.doc.kept(id, &self.project).impersonal();
-        let mut song = self.project.clone();
-        song.loop_region.enabled = false;
-        for track in &mut song.tracks {
-            (track.solo, track.input) = (false, None);
-            if let Some(reference) = &mut track.reference {
-                reference.listening = false;
-            }
-        }
-        trill_core::files::write_shared(&song, &self.files, Some(&kept))
+        // Without what is one's own: one's listening, and where one has
+        // the song's files. What is written down of those files (their
+        // places, from the song's folder too) is not handed over either.
+        let song = merge::said_song(&self.project);
+        trill_core::files::write_shared(&song, &trill_core::FileTable::default(), Some(&kept))
     }
 
     /// Opens a shared song that another program handed over
@@ -450,10 +446,12 @@ impl Session {
         let Some(kept) = trill_core::files::read_shared(text)? else {
             return Err(SessionError::Io("what was handed over is not a shared song".into()));
         };
-        let (project, files) = self.read_project(text, None)?;
+        // (What it says of where files are is not read: no place is
+        // taken from another program.)
+        let (mut project, _) = self.read_project(text, None)?;
+        let kept = self.keep_places_out_of(&mut project, kept);
         let project = self.with_known_instruments(project);
         self.replace_song(project, Some(kept));
-        self.files = files;
         self.path = None;
         self.revision += 1;
         Ok(())
@@ -538,7 +536,12 @@ impl Session {
             if let Some(key) = part.op.key() {
                 // What is set here now is no longer what a notice was about.
                 self.sharing.notices.retain(|notice| notice.about != About::Key(key.clone()));
-                self.sharing.recent.push_back((stamp, key));
+                // (Where this machine has a clip's file is no work done
+                // in the clip: a clip someone else made is given a place
+                // here as it arrives.)
+                if !matches!(&key, Key::Clip(_, prop) if *prop == merge::path_prop()) {
+                    self.sharing.recent.push_back((stamp, key));
+                }
             } else {
                 for thing in part.op.makes() {
                     self.sharing.recent.push_back((stamp, thing.alive()));
@@ -650,7 +653,13 @@ impl Session {
         // tracks with what was written here that their makers had not seen.
         let mut raised: Vec<u64> = Vec::new();
         let mut recorded: Vec<(Vec<ClipId>, Vec<ClipId>)> = Vec::new();
-        for Said { change, knew } in checked {
+        // The clips of which it is said here what their file is.
+        let mut said_to_be: Vec<ClipId> = Vec::new();
+        for Said { mut change, knew } in checked {
+            // No place is taken from another program: a clip's is not in
+            // the change, and what a device's state names is given places
+            // made here.
+            self.keep_out_places(&mut change);
             let stamp = change.stamp;
             // Whether its maker had seen a change made here.
             let seen = |held: Stamp| knew.as_ref().or(floors).is_some_and(|knew| knew.has(held));
@@ -690,6 +699,11 @@ impl Session {
                     _ => None,
                 })
                 .collect();
+            said_to_be.extend(made.iter().copied());
+            said_to_be.extend(taken.won.iter().filter_map(|part| match &part.op {
+                Op::Clip(id, ClipOp::Audio(merge::AudioSet::Is(Some(_)))) => Some(*id),
+                _ => None,
+            }));
             if !made.is_empty() {
                 let earlier = |(own, _): &&(Stamp, Key)| *own < stamp && !seen(*own);
                 let unseen: Vec<ClipId> = (self.sharing.recent.iter().filter(earlier))
@@ -715,6 +729,8 @@ impl Session {
             return Ok(news);
         }
         let before = self.rederive();
+        // What arrived is given this machine's own place for what it is.
+        self.give_places(&said_to_be);
         if self.project == before {
             // Nothing of it is in the song as it stands (it is held in
             // something that was removed): there is nothing to play anew.

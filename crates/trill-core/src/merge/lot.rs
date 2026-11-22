@@ -212,7 +212,7 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
         _ => AutomationTarget::Send { track, to: other },
     };
     let kinds = [TrackKind::Normal, TrackKind::Normal, TrackKind::Group, TrackKind::Return];
-    match lot.below(53) {
+    match lot.below(54) {
         0 => Box::new(move |song| {
             song.add_track_of_kind(format!("Track {a}"), kinds[b % 4]);
             Ok(())
@@ -333,6 +333,18 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
             // (One's own: which input of the machine's a track records.)
             let input = TrackInput { channel: 1 + (b % 4) as u16, stereo: c % 2 == 0, monitor: Monitoring::Off };
             song.set_track_input(track, (a % 3 != 0).then_some(input))
+        }),
+        52 => Box::new(move |song| {
+            // What a clip's file is, as the program that has the file says
+            // once it has read it. (Of a clip of notes, nothing.)
+            let is = crate::files::FileIs::new(
+                crate::files::Content::new(&[(b % 5) as u8; 32], 1000 + (c % 4) as u64),
+                &format!("take {}.wav", c % 3),
+            );
+            if let crate::project::ClipContent::Audio(audio) = &mut song.clip_mut(clip)?.content {
+                audio.is = (a % 4 != 0).then_some(is);
+            }
+            Ok(())
         }),
         _ => Box::new(move |song| {
             song.set_key((a % 2 == 0).then(|| crate::SongKey::new((b % 12) as u8, c % 2 == 0)));

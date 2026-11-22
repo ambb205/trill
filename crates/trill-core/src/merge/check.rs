@@ -117,6 +117,9 @@ fn shape(shape: Segment) -> Result<(), Refused> {
 
 fn audio(audio: &AudioContent) -> Result<(), Refused> {
     text(&audio.path)?;
+    if audio.is.as_ref().is_some_and(|is| !is.is_well_formed()) {
+        return refused("what a file is said to be is no hash of 64 digits with a file's name");
+    }
     audio.validate()?;
     if !audio.gain_db.is_finite() {
         return refused("a clip's gain is not a number");
@@ -260,9 +263,16 @@ impl Op {
     /// one's own and nobody else's to say.
     pub fn checked(self) -> Result<Op, Refused> {
         if self.is_personal() {
-            return refused("what is one's own listening is not said to anyone else");
+            return refused(
+                "what is one's own (what one listens to, which input one records, where one has a file) is not said \
+                 to anyone else",
+            );
         }
-        Ok(match self {
+        // A thing that arrives whole says nothing of what is one's own
+        // either: where a clip's file lies is not taken from anyone.
+        let mut part = self;
+        part.forget_what_is_ones_own();
+        Ok(match part {
             Op::Song(set) => {
                 match &set {
                     SongSet::Name(name) => text(name)?,

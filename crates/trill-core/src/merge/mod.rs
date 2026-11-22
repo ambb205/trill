@@ -76,12 +76,12 @@ pub use diff::diff;
 pub use doc::{Doc, Kept, Taken, Won};
 pub use props::{
     AudioSet, Blob, ClipSet, DeviceSet, FIRST_AUDIO, FIRST_MIDI, FIRST_SET, LaneSet, MarkerSet, MidiSet, NoteSet,
-    PointSet, SongSet, TrackSet,
+    PointSet, SongSet, TrackSet, is_prop, path_prop,
 };
 
 use crate::channel::Channel;
 use crate::controllers::ControllerKind;
-use crate::project::{AutomationPoint, AutomationTarget, ChainRef, Clip, Device, Marker, Note, Track};
+use crate::project::{AutomationPoint, AutomationTarget, ChainRef, Clip, Device, Marker, Note, Project, Track};
 use crate::time::{Beats, TimeSignature};
 use crate::{ClipId, DeviceId, TrackId};
 use serde::{Deserialize, Serialize};
@@ -345,6 +345,9 @@ impl Key {
             Key::Track(_, prop) => {
                 *prop == LISTENING || *prop == TrackSet::Solo(false).prop() || *prop == TrackSet::Input(None).prop()
             }
+            // Where a clip's file lies is each machine's own: the song
+            // says what the file is.
+            Key::Clip(_, prop) => *prop == props::path_prop(),
             _ => false,
         }
     }
@@ -352,17 +355,41 @@ impl Key {
 
 impl Change {
     /// The change as it is said to another program: without what is one's
-    /// own listening and this machine's. `None` where nothing of it is
-    /// anyone else's.
+    /// own listening and this machine's, and without where any file lies.
+    /// `None` where nothing of it is anyone else's.
     pub fn impersonal(mut self) -> Option<Change> {
         self.ops.retain(|op| !op.is_personal());
         for op in &mut self.ops {
-            if let Op::Track(_, TrackOp::Whole(track, _)) = op {
-                **track = doc::impersonal((**track).clone());
-            }
+            op.forget_what_is_ones_own();
         }
         (!self.ops.is_empty()).then_some(self)
     }
+}
+
+impl Op {
+    /// A part that makes a thing whole, without what of the thing is
+    /// one's own: a track's listening and its input, and where a clip's
+    /// file lies. Whatever is said to another program goes through this,
+    /// and whatever arrives from one too ([`Op::checked`]): a path is
+    /// never said, and one that is said is never taken.
+    pub(crate) fn forget_what_is_ones_own(&mut self) {
+        match self {
+            Op::Track(_, TrackOp::Whole(track, _)) => **track = doc::impersonal((**track).clone()),
+            Op::Clip(_, ClipOp::Whole(clip, _)) => doc::forget_place(clip),
+            _ => {}
+        }
+    }
+}
+
+/// The song as it is said to another program, and as two programs that
+/// hold the same song both have it: without what is each one's own (the
+/// loop, what is soloed, which input a track records, which reference is
+/// listened to) and without where any file lies.
+pub fn said_song(song: &Project) -> Project {
+    let mut song = song.clone();
+    song.loop_region.enabled = false;
+    song.tracks = song.tracks.into_iter().map(doc::impersonal).collect();
+    song
 }
 
 impl Thing {

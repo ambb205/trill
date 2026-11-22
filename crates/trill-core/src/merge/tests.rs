@@ -9,18 +9,28 @@ use crate::project::{AudioContent, AutomationPoint, AutomationTarget, ChainRef, 
 use crate::{Channel, ClipId, DeviceId, InstrumentProfile, Reference, TrackId};
 
 /// A song as one who compares two programs' songs reads it: to the last
-/// id, and without what is each program's own.
+/// id, and without what is each program's own (its listening, and where
+/// it has the files).
 fn text(project: &Project) -> String {
-    let mut project = project.clone();
+    let mut project = said_song(project);
     project.count_ids_from(0);
     project.loop_region = crate::LoopRegion { enabled: false, start: 0.0, end: 16.0 };
-    for track in &mut project.tracks {
-        (track.solo, track.input) = (false, None);
-        if let Some(reference) = &mut track.reference {
-            reference.listening = false;
+    project.to_json()
+}
+
+/// A song as the program that holds it has it, its files where it has
+/// them: what an edit and the properties it comes to are compared by.
+fn text_here(project: &Project) -> String {
+    // (One's own listening is put back by whoever settles: of what is
+    // one's own, the places are what is looked at here.)
+    let mut here = text(project);
+    for track in &project.tracks {
+        let clips = track.clips.iter().chain(track.takes.iter().map(|take| &take.clip));
+        for audio in clips.filter_map(|clip| clip.audio()) {
+            here.push_str(&format!(" at {:?}", audio.path));
         }
     }
-    project.to_json()
+    here
 }
 
 /// One program that holds the song.
@@ -73,8 +83,8 @@ impl Peer {
         let settled = self.aside.is_empty() && derived.aside.is_empty() && self.displaced + derived.displaced == 0;
         if settled {
             assert_eq!(
-                text(&derived.project),
-                text(&self.project),
+                text_here(&derived.project),
+                text_here(&self.project),
                 "the song worked out from the properties is the song the edit made; the change was {:?}",
                 change.ops
             );
@@ -446,6 +456,85 @@ fn what_is_ones_own_listening_is_a_change_that_is_never_anyone_elses() {
     }
     assert!(!b.project.track(keys).unwrap().solo && !b.project.loop_region.enabled);
     assert!(a.project.track(keys).unwrap().solo && a.project.loop_region.enabled, "and one's own stays one's own");
+}
+
+/// Some bytes a file might be, for a test that needs a content.
+fn some_content(of: u8, name: &str) -> crate::files::FileIs {
+    crate::files::FileIs::new(crate::files::Content::new(&[of; 32], 1000 + u64::from(of)), name)
+}
+
+#[test]
+fn where_a_file_lies_is_said_to_nobody_and_taken_from_nobody_and_what_it_is_is_the_songs() {
+    let (mut a, mut b) = two();
+    let bass = find_track(&a.project, "Bass");
+    // Someone drops a file of theirs into the song.
+    let theirs = "C:/Users/Ada/Music/Night session/vocal take.wav";
+    let made = a.edit(|song| song.add_audio_clip(bass, "Vocal", 16.0, 4.0, AudioContent::new(theirs))).unwrap();
+    let clip = find_clip(&a.project, "Vocal");
+    let said = made.clone().impersonal().expect("the clip is the song's");
+    let written = serde_json::to_string(&said).unwrap();
+    for part in ["Ada", "Night session", "vocal take"] {
+        assert!(!written.contains(part), "nothing of the path is said: {written}");
+    }
+    b.take(&said);
+    assert_eq!(b.project.clip(clip).unwrap().audio().unwrap().path, "", "the other has the clip, and no place for it");
+    assert_eq!(a.project.clip(clip).unwrap().audio().unwrap().path, theirs, "and its maker has it where it is");
+
+    // Once its maker has read the file, what it is is said, and is the song's.
+    let is = some_content(7, theirs);
+    assert_eq!((is.name.as_str(), is.kind()), ("vocal take.wav", "wav"));
+    let told = a.write(vec![Op::Clip(clip, ClipOp::Audio(AudioSet::Is(Some(is.clone()))))]);
+    b.take(&told.clone().impersonal().expect("what a file is is the song's"));
+    assert_eq!(b.project.clip(clip).unwrap().audio().unwrap().is, Some(is.clone()));
+    assert_eq!(a.text(), b.text(), "the same song, each with its files where it has them");
+
+    // Each gives the clip a place of its own; neither says so.
+    let here = "D:/Trill/received/0707.wav";
+    let placed = b.write(vec![Op::Clip(clip, ClipOp::Audio(AudioSet::Path(here.into())))]);
+    assert!(placed.clone().impersonal().is_none(), "where one has a file is said to nobody");
+    assert!(placed.checked(0).is_err(), "and a program that is told a path refuses it");
+    let moved = a.edit(|song| {
+        song.relink(
+            &[crate::Relink { place: crate::FilePlace::Clip(clip), path: "E:/x.wav".into() }],
+            &crate::files::NoDeviceFiles,
+        )
+    });
+    assert!(moved.unwrap().impersonal().is_none(), "nor is a file one has found again");
+    assert_eq!(b.project.clip(clip).unwrap().audio().unwrap().path, here);
+    assert_eq!(a.text(), b.text());
+
+    // Nothing that is handed over names a place: not what a program that
+    // lacks everything is handed, not what a file keeps of what was
+    // removed as another program is handed it.
+    a.edit(|song| song.remove_clip(clip).map(drop)).unwrap();
+    let all = serde_json::to_string(&a.doc.since(&Floors::default())).unwrap();
+    let kept = a.doc.kept(SongId(1), &a.project);
+    assert!(serde_json::to_string(&kept).unwrap().contains("E:/x.wav"), "one's own file keeps one's own places");
+    let handed = serde_json::to_string(&kept.impersonal()).unwrap();
+    let song = said_song(&a.project).to_json();
+    for (what, text) in [("what one who lacks everything is handed", all), ("what is kept", handed), ("the song", song)]
+    {
+        for part in ["Ada", "E:/x.wav", "loop.wav"] {
+            assert!(!text.contains(part), "{what} names a place ({part}): {text}");
+        }
+        assert!(what == "the song" || text.contains(&is.sha256), "{what} says what the file is");
+    }
+
+    // A clip that arrives whole with a place in it is taken without the
+    // place, whoever said it; and what a file is has to be written as one.
+    let mut planted = a.doc.held_clip(clip).unwrap().1;
+    planted.id = ClipId(987_654);
+    if let crate::project::ClipContent::Audio(audio) = &mut planted.content {
+        audio.path = "C:/Users/Ben/Documents/passwords.txt".into();
+    }
+    let arrives = Op::Clip(planted.id, ClipOp::Whole(Box::new(planted), bass)).checked().unwrap();
+    assert!(matches!(&arrives, Op::Clip(_, ClipOp::Whole(clip, _)) if clip.audio().unwrap().path.is_empty()));
+    let mut bad = is.clone();
+    bad.name = "../../x.wav".into();
+    assert!(Op::Clip(clip, ClipOp::Audio(AudioSet::Is(Some(bad)))).checked().is_err(), "a name that is a path");
+    let mut bad = is;
+    bad.sha256 = "C:/Windows/win.ini".into();
+    assert!(Op::Clip(clip, ClipOp::Audio(AudioSet::Is(Some(bad)))).checked().is_err(), "a hash that is none");
 }
 
 // ---- ids ---------------------------------------------------------------------

@@ -40,10 +40,12 @@
 //! are in the settings and nowhere else; the key is said to nobody, not
 //! by [`Runtime::meeting_point`] either.
 
+use crate::files::{Files, Heard, OnItsWay, Tended};
 use crate::{Runtime, SharedSession};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -156,6 +158,8 @@ pub struct Together {
     pub meeting: Option<(String, Meeting)>,
     /// The connections that were lost and are being asked for again.
     pub away: Vec<Away>,
+    /// The files of the song that are on their way from other programs.
+    pub files: Vec<OnItsWay>,
 }
 
 impl Together {
@@ -204,6 +208,10 @@ pub(crate) struct Sharing {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     session: SharedSession,
+    /// The folder files from other programs are kept in, and whether it
+    /// is one for this run that goes with it.
+    received: PathBuf,
+    for_the_run: bool,
 }
 
 /// A number by lot that a number in JSON holds exactly.
@@ -341,6 +349,8 @@ struct Driver {
     through: Option<(MeetingPoint, Meeting)>,
     presence_seq: u64,
     presence_said: Option<(Presence, Instant)>,
+    /// The song's files: what is handed out, and what is on its way.
+    files: Files,
 }
 
 impl Driver {
@@ -367,6 +377,7 @@ impl Driver {
         self.again.clear();
         self.through = None;
         self.epoch = None;
+        self.files.forget();
         self.session.lock().hear_changes(false);
     }
 
@@ -608,6 +619,60 @@ impl Driver {
                 }
             }
             Message::Bye { .. } => {}
+            // The song's files. Nothing of them is said between programs
+            // that do not hold the same song yet: whatever is asked for
+            // then is not here.
+            Message::Want { file, .. } if !synced => self.net.say(link, &Message::Nothing { file }),
+            Message::Have { .. } | Message::Nothing { .. } if !synced => {}
+            said @ (Message::Have { .. } | Message::Want { .. } | Message::Nothing { .. } | Message::Piece { .. }) => {
+                match self.files.heard(link, said) {
+                    Heard::Fine => {}
+                    Heard::Answer(answer) => self.net.say(link, &answer),
+                    Heard::LetGo(why) => self.let_go(link, why),
+                }
+            }
+        }
+    }
+
+    /// Lets go of a program that said what nobody who holds the song with
+    /// this one says, in a sentence.
+    fn let_go(&mut self, link: LinkId, why: &str) {
+        self.say(format!("{} is no longer connected: their program {why}.", self.name_of(link)));
+        self.net.close(link, why);
+    }
+
+    /// Looks after the song's files: has them looked at on this disk
+    /// when the song has changed, and does what that and what arrived
+    /// come to. Nothing here reads or writes a file: two threads of the
+    /// files' own do.
+    fn tend_files(&mut self) {
+        let revision = self.session.lock().revision();
+        if self.files.look_is_due(revision) {
+            let (files, received) = {
+                let session = self.session.lock();
+                (session.files_here(), session.received_in())
+            };
+            self.files.look(revision, files, received);
+        }
+        let mut synced: Vec<LinkId> =
+            self.peers.iter().filter(|(_, peer)| peer.synced).map(|(link, _)| *link).collect();
+        synced.sort_unstable();
+        let names: HashMap<LinkId, String> = self.peers.keys().map(|link| (*link, self.name_of(*link))).collect();
+        let name = |link: LinkId| names.get(&link).cloned().unwrap_or_else(|| "Someone".to_owned());
+        let mut here = Vec::new();
+        for tended in self.files.tend(&synced, &name) {
+            match tended {
+                Tended::Say(link, message) => self.net.say(link, &message),
+                Tended::Tell(sentence) => self.say(sentence),
+                Tended::SayFile(clip, path, is) => {
+                    self.session.lock().say_file(clip, &path, is);
+                }
+                Tended::Here(path) => here.push(path),
+                Tended::LetGo(link, why) => self.let_go(link, why),
+            }
+        }
+        if !here.is_empty() {
+            self.session.lock().files_are_here(&here);
         }
     }
 
@@ -657,6 +722,7 @@ impl Driver {
                 }
                 Event::Heard { link, message } => self.heard(link, message),
                 Event::Lost { link, why, told } => {
+                    self.files.lost(link);
                     let Some(peer) = self.peers.remove(&link) else { continue };
                     // Whoever was heard of through it is gone with it.
                     let gone: Vec<u64> = self
@@ -867,6 +933,10 @@ impl Driver {
             away: (self.again.iter())
                 .map(|again| Away { name: again.name.clone(), since: again.since, tries: again.tries })
                 .collect(),
+            files: self.files.on_their_way(&|link| {
+                let person = self.peers.get(&link).and_then(|peer| peer.person.as_ref());
+                person.map_or_else(|| "Someone".to_owned(), |person| person.name.clone())
+            }),
         };
         if status != shared.status {
             shared.status = Together { revision: shared.status.revision + 1, ..status };
@@ -882,6 +952,7 @@ impl Driver {
                 // here is said once a tick, which is what thins a drag.
                 self.events();
                 self.ask_again();
+                self.tend_files();
                 if told.elapsed() >= TICK {
                     self.tell();
                     told = Instant::now();
@@ -927,7 +998,7 @@ fn presence_of(here: &Here) -> Presence {
 }
 
 impl Sharing {
-    pub fn new(session: SharedSession, name: Option<String>) -> Self {
+    pub fn new(session: SharedSession, name: Option<String>, received: PathBuf, for_the_run: bool) -> Self {
         let name = name.filter(|name| !name.trim().is_empty()).unwrap_or_else(name_on_this_machine);
         let me = Person { id: lot(), name, colour: 0 };
         let status = Together {
@@ -940,6 +1011,7 @@ impl Sharing {
             said: (0, 0),
             meeting: None,
             away: Vec::new(),
+            files: Vec::new(),
         };
         let shared =
             Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
@@ -948,6 +1020,8 @@ impl Sharing {
             stop: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
             session,
+            received,
+            for_the_run,
         }
     }
 
@@ -958,10 +1032,13 @@ impl Sharing {
         match &*thread {
             Some(running) => running.thread().unpark(),
             None => {
+                let net = Net::new();
+                let files = Files::new(net.pieces(), self.received.clone())
+                    .map_err(|error| format!("no thread could be started for the song's files: {error}"))?;
                 let driver = Driver {
                     session: self.session.clone(),
                     shared: self.shared.clone(),
-                    net: Net::new(),
+                    net,
                     peers: HashMap::new(),
                     people: Vec::new(),
                     epoch: None,
@@ -970,6 +1047,7 @@ impl Sharing {
                     through: None,
                     presence_seq: 0,
                     presence_said: None,
+                    files,
                 };
                 let stop = self.stop.clone();
                 let started = std::thread::Builder::new().name("trill-together".into()).spawn(move || driver.run(stop));
@@ -987,6 +1065,10 @@ impl Drop for Sharing {
         if let Some(thread) = self.thread.lock().take() {
             thread.thread().unpark();
             let _ = thread.join();
+        }
+        // A program that keeps nothing keeps no file it was handed.
+        if self.for_the_run {
+            let _ = std::fs::remove_dir_all(&self.received);
         }
     }
 }

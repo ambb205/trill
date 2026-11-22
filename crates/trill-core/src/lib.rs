@@ -27,7 +27,7 @@ pub mod travel;
 
 pub use channel::Channel;
 pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
-pub use files::{DeviceFiles, FilePlace, FileTable, FileUse, FolderMove, KnownFile, Relink};
+pub use files::{Content, DeviceFiles, FileIs, FilePlace, FileTable, FileUse, FolderMove, KnownFile, Relink};
 pub use ids::{ClipId, DeviceId, TrackId};
 pub use instrument::{
     Articulation, Drum, DrumKey, InstrumentProfile, KeySound, KnownInstrument, Lasts, Reading, Role, SampledInstrument,
