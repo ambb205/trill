@@ -36,7 +36,18 @@ for program in trill.exe trill-mcp.exe; do
     fi
 done
 
-rm -rf "$out"
+# Only a folder this script made is cleared. One that was named by mistake
+# (a desktop, a folder of songs) is somebody's, and is left as it is.
+if [ -e "$out" ]; then
+    if [ -d "$out" ] && [ -z "$(ls -A "$out")" ]; then
+        :
+    elif [ -f "$out/READ ME.txt" ] && head -n 1 "$out/READ ME.txt" | grep -q '^Trill, a build to work in one song together'; then
+        rm -rf "$out"
+    else
+        echo "friend-bundle: $out is there and is no bundle this script made: name a folder that is not there yet" >&2
+        exit 1
+    fi
+fi
 mkdir -p "$out/licences"
 cp "$built/trill.exe" "$built/trill-mcp.exe" "$out/"
 cp "$root/LICENSE" "$out/licences/Trill (GPL-3.0-or-later).txt"
