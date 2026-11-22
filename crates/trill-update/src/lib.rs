@@ -36,6 +36,7 @@
 
 pub mod place;
 pub mod release;
+pub mod scripted;
 pub mod updates;
 mod version;
 

@@ -16,6 +16,8 @@ serde_json.workspace = true
 # written here. Built on the curve the meeting point's handshake brings in
 # already (BSD-3-Clause); without its tables, which only make it faster.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# The checksum of what a test publishes. In the tree already, through trill-fetch.
+sha2 = "0.11"
 # A new key, from the system's own source. In the tree already.
 getrandom = "0.3"
 

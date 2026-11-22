@@ -216,7 +216,7 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx) {
     let words = "Look when Trill starts";
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, words));
     text::paint(ui.painter(), row, Align2::LEFT_CENTER, theme.text.body, words, theme.ink);
-    let chip = Chip::new(if on { "On" } else { "Off" }, on).dimmed(busy).named("Look when Trill starts");
+    let chip = Chip::new(if on { "On" } else { "Off" }, on).dimmed(busy).named("Whether Trill looks when it starts");
     let width = chip.width(ui, theme);
     let rect =
         Rect::from_min_size(pos2(row.right() - width, row.center().y - theme.metric.chip / 2.0), vec2(width, theme.metric.chip));

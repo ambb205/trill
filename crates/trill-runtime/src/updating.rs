@@ -87,6 +87,14 @@ impl Runtime {
     /// looks only when it is asked.
     pub fn look_for_updates_as_usual(&self) {
         self.look_for_updates_when_asked();
+        self.look_as_a_start_does();
+    }
+
+    /// Looks whether a newer Trill is out, on a thread of its own, where
+    /// the settings say Trill does at a start, where this run keeps what
+    /// it learns, and where it has not looked lately. What a start does
+    /// once it was said who fetches.
+    pub fn look_as_a_start_does(&self) {
         if self.settings().updates.look_at_start && self.settings_folder().is_some() {
             self.updating.look_if_due(LOOK_EVERY);
         }

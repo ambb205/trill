@@ -584,6 +584,7 @@ mod tests {
         match parse(args.iter().map(|arg| arg.to_string()))? {
             Parsed::Run(cli) => Ok(*cli),
             Parsed::Help => bail!("help requested"),
+            Parsed::Version => bail!("the version requested"),
         }
     }
 
