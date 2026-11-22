@@ -1050,6 +1050,16 @@ impl Runtime {
         self.update_settings(|settings| settings.together.meeting_point = Some(set)).map_err(|error| error.to_string())
     }
 
+    /// Reads a meeting point as its keeper wrote it, without keeping
+    /// it: the address as it will be shown, or the sentence that says
+    /// what is wrong with it. `None` for the key reads the address alone
+    /// (for where the key that is kept stays).
+    pub fn read_meeting_point(address: &str, key: Option<&str>) -> Result<String, String> {
+        // (A key of nothing but zeros is spelt right, and is nobody's.)
+        let spelt_right = "0000-0000-0000-0000-0000-0000-0000-0000-0000-0000";
+        Ok(MeetingPoint::parse(address, key.unwrap_or(spelt_right))?.shown())
+    }
+
     /// Forgets the meeting point and its key.
     pub fn forget_meeting_point(&self) -> Result<(), String> {
         self.update_settings(|settings| settings.together.meeting_point = None).map_err(|error| error.to_string())

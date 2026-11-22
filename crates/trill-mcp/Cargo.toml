@@ -34,6 +34,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tokio-util = "0.7"
 
 [dev-dependencies]
+# A meeting point on the loopback, for the test of sharing through one.
+trill-meet.workspace = true
 # Without rmcp's "reqwest" feature, which adds TLS (and a C crypto library
 # that takes minutes to build): the tests only talk to localhost.
 rmcp = { version = "3.10", features = ["client", "transport-streamable-http-client-reqwest"] }

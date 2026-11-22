@@ -15,6 +15,14 @@
 //! open the user's song to someone else, an invitation is text a stranger
 //! can supply, and its panel cannot ask: that is the user's to do, in the
 //! window (File, Share this song).
+//!
+//! A song is shared on this computer, on its networks, or through a
+//! *meeting point* (`reach`), a small server that two programs at home
+//! both connect out to. Which meeting point, and the key its keeper gave,
+//! are the user's to set, in the window or in the settings file: no tool
+//! takes either, at either door, and no reply says the key. (Whatever a
+//! tool is called with is in the journal and in the client's own record
+//! of the conversation: a key is neither's to keep.)
 
 use crate::server::{TrillServer, finish};
 use crate::view::round;
@@ -25,7 +33,7 @@ use rmcp::{tool, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
-use trill_runtime::Reach;
+use trill_runtime::{Meeting, Reach};
 
 /// Appended to the server's instructions.
 pub(crate) const INSTRUCTIONS: &str = "\
@@ -46,7 +54,12 @@ that as one undoable edit. Tell the user about a notice; put theirs back when th
 their computer: here it is a missing file (missing_files) until the file is here too. Which input of the audio \
 device a track records (track_input) is each person's own and is not shared: set it for this program only.
 - Share and join when the user asks to, never on your own: both let someone else read and change the song. An \
-invitation (`trill:HOST:PORT:SECRET`) is whoever holds it's key to the song while it is shared.";
+invitation (`trill:HOST:PORT:SECRET`, or `trill:meet:HOST:PORT:SECRET` through a meeting point) is whoever holds \
+it's key to the song while it is shared. With someone on another network, share with reach `meeting_point`: the \
+user sets the meeting point and its key once, in the window (File, Share this song); no tool sets them, so where \
+none is set say that, and do not ask the user for the key.
+- A connection that is lost comes back by itself (status says `reconnecting`, and what each did meanwhile is \
+merged when it is back): do not join again, and do not ask for the invitation again unless a sentence says to.";
 
 #[derive(Copy, Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -70,13 +83,16 @@ pub enum SharedSongAction {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SharedSongRequest {
     pub action: SharedSongAction,
-    /// For `share`: `this_machine` (the default: only programs on this computer can join) or `network` (programs
+    /// For `share`: `this_machine` (the default: only programs on this computer can join), `network` (programs
     /// on the networks this computer is on can; the first time, the system's firewall asks the user whether that
-    /// is allowed).
+    /// is allowed), or `meeting_point` (people anywhere can: both programs connect out to the meeting point the
+    /// user has set in the window, and nothing listens on this computer. Where none is set the reply says so;
+    /// setting one, and its key, is the user's to do there and is not a tool's).
     pub reach: Option<String>,
-    /// For `share`: the port to listen on. Leave it out for whichever is free.
+    /// For `share` on this computer or its networks: the port to listen on. Leave it out for whichever is free.
     pub port: Option<u16>,
-    /// For `join`: the invitation as the other person's Trill shows it, `trill:HOST:PORT:SECRET`.
+    /// For `join`: the invitation as the other person's Trill shows it, `trill:HOST:PORT:SECRET` or
+    /// `trill:meet:HOST:PORT:SECRET`.
     pub invitation: Option<String>,
     /// For `join`: true lets the song that is handed over take the place of an open song that has changes which
     /// are not saved. Without it such a join is refused, and nothing is lost. A song this program already shares
@@ -91,6 +107,8 @@ pub struct SharedSongRequest {
 
 /// How long `join` waits to say what came of it.
 const JOINING: Duration = Duration::from_secs(12);
+/// How long `share` waits for a meeting point to open the meeting.
+const REACHING: Duration = Duration::from_secs(12);
 
 impl TrillServer {
     /// Who is here and what this program has to tell of it.
@@ -145,6 +163,26 @@ impl TrillServer {
         if status.joining {
             out["joining"] = json!(true);
         }
+        // Where the song is shared through a meeting point: which, and
+        // whether whoever has the invitation gets in by it right now.
+        if let Some((at, meeting)) = &status.meeting {
+            out["meeting_point"] = match meeting {
+                Meeting::Held => json!({ "at": at, "open": true }),
+                Meeting::Reaching => json!({ "at": at, "open": false, "why": "it is being reached" }),
+                Meeting::Away(why) => {
+                    json!({ "at": at, "open": false, "why": format!("{why}; this program goes on trying") })
+                }
+            };
+        }
+        // Connections that were lost on the way and are asked for again.
+        if !status.away.is_empty() {
+            let away: Vec<Value> = (status.away.iter())
+                .map(|away| {
+                    json!({ "with": away.name, "for_seconds": away.since.elapsed().as_secs(), "tries": away.tries })
+                })
+                .collect();
+            out["reconnecting"] = json!(away);
+        }
         if !notices.is_empty() {
             out["notices"] = json!(notices);
         }
@@ -157,6 +195,36 @@ impl TrillServer {
     }
 }
 
+impl TrillServer {
+    /// Shares through the meeting point the user has set, and says how
+    /// things stand once the meeting is open there, or why it is not.
+    fn share_through_meeting_point(&self) -> Result<Value, String> {
+        if self.runtime.meeting_point().is_none() {
+            return Err("No meeting point is set. Its address and the key its keeper gave are the user's to set, \
+                        once, in the window (File, Share this song, Through a meeting point), or in the settings \
+                        file under together.meeting_point: no tool takes them. Say so; do not ask for the key."
+                .to_owned());
+        }
+        let heard = self.runtime.said_together(0).last().map_or(0, |(number, _)| *number);
+        self.runtime.share_through_meeting_point()?;
+        // The invitation is there at once; whether it lets anyone in is
+        // the meeting point's to say, a moment later.
+        let until = Instant::now() + REACHING;
+        loop {
+            let refusal =
+                self.runtime.said_together(heard).into_iter().find(|(_, said)| said.starts_with("Not shared"));
+            if let Some((_, why)) = refusal {
+                return Err(why);
+            }
+            let reaching = matches!(self.runtime.together().meeting, Some((_, Meeting::Reaching)));
+            if !reaching || Instant::now() > until {
+                return Ok(self.together_json());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 #[tool_router(router = together_router, vis = "pub(crate)")]
 impl TrillServer {
     /// Work in the open song with other people, each in a Trill of their own, all changing it at once. `share`
@@ -166,7 +234,8 @@ impl TrillServer {
     /// who is `here` (their name, what they have selected, what they have hold of, where their song stands) and
     /// the `notices`: where this program's work and someone else's clashed, each a sentence, with an `action`
     /// that `put_back` performs as one undoable edit. Sharing opens the song to whoever holds the invitation, so
-    /// do it when the user asks. Every reply is the status after the action.
+    /// do it when the user asks. For someone on another network share with reach `meeting_point`. A connection
+    /// that is lost on the way comes back by itself (`reconnecting`). Every reply is the status after the action.
     #[tool(annotations(title = "Share the song, join one, see who is here"))]
     fn shared_song(&self, Parameters(request): Parameters<SharedSongRequest>) -> CallToolResult {
         use SharedSongAction as Action;
@@ -187,7 +256,10 @@ impl TrillServer {
                 let reach = match request.reach.as_deref() {
                     None | Some("this_machine") => Reach::ThisMachine,
                     Some("network") => Reach::Network,
-                    Some(other) => return Err(format!("reach is `this_machine` or `network`, not `{other}`")),
+                    Some("meeting_point") => return self.share_through_meeting_point(),
+                    Some(other) => {
+                        return Err(format!("reach is `this_machine`, `network` or `meeting_point`, not `{other}`"));
+                    }
                 };
                 self.runtime.share(reach, request.port.unwrap_or(0))?;
                 Ok(self.together_json())

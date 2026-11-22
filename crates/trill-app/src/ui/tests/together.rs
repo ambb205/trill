@@ -6,6 +6,7 @@
 use super::*;
 use crate::ui::TogetherScene;
 use trill_core::merge::{Change, ClipOp, ClipSet, Floors, Op, Said, Stamp, TrackOp, TrackSet};
+use trill_runtime::{Meeting, MeetingPointSet};
 
 /// A window on a runtime of its own whose person goes by `name`.
 fn window(name: &str, setup: impl FnOnce(&mut Session)) -> Harness {
@@ -217,4 +218,122 @@ fn company_that_is_made_up_is_shown_as_company_is() {
     let seen = &harness.app.live().together;
     let jo = &seen.people[0];
     assert!(seen.on_track(jo.tracks[0]).is_some() && seen.on_clip(jo.clips[0]).is_some());
+}
+
+/// A meeting point on this machine, as its keeper would hand it over.
+fn meeting_point_on(listener: std::net::TcpListener, key: &trill_meet::Key) -> trill_meet::Server {
+    let keys = trill_meet::Keys::of(vec![trill_meet::keys::Given::of(key, "Ada")]);
+    let log: trill_meet::Log = std::sync::Arc::new(|_: &str| {});
+    trill_meet::Server::start(vec![listener], keys, trill_meet::Limits::default(), log).unwrap()
+}
+
+/// About 8 connections.
+#[test]
+fn a_song_is_shared_through_a_meeting_point_set_in_the_panel_and_a_lost_link_is_said_until_it_is_back() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (at, key) = (format!("127.0.0.1:{port}"), trill_meet::Key::new().unwrap());
+    let point = meeting_point_on(listener, &key);
+    let mut ada = window("Ada", |session| {
+        two_tracks(session);
+    });
+    let mut ben = window("Ben", |_| {});
+
+    // Ada shares from the File menu, through a meeting point. None is
+    // set: the panel asks for what its keeper gave, once.
+    ada.click_label("File");
+    ada.click_label("Share this song");
+    ada.idle(2);
+    ada.click_label("A meeting point");
+    ada.idle(2);
+    assert!(ada.is_on("A meeting point") && !ada.is_on("This computer only"));
+    // What is no meeting point is said, and nothing is kept of it.
+    ada.click_label("Meeting point's address");
+    ada.type_text("https://meet.example.org");
+    ada.click_label("Meeting point's key");
+    ada.clipboard = Some(key.to_string());
+    ada.paste();
+    let key_on_screen = |ada: &Harness| ada.labels.iter().any(|(label, _)| label.contains(&key.to_string()[10..]));
+    assert!(!key_on_screen(&ada), "the key is shown to nobody, as it is pasted either");
+    ada.click_label("Keep this meeting point");
+    ada.idle(2);
+    assert!(ada.app.state().together.refusal.as_deref().is_some_and(|why| why.contains("meet.example.org:443")));
+    assert!(ada.app.state().together.point_key.is_empty(), "and the key has left the window with the click");
+    assert_eq!(ada.runtime.meeting_point(), None);
+    // The address its keeper wrote, and the key again.
+    ada.app.state_mut().together.point_address.clear();
+    ada.click_label("Meeting point's address");
+    ada.type_text(&at);
+    ada.click_label("Meeting point's key");
+    ada.paste();
+    ada.click_label("Keep this meeting point");
+    ada.wait_until("it is kept", |ada| ada.runtime.meeting_point().is_some());
+    assert_eq!(ada.runtime.meeting_point(), Some(MeetingPointSet { address: at.clone(), has_key: true }));
+    ada.idle(2);
+    assert!(ada.is_on_screen(&format!("Meeting point: {at}")) && !key_on_screen(&ada));
+
+    // Shared through it: the invitation carries the meeting point's
+    // address, and a moment on the meeting is open there.
+    ada.click_label("Share");
+    ada.wait_until("the meeting is open", |ada| ada.app.live().together.meeting == Some((at.clone(), Meeting::Held)));
+    let invitation = ada.app.live().together.invitation.clone().unwrap();
+    assert!(invitation.starts_with(&format!("trill:meet:{at}:")), "{invitation}");
+    assert!(ada.is_on_screen(&format!("Invitation: {invitation}")) && !key_on_screen(&ada));
+    ada.key(Modifiers::NONE, Key::Escape);
+
+    // Ben joins with the invitation and nothing else.
+    ben.click_label("File");
+    ben.click_label("Join a song");
+    ben.idle(2);
+    ben.clipboard = Some(invitation.clone());
+    ben.paste();
+    ben.click_label("Join");
+    both_until(&mut ada, &mut ben, "Ben has the song and each sees the other", |ada, ben| {
+        song(ada) == song(ben) && ada.app.live().together.people.len() == 1 && ben.app.live().together.people.len() == 1
+    });
+    assert!(ada.is_on_screen("Shared song: Here: Ben") && ben.is_on_screen("Shared song: Here: Ada"));
+    ben.key(Modifiers::NONE, Key::Escape);
+
+    // The meeting point goes down. Nobody left: each status bar says what
+    // is away and that it is being tried again, for as long as it is.
+    point.stop();
+    both_until(&mut ada, &mut ben, "each says what is away", |ada, ben| {
+        ada.is_on_screen("Shared song: Shared \u{00B7} nobody else is here \u{00B7} meeting point away, trying again")
+            && ben.is_on_screen("Shared song: Connection to Ada lost \u{00B7} trying again")
+    });
+    let said = |harness: &Harness| harness.app.state().toasts.texts().join(" | ");
+    assert!(said(&ben).contains("The connection to Ada was lost"), "{}", said(&ben));
+    assert!(said(&ada).contains(&format!("The meeting point {at} is away")), "{}", said(&ada));
+    // Each goes on meanwhile.
+    ada.session.lock().edit(|project| project.set_tempo(98.0)).unwrap();
+    ben.session.lock().edit(|project| Ok(project.add_track("Ben's"))).unwrap();
+
+    // It is back, where it was: nobody does anything, and both sets of
+    // work are in the song.
+    let _point = meeting_point_on(std::net::TcpListener::bind(("127.0.0.1", port)).unwrap(), &key);
+    both_until(&mut ada, &mut ben, "they are in the song together again", |ada, ben| {
+        song(ada) == song(ben)
+            && ada.is_on_screen("Shared song: Here: Ben")
+            && ben.is_on_screen("Shared song: Here: Ada")
+    });
+    assert_eq!((ada.project().tracks.len(), ben.project().tempo), (3, 98.0));
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+    assert_eq!(ada.app.live().together.invitation.as_deref(), Some(invitation.as_str()));
+}
+
+#[test]
+fn company_through_a_meeting_point_and_a_connection_that_was_lost_are_shown_as_they_are() {
+    let options = UiOptions { together_scene: Some(TogetherScene::Meeting), ..Default::default() };
+    let (mut harness, ..) = with_three_tracks(options);
+    harness.idle(3);
+    harness.click_label("Shared song: Here: Jo");
+    harness.idle(2);
+    assert!(harness.labels.iter().any(|(label, _)| label.starts_with("Invitation: trill:meet:meet.example.org:443:")));
+
+    let options = UiOptions { together_scene: Some(TogetherScene::Lost), ..Default::default() };
+    let (mut harness, ..) = with_three_tracks(options);
+    harness.idle(3);
+    harness.click_label("Shared song: Connection to Jo lost \u{00B7} trying again");
+    harness.idle(2);
+    assert!(harness.is_on_screen("Jo: the connection was lost; Trill has asked for it 3 times and goes on"));
 }

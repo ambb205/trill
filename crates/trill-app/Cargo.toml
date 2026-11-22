@@ -47,6 +47,8 @@ raw-window-handle = "0.6"
 [dev-dependencies]
 # Sample packs for the interaction tests, away from the user's own.
 tempfile = "3"
+# A meeting point on the loopback, for the test of sharing through one.
+trill-meet.workspace = true
 
 [build-dependencies]
 # Embeds the icon in the Windows executable.
