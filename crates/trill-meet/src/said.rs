@@ -4,9 +4,9 @@
 //! connected, which says what they came for:
 //!
 //! ```text
-//! trill-meet 1 open KEY-ID      someone with a key, to hold a meeting open
-//! trill-meet 1 join MEETING     someone with an invitation, to be let in
-//! trill-meet 1 take TICKET      the holder of a meeting, taking a knock up
+//! trill-meet 2 open KEY-ID      someone with a key, to hold a meeting open
+//! trill-meet 2 join MEETING     someone with an invitation, to be let in
+//! trill-meet 2 take TICKET      the holder of a meeting, taking a knock up
 //! ```
 //!
 //! and the meeting point answers with a line. What follows depends on
@@ -55,7 +55,10 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 /// The version of what is said here: the number in every first line.
-pub const VERSION: u32 = 1;
+///
+/// 2: the answer to a holder that says it is there carries how much its
+/// key may still pass today, and for how long that day goes on.
+pub const VERSION: u32 = 2;
 /// The most bytes a line is.
 pub const MAX_LINE: usize = 160;
 /// The most bytes one of the few words said over a holder's connection is.
@@ -113,7 +116,12 @@ pub enum Word {
     Close,
     Ok,
     No(No),
-    Pong,
+    /// The meeting point: so are you, and your key may pass `left` more
+    /// bytes in the `seconds` that are left of its day.
+    Pong {
+        left: u64,
+        seconds: u64,
+    },
     /// The meeting point: someone asked for your meeting.
     Knock(Ticket),
 }
@@ -126,7 +134,7 @@ impl Word {
             Word::Close => "close".to_owned(),
             Word::Ok => "ok".to_owned(),
             Word::No(no) => format!("no {}", no.word()),
-            Word::Pong => "pong".to_owned(),
+            Word::Pong { left, seconds } => format!("pong {left} {seconds}"),
             Word::Knock(ticket) => format!("knock {ticket}"),
         }
     }
@@ -143,7 +151,15 @@ impl Word {
             ("close", "") => Word::Close,
             ("ok", "") => Word::Ok,
             ("no", of) => Word::No(No::read(of)?),
-            ("pong", "") => Word::Pong,
+            ("pong", of) => {
+                let (left, seconds) = of.split_once(' ')?;
+                // (Numbers as they are written here, and no others.)
+                let number = |text: &str| match text.len() <= 20 && text.bytes().all(|digit| digit.is_ascii_digit()) {
+                    true => text.parse::<u64>().ok(),
+                    false => None,
+                };
+                Word::Pong { left: number(left)?, seconds: number(seconds)? }
+            }
             ("knock", of) => Word::Knock(Ticket::read(of)?),
             _ => return None,
         })
@@ -410,20 +426,20 @@ mod tests {
         let (key, meeting, ticket) = (Key::new().unwrap().id(), Meeting::of(b"secret"), Ticket::new().unwrap());
         for hello in [Hello::Open(key), Hello::Join(meeting), Hello::Take(ticket)] {
             let line = hello.line();
-            assert!(line.len() <= MAX_LINE && line.starts_with("trill-meet 1 "), "{line}");
+            assert!(line.len() <= MAX_LINE && line.starts_with(&format!("trill-meet {VERSION} ")), "{line}");
             assert_eq!(Hello::read(&line), Ok(hello));
         }
-        assert_eq!(Hello::read(&format!("trill-meet 2 join {meeting}")), Err(No::Version));
+        assert_eq!(Hello::read(&format!("trill-meet {} join {meeting}", VERSION - 1)), Err(No::Version));
         for wrong in [
             "",
             "GET / HTTP/1.1",
             "trill-meet",
-            "trill-meet 1",
+            "trill-meet 2",
             "trill-meet one join 00",
-            &format!("trill-meet 1 join {meeting} and more"),
-            &format!("trill-meet 1 join {}", &meeting.to_string()[..60]),
-            &format!("trill-meet 1 open {meeting}"),
-            &format!("trill-meet 1 dance {meeting}"),
+            &format!("trill-meet 2 join {meeting} and more"),
+            &format!("trill-meet 2 join {}", &meeting.to_string()[..60]),
+            &format!("trill-meet 2 open {meeting}"),
+            &format!("trill-meet 2 dance {meeting}"),
             &format!("trill-meet  1 join {meeting}"),
         ] {
             assert_eq!(Hello::read(wrong), Err(No::What), "{wrong}");
@@ -433,7 +449,11 @@ mod tests {
     #[test]
     fn the_few_words_of_a_holder_are_read_back_and_every_refusal_has_a_word_and_a_sentence() {
         let (meeting, door, ticket) = (Meeting::of(b"secret"), Door::of(b"secret"), Ticket::new().unwrap());
-        let words = [Word::Open(meeting, door), Word::Ping, Word::Close, Word::Ok, Word::Pong, Word::Knock(ticket)];
+        let pong = Word::Pong { left: u64::MAX, seconds: 86_400 };
+        let words = [Word::Open(meeting, door), Word::Ping, Word::Close, Word::Ok, pong, Word::Knock(ticket)];
+        for not_a_pong in ["pong", "pong 1", "pong 1 2 3", "pong -1 2", "pong 1 +2", "pong 1  2"] {
+            assert_eq!(Word::read(not_a_pong.as_bytes()), None, "{not_a_pong}");
+        }
         for word in words.into_iter().chain(No::ALL.map(Word::No)) {
             let text = word.text();
             assert!(text.len() <= MAX_WORD, "{text}");

@@ -337,6 +337,13 @@ pub struct AudioContent {
     /// and a file saved before there were comps has none.
     #[serde(default, skip_serializing_if = "is_false")]
     pub crossfade: bool,
+    /// What the file is, in a song that other programs hold too: its
+    /// bytes by their hash and their number, said by the program that has
+    /// the file once it has read it. This is the song's; `path` is where
+    /// *this* machine has those bytes, which is said to nobody. A song
+    /// that was never shared says none, and is the file it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is: Option<crate::files::FileIs>,
 }
 
 /// A stretch of a recording that an audio clip plays round: where it
@@ -929,6 +936,14 @@ pub struct Device {
     /// [`Project::set_sidechain`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidechain: Option<TrackId>,
+    /// What the files its state names are, in a song that other programs
+    /// hold too: for each slot the device has a file in (`sample`, `pad
+    /// 36`), the file's bytes by their hash and their number, said by the
+    /// program that has the file once it has read it. This is the song's;
+    /// the place the state names is where *this* machine has those bytes.
+    /// A song that was never shared says none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, crate::files::FileIs>,
 }
 
 fn enabled_default() -> bool {
@@ -2545,6 +2560,7 @@ impl Project {
                 preset: None,
                 from_preset: None,
                 sidechain: None,
+                files: BTreeMap::new(),
             },
         );
         Ok(id)

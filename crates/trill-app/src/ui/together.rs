@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use trill_core::{ClipId, Project, TrackId};
 use trill_engine::Notice;
 use trill_noir::{Chip, MenuItem, Variant, paint, text};
-use trill_runtime::{Away, Here, Meeting, MeetingPointSet, Mine, Person, Reach, Runtime};
+use trill_runtime::{Away, Going, Here, Meeting, MeetingPointSet, Mine, OnItsWay, Person, Reach, Runtime, Waiting};
 
 const WIDTH: f32 = 520.0;
 const ROW: f32 = 18.0;
@@ -92,6 +92,9 @@ pub struct TogetherState {
     heard: u64,
     /// What was last said of what this window's person has selected.
     said: Option<Mine>,
+    /// What sharing the song would hand to whoever joins, looked at by a
+    /// worker when the Share panel opens: `None` until it has looked.
+    pub going: std::sync::Arc<parking_lot::Mutex<Option<Going>>>,
 }
 
 /// What the window holds of the others, as of this frame.
@@ -110,6 +113,14 @@ pub struct Seen {
     pub meeting: Option<(String, Meeting)>,
     /// The connections that were lost and are being asked for again.
     pub away: Vec<Away>,
+    /// The song's audio that is on its way here from the others.
+    pub files: Vec<OnItsWay>,
+    /// The files the song names on this computer that have not gone to
+    /// the others: nobody was shown them.
+    pub held: Vec<String>,
+    /// For how many seconds the song's audio still waits for the meeting
+    /// point's next day.
+    pub files_wait: Option<u64>,
 }
 
 impl Seen {
@@ -151,14 +162,19 @@ pub enum TogetherScene {
     /// One joined a friend's song and the connection was lost: it is
     /// being asked for again.
     Lost,
+    /// One joined a friend's song and its audio is on its way: one file
+    /// arriving, one that waits for a word, and one of one's own that is
+    /// held.
+    Arriving,
 }
 
 impl TogetherScene {
-    pub const ALL: [(&'static str, TogetherScene); 4] = [
+    pub const ALL: [(&'static str, TogetherScene); 5] = [
         ("two", TogetherScene::Two),
         ("waiting", TogetherScene::Waiting),
         ("meeting", TogetherScene::Meeting),
         ("lost", TogetherScene::Lost),
+        ("arriving", TogetherScene::Arriving),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -217,6 +233,22 @@ impl TogetherScene {
             let meeting = Some((at.to_owned(), Meeting::Held));
             return Seen { me: Some(me), invitation, connected: 1, people: vec![jo], meeting, ..Seen::default() };
         }
+        if self == TogetherScene::Arriving {
+            let file = |name: &str, mb: u64, here: u64, from: Option<&str>, waits: Option<Waiting>| OnItsWay {
+                name: name.to_owned(),
+                bytes: mb << 20,
+                here: here << 20,
+                from: from.map(str::to_owned),
+                waits,
+            };
+            let files = vec![
+                file("Vocal take 3.wav", 48, 20, Some("Jo"), None),
+                file("Room mics.flac", 612, 0, None, Some(Waiting::ForAWord)),
+            ];
+            // (A place that is nobody's: a made-up folder.)
+            let held = vec![r"D:\Sessions\Elsewhere\guide vocal.wav".to_owned()];
+            return Seen { me: Some(me), connected: 1, people: vec![jo], files, held, ..Seen::default() };
+        }
         let notices = vec![Notice::made_up(1, text, Some("Put mine back"))];
         let (connected, people) = (2, vec![jo, sam]);
         Seen { me: Some(me), invitation, connected, people, notices, ..Seen::default() }
@@ -242,6 +274,9 @@ pub fn sync(state: &mut UiState, live: &mut Live, snapshot: &Snapshot, runtime: 
         notices,
         meeting: status.meeting,
         away: status.away,
+        files: status.files,
+        held: status.held,
+        files_wait: status.files_wait,
     };
     // What happened: who came, who went and why, what was refused, what
     // was lost and is being tried again.
@@ -249,11 +284,20 @@ pub fn sync(state: &mut UiState, live: &mut Live, snapshot: &Snapshot, runtime: 
         state.together.heard = number;
         let refused = ["Not joined", "No connection", "Not shared", "No longer in the song"];
         // (Not refused, and to be read all the same: it stays a while.)
-        let lost = ["The connection to", "The meeting point"];
+        let lost = [
+            "The connection to",
+            "The meeting point",
+            "More of the shared song's audio",
+            "Audio files from",
+            "What arrived from",
+        ];
+        let lost_or_held = |sentence: &str| {
+            lost.iter().any(|start| sentence.starts_with(start)) || sentence.contains("not gone to the others")
+        };
         if refused.iter().any(|start| sentence.starts_with(start)) {
             state.together.refusal = Some(sentence.clone());
             state.toasts.lasting(ToastKind::Error, sentence, Duration::from_secs(12));
-        } else if lost.iter().any(|start| sentence.starts_with(start)) && !sentence.contains("is back") {
+        } else if lost_or_held(&sentence) && !sentence.contains("is back") {
             state.toasts.lasting(ToastKind::Info, sentence, Duration::from_secs(12));
         } else {
             state.toasts.info(sentence);
@@ -304,6 +348,16 @@ fn open(cx: &mut Cx, panel: Panel) {
     // panel opens and not while it is drawn.)
     together.point = cx.sounds.runtime.meeting_point();
     (together.changing_point, together.point_key) = (false, String::new());
+    // What would go with the song, for whoever is about to share it:
+    // looked at away from here, since it asks the disk about every file.
+    if panel == Panel::Share {
+        let going = cx.state.together.going.clone();
+        *going.lock() = None;
+        cx.sounds.quietly(move |runtime| {
+            *going.lock() = Some(runtime.files_to_go());
+            Ok(())
+        });
+    }
 }
 
 /// The File menu's items.
@@ -348,6 +402,30 @@ pub fn status_words(seen: &Seen) -> Option<String> {
         Some((_, Meeting::Away(_))) => words.push_str(" \u{00B7} meeting point away, trying again"),
         Some((_, Meeting::Reaching)) => words.push_str(" \u{00B7} reaching the meeting point"),
         Some((_, Meeting::Held)) | None => {}
+    }
+    // The song's audio: how far what is on its way is, and what waits.
+    if !seen.files.is_empty() {
+        let (here, all) =
+            seen.files.iter().fold((0u64, 0u64), |(here, all), file| (here + file.here, all + file.bytes));
+        let files =
+            if seen.files.len() == 1 { "1 audio file".to_owned() } else { format!("{} audio files", seen.files.len()) };
+        let asked = seen.files.iter().any(|file| file.waits == Some(Waiting::ForAWord));
+        let waiting = seen.files.iter().all(|file| file.waits.is_some());
+        match (asked, waiting) {
+            (true, _) => words.push_str(&format!(" \u{00B7} {files} wait for your word")),
+            (false, true) => words.push_str(&format!(" \u{00B7} {files} wait")),
+            (false, false) => {
+                let percent = (here * 100).checked_div(all).unwrap_or(0);
+                words.push_str(&format!(" \u{00B7} {files} arriving, {percent} %"));
+            }
+        }
+    }
+    if seen.files_wait.is_some() {
+        words.push_str(" \u{00B7} audio waits for the meeting point");
+    }
+    if !seen.held.is_empty() {
+        let files = if seen.held.len() == 1 { "1 file".to_owned() } else { format!("{} files", seen.held.len()) };
+        words.push_str(&format!(" \u{00B7} {files} held here"));
     }
     Some(words)
 }
@@ -498,6 +576,7 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
                 Panel::Share => share_panel(ui, cx),
                 Panel::Join => join_panel(ui, cx),
             }
+            audio(ui, cx);
             if cx.live.together.is_on() {
                 heading(ui, cx, "Who is here");
                 people(ui, cx);
@@ -524,9 +603,10 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
     match invitation {
         None => {
             let about = "Someone else opens this song in their own Trill and you both change it at once. Nobody is \
-                         the host: each of you has all of it, and can go on alone and merge again later. They need \
-                         the same plugins and audio files to hear what you hear.";
+                         the host: each of you has all of it, and can go on alone and merge again later. The song's \
+                         audio files go to whoever joins; they need the same plugins to hear what you hear.";
             line(ui, cx, about, theme.ink_dim);
+            what_goes(ui, cx);
             heading(ui, cx, "Who can reach this song");
             let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.chip), Sense::hover());
             let labels = ["This computer only", "My network", "A meeting point"];
@@ -637,6 +717,134 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
     if let Some(refusal) = cx.state.together.refusal.clone() {
         ui.add_space(8.0);
         line(ui, cx, &refusal, theme.signal);
+    }
+}
+
+/// Megabytes as the panel says them.
+fn megabytes(bytes: u64) -> String {
+    let megabytes = bytes as f64 / f64::from(1 << 20);
+    if megabytes < 10.0 { format!("{megabytes:.1} MB") } else { format!("{megabytes:.0} MB") }
+}
+
+/// Before the song is shared: what goes with it. How many audio files,
+/// how large, the folders they lie in, and one by one the files that lie
+/// outside the song's own folder, Trill's recordings and the library.
+fn what_goes(ui: &mut Ui, cx: &mut Cx) {
+    let theme = cx.theme;
+    heading(ui, cx, "What goes with it");
+    let going = cx.state.together.going.lock().clone();
+    let Some(going) = going else {
+        line(ui, cx, "Looking at the song's audio files\u{2026}", theme.ink_faint);
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
+        return;
+    };
+    if going.files == 0 {
+        line(
+            ui,
+            cx,
+            "The song names no audio files on this computer: nothing but the song itself goes.",
+            theme.ink_dim,
+        );
+        return;
+    }
+    let files = if going.files == 1 { "1 audio file".to_owned() } else { format!("{} audio files", going.files) };
+    let said = format!(
+        "{files}, {} together, to whoever joins: the ones Trill reads as audio. Nobody is told where you keep them.",
+        megabytes(going.bytes)
+    );
+    line(ui, cx, &said, theme.ink_dim);
+    for (folder, count, bytes) in &going.folders {
+        let files = if *count == 1 { "1 file".to_owned() } else { format!("{count} files") };
+        line(ui, cx, &format!("{files} in {folder} \u{00B7} {}", megabytes(*bytes)), theme.ink_faint);
+    }
+    if !going.elsewhere.is_empty() {
+        ui.add_space(4.0);
+        line(ui, cx, "From outside the song's folder, Trill's recordings and your sample library:", theme.warn);
+        for path in going.elsewhere.iter().take(LISTED) {
+            line(ui, cx, path, theme.ink);
+        }
+        if going.elsewhere.len() > LISTED {
+            line(ui, cx, &format!("and {} more", going.elsewhere.len() - LISTED), theme.ink_faint);
+        }
+    }
+}
+
+/// How many files a list in the panel names one by one.
+const LISTED: usize = 8;
+
+/// While the song is shared: its audio that is on its way here, and the
+/// files on this computer that have not gone to the others.
+fn audio(ui: &mut Ui, cx: &mut Cx) {
+    let theme = cx.theme;
+    let (files, held, wait) =
+        (cx.live.together.files.clone(), cx.live.together.held.clone(), cx.live.together.files_wait);
+    if !files.is_empty() {
+        heading(ui, cx, "Audio on its way");
+        for file in files.iter().take(LISTED) {
+            let about = match (&file.waits, &file.from) {
+                (Some(Waiting::ForAWord), _) => "waits for your word".to_owned(),
+                (Some(Waiting::ForRoom { short }), _) => {
+                    format!("waits for room on the disk: {} are missing", megabytes(*short))
+                }
+                (Some(Waiting::ForTheWay { seconds }), _) => {
+                    format!("waits for the meeting point's next day, about {} min", seconds.div_ceil(60))
+                }
+                (Some(Waiting::ForSomeone), _) => "nobody who is here has it".to_owned(),
+                (None, Some(from)) => format!("from {from}"),
+                (None, None) => "arriving".to_owned(),
+            };
+            let said = format!(
+                "{} \u{00B7} {} of {} \u{00B7} {about}",
+                file.name,
+                megabytes(file.here),
+                megabytes(file.bytes)
+            );
+            line(ui, cx, &said, theme.ink_dim);
+        }
+        if files.len() > LISTED {
+            line(ui, cx, &format!("and {} more", files.len() - LISTED), theme.ink_faint);
+        }
+        if files.iter().any(|file| file.waits == Some(Waiting::ForAWord)) {
+            ui.add_space(6.0);
+            let waiting: u64 =
+                files.iter().filter(|file| file.waits.is_some()).map(|file| file.bytes - file.here).sum();
+            let said = format!(
+                "More audio is on its way than arrives without your word: {} wait. The song goes on meanwhile.",
+                megabytes(waiting)
+            );
+            line(ui, cx, &said, theme.warn);
+            ui.add_space(6.0);
+            if trill_noir::button(ui, theme, "Let them arrive", Variant::Primary).clicked() {
+                cx.sounds.runtime.let_files_arrive();
+            }
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(250));
+    }
+    if let Some(seconds) = wait {
+        heading(ui, cx, "Audio waits");
+        let said = format!(
+            "The meeting point has nearly passed what its keeper lets a key pass in a day. The song goes on; its \
+             audio files go on in about {} min.",
+            seconds.div_ceil(60)
+        );
+        line(ui, cx, &said, theme.warn);
+    }
+    if !held.is_empty() {
+        heading(ui, cx, "Held on this computer");
+        let about = "The song names these files here, and nobody was shown them: a song file that was opened named \
+                     them, or something other than your own hand did. They have not gone to anyone.";
+        line(ui, cx, about, theme.ink_dim);
+        ui.add_space(4.0);
+        for path in held.iter().take(LISTED) {
+            line(ui, cx, path, theme.ink);
+        }
+        if held.len() > LISTED {
+            line(ui, cx, &format!("and {} more", held.len() - LISTED), theme.ink_faint);
+        }
+        ui.add_space(6.0);
+        if trill_noir::button(ui, theme, "Let them go", Variant::Default).clicked() {
+            cx.sounds.runtime.let_files_go();
+        }
     }
 }
 

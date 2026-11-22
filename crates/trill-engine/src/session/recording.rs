@@ -1053,6 +1053,9 @@ impl Session {
         }
         let tracks = audio.tracks.clone();
         let paths: Vec<PathBuf> = files.iter().map(|file| file.path().to_path_buf()).collect();
+        // What was recorded in the song is the song's, and goes to
+        // whoever else has it: a recording is begun by a hand.
+        self.let_recorded_go(paths.iter().map(|path| path.to_string_lossy().into_owned()));
         match self.edit(|project| put_takes(project, &tracks, &paths, &passes, shift, rate)) {
             Ok(landed) => recorded.takes = landed,
             Err(error) => {
@@ -1338,6 +1341,17 @@ impl Session {
         free_name(folder, what, taken)
     }
 
+    /// [`Session::free_recording_name`], for a file of the kind `ending`
+    /// says, which is one of a fixed list (`trill_core::files::kind_of`).
+    pub(super) fn free_name_of_kind(
+        folder: &Path,
+        what: &str,
+        ending: &'static str,
+        taken: &mut BTreeSet<PathBuf>,
+    ) -> PathBuf {
+        free_name_ending(folder, what, ending, taken)
+    }
+
     /// Has recordings copied beside a song where they would be given a
     /// second name: for a test of what is done across two volumes, which
     /// a test has not got.
@@ -1601,6 +1615,18 @@ fn beside(song: &Path) -> PathBuf {
 /// A name in `folder` for a recording of `what` that no file has and that
 /// is not in `taken`, which it then is: `Voice.wav`, `Voice 2.wav`.
 fn free_name(folder: &Path, what: &str, taken: &mut BTreeSet<PathBuf>) -> PathBuf {
+    free_name_ending(folder, what, "wav", taken)
+}
+
+/// The names Windows keeps for its devices: no file is called one.
+const KEPT_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2",
+    "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// [`free_name`], for a file of another kind than a recording made here:
+/// `ending` is its ending.
+fn free_name_ending(folder: &Path, what: &str, ending: &str, taken: &mut BTreeSet<PathBuf>) -> PathBuf {
     let plain: String =
         what.chars()
             .map(|c| {
@@ -1611,10 +1637,12 @@ fn free_name(folder: &Path, what: &str, taken: &mut BTreeSet<PathBuf>) -> PathBu
                 }
             })
             .collect();
-    let plain = plain.trim().trim_end_matches('.');
-    let plain = if plain.is_empty() { "Take" } else { plain };
+    let plain: String = plain.trim().trim_end_matches('.').chars().take(80).collect();
+    let plain = plain.trim();
+    let kept = KEPT_NAMES.contains(&plain.to_ascii_lowercase().as_str());
+    let plain = if plain.is_empty() || kept { "Take" } else { plain };
     for number in 1.. {
-        let name = if number == 1 { format!("{plain}.wav") } else { format!("{plain} {number}.wav") };
+        let name = if number == 1 { format!("{plain}.{ending}") } else { format!("{plain} {number}.{ending}") };
         let path = folder.join(name);
         if !path.exists() && taken.insert(path.clone()) {
             return path;

@@ -216,6 +216,50 @@ impl MediaCache {
         self.state.lock().loader_rate.map(f64::from)
     }
 
+    /// Reads the audio file at `read` and keeps what was read as the
+    /// audio of `known_as`: a name the file is about to be given by a
+    /// rename, which leaves what a file is known by here (its size and
+    /// when it was written) as it is. Whoever asks for `known_as` once
+    /// the file has that name finds it read, and never waits for a
+    /// reading that began when the name appeared.
+    ///
+    /// With `sample_rate`, the audio converted to that rate is kept too,
+    /// and is what is returned: what [`MediaCache::audio_at_rate`] then
+    /// answers. Hold what is returned until whoever is to use the file
+    /// has it: the cache keeps audio above its budget only while someone
+    /// does.
+    pub fn read_as(
+        &self,
+        read: &Path,
+        known_as: &Path,
+        sample_rate: Option<f64>,
+    ) -> Result<Arc<AudioBuffer>, MediaError> {
+        let stamp = FileStamp::of(read);
+        let original = Arc::new(decode(read)?);
+        let converted = sample_rate.and_then(whole_rate).and_then(|rate| {
+            let resampler = self.resampler(original.sample_rate, f64::from(rate))?;
+            Some((rate, Arc::new(resampler.process(&original))))
+        });
+        let mut state = self.state.lock();
+        state.decodes += 1;
+        let keep = |product: Product, audio: &Arc<AudioBuffer>, state: &mut State| {
+            state.clock += 1;
+            let used = state.clock;
+            let key = Key { path: known_as.to_path_buf(), product };
+            // (A reading of that name that is under way is left to finish.)
+            if !matches!(state.items.get(&key), Some(Slot::Loading)) {
+                state.items.insert(key, Slot::Ready(Item { stamp, used, content: Content::Audio(audio.clone()) }));
+            }
+        };
+        keep(Product::Audio, &original, &mut state);
+        if let Some((rate, converted)) = &converted {
+            keep(Product::AudioAt(*rate), converted, &mut state);
+        }
+        state.recount();
+        state.trim();
+        Ok(converted.map_or(original, |(_, converted)| converted))
+    }
+
     /// Changes the memory budget, letting go of entries if it shrank.
     pub fn set_budget(&self, budget_bytes: usize) {
         let mut state = self.state.lock();
@@ -448,6 +492,46 @@ impl Drop for LoadingGuard<'_> {
 fn whole_rate(sample_rate: f64) -> Option<u32> {
     let rounded = sample_rate.round();
     (1.0..=f64::from(u32::MAX)).contains(&rounded).then_some(rounded as u32)
+}
+
+#[cfg(test)]
+mod read_as_tests {
+    use super::*;
+    use crate::{WavFormat, write_wav};
+
+    #[test]
+    fn a_file_read_under_the_name_it_is_about_to_have_is_not_read_again_when_it_has_it() {
+        let folder = std::env::temp_dir().join(format!("trill-media-read-as-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (part, home) = (folder.join("take.wav.part"), folder.join("take.wav"));
+        let tone: Vec<f32> = (0..44_100).map(|n| (n as f32 * 0.05).sin() * 0.25).collect();
+        let buffer = AudioBuffer { sample_rate: 44_100.0, left: tone.clone(), right: tone };
+        write_wav(&part, &buffer, WavFormat::Int16).unwrap();
+        let cache = MediaCache::new(64 << 20);
+        // Nothing has that name yet: asked for, it is a failure, which the
+        // cache remembers for as long as nothing is there.
+        assert!(cache.audio(&home).is_err());
+        let read = cache.read_as(&part, &home, Some(48_000.0)).unwrap();
+        assert_eq!(read.sample_rate, 48_000.0, "what is returned is what will be asked for at that rate");
+        let decodes = cache.stats().decodes;
+        std::fs::rename(&part, &home).unwrap();
+        // It has its name: both what the file holds and what it is at the
+        // engine's rate are there, and nothing is read or converted again.
+        let at_rate = cache.audio_at_rate(&home, 48_000.0).unwrap();
+        assert!(Arc::ptr_eq(&at_rate, &read));
+        assert_eq!(cache.audio(&home).unwrap().sample_rate, 44_100.0);
+        assert_eq!(cache.stats().decodes, decodes, "it was not read again");
+        // Written again under that name, it is another file and is read.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let louder: Vec<f32> = (0..22_050).map(|n| (n as f32 * 0.05).sin() * 0.5).collect();
+        let other = AudioBuffer { sample_rate: 44_100.0, left: louder.clone(), right: louder };
+        write_wav(&home, &other, WavFormat::Int16).unwrap();
+        assert_eq!(cache.audio(&home).unwrap().frames(), 22_050);
+        // What cannot be read is an error, and nothing is kept for the name.
+        std::fs::write(&part, b"not audio").unwrap();
+        assert!(cache.read_as(&part, &folder.join("other.wav"), None).is_err());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 }
 
 #[cfg(test)]

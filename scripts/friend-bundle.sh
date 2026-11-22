@@ -81,11 +81,10 @@ What your computer needs, for now:
 - The same plugins as theirs, installed where plugins are installed. A
   plugin you have not got stays in the song as a place that is kept, with a
   sentence that says so; it is silent for you and sounds for them.
-- The same audio files in the same places. A song names its recordings by
-  where they are on the computer it was made on. A file that is not there
-  is listed as missing (File, Missing files) and is silent for you; if you
-  have it somewhere else you can say where. Recordings do not travel
-  between the two computers yet.
+- Nothing for the song's audio: its recordings and samples arrive with
+  the song, from whoever has them, and the window says what is on its way.
+  Nobody is told where you keep your files. A sampled instrument's
+  recordings do not travel: you need the instrument yourself.
 - The Microsoft Visual C++ runtime, which most computers have. If Windows
   says VCRUNTIME140.dll is missing, install "Microsoft Visual C++
   Redistributable (x64)" from Microsoft.

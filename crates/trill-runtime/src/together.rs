@@ -40,10 +40,12 @@
 //! are in the settings and nowhere else; the key is said to nobody, not
 //! by [`Runtime::meeting_point`] either.
 
+use crate::files::{Files, Heard, OnItsWay, Tended};
 use crate::{Runtime, SharedSession};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -64,6 +66,10 @@ const PRESENCE_EVERY: Duration = Duration::from_millis(100);
 pub const COLOURS: u8 = 8;
 /// How many sentences are kept for a front end that has not read them.
 const SAID_KEPT: usize = 64;
+/// How much of what a meeting point's keeper lets a key pass in a day is
+/// left for what is said of the song: below it, the song's audio files
+/// wait for the next day. (A drag is six kilobytes a second.)
+const LEFT_FOR_THE_SONG: u64 = 64 << 20;
 /// What a program says as it leaves, and as it is closed.
 const LEFT: &str = "left";
 const CLOSED: &str = "the program was closed";
@@ -156,6 +162,17 @@ pub struct Together {
     pub meeting: Option<(String, Meeting)>,
     /// The connections that were lost and are being asked for again.
     pub away: Vec<Away>,
+    /// The files of the song that are on their way from other programs.
+    pub files: Vec<OnItsWay>,
+    /// The files the song names on this computer that have not gone to
+    /// the others, because nobody was shown them: a song file that was
+    /// opened named them, or something that is not the user's hand did.
+    /// They go when the user lets them ([`Runtime::let_files_go`]).
+    pub held: Vec<String>,
+    /// For how many seconds the song's audio files still wait because
+    /// the meeting point it is shared through has nearly passed what its
+    /// keeper lets a key pass in a day. The song itself goes on.
+    pub files_wait: Option<u64>,
 }
 
 impl Together {
@@ -169,6 +186,9 @@ impl Together {
 enum Ask {
     Share(Reach, u16),
     ShareThrough(MeetingPoint),
+    /// The user's word: however much of the song's audio may be on its
+    /// way at once.
+    LetFilesArrive,
     StopSharing,
     Join(Invitation, bool),
     Leave,
@@ -204,6 +224,14 @@ pub(crate) struct Sharing {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     session: SharedSession,
+    /// The folder files from other programs are kept in, and whether it
+    /// is one for this run that goes with it.
+    received: PathBuf,
+    for_the_run: bool,
+    /// What reads a file as audio, and how many bytes of files may be on
+    /// their way at once without the user's word.
+    media: Arc<trill_media::MediaCache>,
+    unasked: u64,
 }
 
 /// A number by lot that a number in JSON holds exactly.
@@ -276,6 +304,9 @@ struct Peer {
     /// Both hold the same song, and each has been handed what it lacked:
     /// from here on changes go both ways as they are made.
     synced: bool,
+    /// Whether the connection is one through the meeting point this
+    /// program shares through: what passes on it counts against the key.
+    through: bool,
 }
 
 /// A connection that was asked for and has not come about yet.
@@ -341,6 +372,16 @@ struct Driver {
     through: Option<(MeetingPoint, Meeting)>,
     presence_seq: u64,
     presence_said: Option<(Presence, Instant)>,
+    /// The song's files: what is handed out, and what is on its way.
+    files: Files,
+    /// The files the song names on this computer that may not go to the
+    /// others: nobody was shown them.
+    held: Vec<String>,
+    /// What the meeting point said the key may still pass today, when
+    /// its day is over, and how many bytes of files had passed here then.
+    allowance: Option<(u64, Instant, u64)>,
+    /// Until when the song's files wait for the meeting point's next day.
+    files_wait: Option<Instant>,
 }
 
 impl Driver {
@@ -367,6 +408,9 @@ impl Driver {
         self.again.clear();
         self.through = None;
         self.epoch = None;
+        self.files.forget();
+        self.held.clear();
+        (self.allowance, self.files_wait) = (None, None);
         self.session.lock().hear_changes(false);
     }
 
@@ -394,6 +438,9 @@ impl Driver {
                     if came.is_ok() {
                         let mut session = self.session.lock();
                         session.share();
+                        // Whoever shares was shown what the song names on
+                        // this computer: it goes to whoever joins.
+                        session.let_files_go();
                         session.hear_changes(true);
                         self.epoch = Some(session.song_epoch());
                     }
@@ -410,6 +457,7 @@ impl Driver {
                     if let Ok(invitation) = &came {
                         let mut session = self.session.lock();
                         session.share();
+                        session.let_files_go();
                         session.hear_changes(true);
                         self.epoch = Some(session.song_epoch());
                         // (A program that shares already goes on as it does.)
@@ -423,6 +471,7 @@ impl Driver {
                     self.show();
                     self.shared.lock().shared = Some(came);
                 }
+                Ask::LetFilesArrive => self.files.any_amount(),
                 Ask::StopSharing => {
                     self.net.stop_listening();
                     self.through = None;
@@ -608,7 +657,140 @@ impl Driver {
                 }
             }
             Message::Bye { .. } => {}
+            // The song's files. Nothing of them is said between programs
+            // that do not hold the same song yet: whatever is asked for
+            // then is not here.
+            Message::Want { file, .. } if !synced => self.net.say(link, &Message::Nothing { file }),
+            Message::Have { .. } | Message::Nothing { .. } | Message::Later { .. } if !synced => {}
+            said @ (Message::Have { .. }
+            | Message::Want { .. }
+            | Message::Nothing { .. }
+            | Message::Later { .. }
+            | Message::Piece { .. }) => match self.files.heard(link, said) {
+                Heard::Fine => {}
+                Heard::Later(seconds) => self.say(format!(
+                    "Audio files from {} wait: the meeting point you are connected through has nearly passed what \
+                     its keeper lets pass in a day, and what is left is kept for the song itself. The song goes on; \
+                     its files go on arriving in {}.",
+                    self.name_of(link),
+                    in_about(seconds)
+                )),
+                Heard::Answer(answer) => self.net.say(link, &answer),
+                Heard::LetGo(why) => self.let_go(link, why),
+            },
         }
+    }
+
+    /// Lets go of a program that said what nobody who holds the song with
+    /// this one says, in a sentence.
+    fn let_go(&mut self, link: LinkId, why: &str) {
+        self.say(format!("{} is no longer connected: their program {why}.", self.name_of(link)));
+        self.net.close(link, why);
+    }
+
+    /// Holds the song's files back where the meeting point has nearly
+    /// passed what its keeper lets this key pass in a day: what is left
+    /// is for what is said of the song, and the files go on when the day
+    /// is over there.
+    fn keep_the_day_for_the_song(&mut self) {
+        let Some((point, _)) = &self.through else { return };
+        let Some((left, over, passed_then)) = self.allowance else { return };
+        // (What has passed here since the meeting point said.)
+        let left = left.saturating_sub(self.files.passed().saturating_sub(passed_then));
+        let wait = left < LEFT_FOR_THE_SONG && Instant::now() < over;
+        if wait == self.files_wait.is_some() {
+            return;
+        }
+        let at = point.shown();
+        let through: Vec<LinkId> = self.peers.iter().filter(|(_, peer)| peer.through).map(|(link, _)| *link).collect();
+        let seconds = over.saturating_duration_since(Instant::now()).as_secs().max(1);
+        for link in through {
+            self.files.close_way(link, if wait { seconds } else { 0 });
+        }
+        match wait {
+            true => {
+                self.files_wait = Some(over);
+                self.say(format!(
+                    "The meeting point {at} has nearly passed what its keeper lets a key pass in a day. What is left \
+                     is kept for the song itself, which goes on; its audio files wait, and go on in {}, when the \
+                     day is over there.",
+                    in_about(seconds)
+                ));
+            }
+            false => {
+                self.files_wait = None;
+                self.say(format!("The song's audio files go on through the meeting point {at}."));
+            }
+        }
+        self.shared.lock().status.revision += 1;
+    }
+
+    /// Looks after the song's files: has them looked at on this disk
+    /// when the song has changed, and does what that and what arrived
+    /// come to. Nothing here reads or writes a file: two threads of the
+    /// files' own do.
+    fn tend_files(&mut self) {
+        self.keep_the_day_for_the_song();
+        // (Someone who came while the files wait is on a way that is closed.)
+        if let Some(over) = self.files_wait {
+            let seconds = over.saturating_duration_since(Instant::now()).as_secs().max(1);
+            let through: Vec<LinkId> =
+                self.peers.iter().filter(|(_, peer)| peer.through).map(|(link, _)| *link).collect();
+            for link in through {
+                self.files.close_way(link, seconds);
+            }
+        }
+        let revision = self.session.lock().revision();
+        if self.files.look_is_due(revision) {
+            let (files, received, held) = {
+                let session = self.session.lock();
+                (session.files_here(), session.received_in(), session.files_held())
+            };
+            self.files.look(revision, files, received);
+            // What the song names on this computer that nobody was shown
+            // stays here: said once, with where to look at it.
+            if held != self.held {
+                if held.len() > self.held.len() {
+                    let files = if held.len() == 1 { "1 file".to_owned() } else { format!("{} files", held.len()) };
+                    self.say(format!(
+                        "{files} that the shared song names on this computer {} not gone to the others: nobody was \
+                         shown {}. Look at what is held where the song is shared (File, Share this song), and let \
+                         it go if it is to.",
+                        if held.len() == 1 { "has" } else { "have" },
+                        if held.len() == 1 { "it" } else { "them" },
+                    ));
+                }
+                self.held = held;
+                self.shared.lock().status.revision += 1;
+            }
+        }
+        let mut synced: Vec<LinkId> =
+            self.peers.iter().filter(|(_, peer)| peer.synced).map(|(link, _)| *link).collect();
+        synced.sort_unstable();
+        let names: HashMap<LinkId, String> = self.peers.keys().map(|link| (*link, self.name_of(*link))).collect();
+        let name = |link: LinkId| names.get(&link).cloned().unwrap_or_else(|| "Someone".to_owned());
+        let (mut here, mut kept) = (Vec::new(), Vec::new());
+        for tended in self.files.tend(&synced, &name) {
+            match tended {
+                Tended::Say(link, message) => self.net.say(link, &message),
+                Tended::Tell(sentence) => self.say(sentence),
+                Tended::SayFile(place, path, is) => {
+                    self.session.lock().say_file(&place, &path, is);
+                }
+                Tended::Read(read) => self.session.lock().files_read(read),
+                Tended::Here(path, read) => {
+                    here.push(path);
+                    kept.extend(read);
+                }
+                Tended::LetGo(link, why) => self.let_go(link, why),
+            }
+        }
+        if !here.is_empty() {
+            // (Each was read as it arrived, by the thread that took it in:
+            // the song is not held while a long recording is read.)
+            self.session.lock().files_were_read(&here);
+        }
+        drop(kept);
     }
 
     fn say_to_synced(&mut self, message: &Message, except: Option<LinkId>) {
@@ -650,13 +832,16 @@ impl Driver {
                         None => (false, None),
                     };
                     let joined = joined.is_some();
-                    let peer = Peer { joined, replace, invitation, person: None, replica: None, synced: false };
+                    let through = !joined && self.through.is_some();
+                    let peer =
+                        Peer { joined, replace, invitation, person: None, replica: None, synced: false, through };
                     self.peers.insert(link, peer);
                     let hello = self.hello();
                     self.net.say(link, &hello);
                 }
                 Event::Heard { link, message } => self.heard(link, message),
                 Event::Lost { link, why, told } => {
+                    self.files.lost(link);
                     let Some(peer) = self.peers.remove(&link) else { continue };
                     // Whoever was heard of through it is gone with it.
                     let gone: Vec<u64> = self
@@ -719,6 +904,9 @@ impl Driver {
                         self.say(format!("The meeting point {at} is back: whoever has the invitation gets in again."));
                     }
                     self.shared.lock().status.revision += 1;
+                }
+                Event::Allowance { left, over } => {
+                    self.allowance = Some((left, over, self.files.passed()));
                 }
                 Event::Unheld { turned, again } => {
                     let Some((point, meeting)) = &mut self.through else { continue };
@@ -867,6 +1055,14 @@ impl Driver {
             away: (self.again.iter())
                 .map(|again| Away { name: again.name.clone(), since: again.since, tries: again.tries })
                 .collect(),
+            files: self.files.on_their_way(&|link| {
+                let person = self.peers.get(&link).and_then(|peer| peer.person.as_ref());
+                person.map_or_else(|| "Someone".to_owned(), |person| person.name.clone())
+            }),
+            held: self.held.clone(),
+            // (To the minute: a count that ran would be news every tick.)
+            files_wait: (self.files_wait)
+                .map(|over| over.saturating_duration_since(Instant::now()).as_secs().div_ceil(60) * 60),
         };
         if status != shared.status {
             shared.status = Together { revision: shared.status.revision + 1, ..status };
@@ -882,6 +1078,7 @@ impl Driver {
                 // here is said once a tick, which is what thins a drag.
                 self.events();
                 self.ask_again();
+                self.tend_files();
                 if told.elapsed() >= TICK {
                     self.tell();
                     told = Instant::now();
@@ -895,6 +1092,16 @@ impl Driver {
             }
         }
         self.leave(CLOSED);
+    }
+}
+
+/// A while as a person says it: "about 3 h 20 min", "about 12 min".
+pub(crate) fn in_about(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60);
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("about {} min", minutes.max(1)),
+        (hours, 0) => format!("about {hours} h"),
+        (hours, minutes) => format!("about {hours} h {minutes} min"),
     }
 }
 
@@ -927,7 +1134,14 @@ fn presence_of(here: &Here) -> Presence {
 }
 
 impl Sharing {
-    pub fn new(session: SharedSession, name: Option<String>) -> Self {
+    pub fn new(
+        session: SharedSession,
+        name: Option<String>,
+        received: PathBuf,
+        for_the_run: bool,
+        media: Arc<trill_media::MediaCache>,
+        unasked: u64,
+    ) -> Self {
         let name = name.filter(|name| !name.trim().is_empty()).unwrap_or_else(name_on_this_machine);
         let me = Person { id: lot(), name, colour: 0 };
         let status = Together {
@@ -940,6 +1154,9 @@ impl Sharing {
             said: (0, 0),
             meeting: None,
             away: Vec::new(),
+            files: Vec::new(),
+            held: Vec::new(),
+            files_wait: None,
         };
         let shared =
             Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
@@ -948,6 +1165,10 @@ impl Sharing {
             stop: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
             session,
+            received,
+            for_the_run,
+            media,
+            unasked,
         }
     }
 
@@ -958,10 +1179,14 @@ impl Sharing {
         match &*thread {
             Some(running) => running.thread().unpark(),
             None => {
+                let net = Net::new();
+                let bounds = trill_together::files::Bounds { unasked: self.unasked, ..Default::default() };
+                let files = Files::new(net.pieces(), self.media.clone(), bounds, trill_fetch::disk_free)
+                    .map_err(|error| format!("no thread could be started for the song's files: {error}"))?;
                 let driver = Driver {
                     session: self.session.clone(),
                     shared: self.shared.clone(),
-                    net: Net::new(),
+                    net,
                     peers: HashMap::new(),
                     people: Vec::new(),
                     epoch: None,
@@ -970,6 +1195,10 @@ impl Sharing {
                     through: None,
                     presence_seq: 0,
                     presence_said: None,
+                    files,
+                    held: Vec::new(),
+                    allowance: None,
+                    files_wait: None,
                 };
                 let stop = self.stop.clone();
                 let started = std::thread::Builder::new().name("trill-together".into()).spawn(move || driver.run(stop));
@@ -987,6 +1216,10 @@ impl Drop for Sharing {
         if let Some(thread) = self.thread.lock().take() {
             thread.thread().unpark();
             let _ = thread.join();
+        }
+        // A program that keeps nothing keeps no file it was handed.
+        if self.for_the_run {
+            let _ = std::fs::remove_dir_all(&self.received);
         }
     }
 }
@@ -1099,6 +1332,13 @@ impl Runtime {
     pub fn join(&self, invitation: &str, replace: bool) -> Result<(), String> {
         let invitation = Invitation::parse(invitation)?;
         self.sharing.ask(Ask::Join(invitation, replace))
+    }
+
+    /// The user's word that however much of the song's audio may be on
+    /// its way at once: the files that waited for it arrive
+    /// ([`OnItsWay::waits`]). It holds for as long as the program runs.
+    pub fn let_files_arrive(&self) {
+        let _ = self.sharing.ask(Ask::LetFilesArrive);
     }
 
     /// Leaves: every connection is ended and sharing stops. The song

@@ -126,8 +126,11 @@ Only Windows has been run so far.
 
 ## Working in one song together
 
-- Audio files that travel between machines. Each person needs the files where the song names them; a take one
-  of them records is a file only they have, and a missing file for the others until it is there.
+- A sampled instrument's recordings travelling with a shared song, and the other being told which set of the
+  catalogue an instrument is from: they have its place, and a sentence that its file is not there.
+- A list of the audio that arrived for shared songs and was never saved with one, with a way to remove it. It
+  stays in Trill's own folder (`received`).
+- What was read of a song's files (their hashes) kept from one run to the next.
 - Hearing a plugin one has not got (a stem from whoever has it). Its place is kept and its settings are carried.
 - A direct way between two programs that met through a meeting point, where there is one. Everything they say
   goes through it for as long as they are in the song.

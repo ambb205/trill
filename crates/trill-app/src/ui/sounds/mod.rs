@@ -742,6 +742,8 @@ fn relink(runtime: &Runtime, clip: ClipId, path: &Path) -> Result<(String, Optio
     let missing = !Path::new(&old).is_file();
     let places = uses.into_iter().filter(|used| if missing { used.path == old } else { used.place == here });
     let relinks: Vec<Relink> = places.map(|used| Relink { place: used.place, path: stored.clone() }).collect();
+    // (The user's own hand points the clip at the file: see `place_read`.)
+    let _hand = trill_engine::hand::by_hand();
     runtime.relink(&relinks).map_err(|error| error.to_string())?;
     let moved = missing.then(|| FolderMove::between(&old, &stored)).flatten().map(|(moved, _)| moved);
     Ok((file_name(path), moved))
@@ -850,6 +852,10 @@ fn place(runtime: &Runtime, paths: &[PathBuf], target: &DropTarget) -> Result<Dr
 }
 
 fn place_read(runtime: &Runtime, sounds: &[(&PathBuf, SoundFacts)], target: &DropTarget) -> Result<Dropped, String> {
+    // What is dropped is dropped by the user's own hand, though a worker
+    // carries it out: in a song others hold too, the file goes to them
+    // without a question.
+    let _hand = trill_engine::hand::by_hand();
     let sound_clip = |path: &Path, facts: &SoundFacts, track: TrackId, start: Beats| SoundClip {
         warp: warp_for(facts.tags, facts.tempo),
         ..SoundClip::new(path, track, start)

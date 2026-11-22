@@ -176,6 +176,100 @@ async fn two_clients_share_a_song_by_tools_and_each_has_what_the_other_writes() 
     drop((ada.runtime, ben.runtime));
 }
 
+/// Writes `seconds` of a tone and returns the file's path as text.
+fn tone(path: std::path::PathBuf, hertz: f64, seconds: f64) -> String {
+    let rate = 44_100.0;
+    let channel: Vec<f32> = (0..(seconds * rate) as usize)
+        .map(|n| (n as f64 * hertz * std::f64::consts::TAU / rate).sin() as f32 * 0.5)
+        .collect();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let buffer = trill_core::audio::AudioBuffer { sample_rate: rate, left: channel.clone(), right: channel };
+    trill_media::write_wav(&path, &buffer, trill_media::WavFormat::Int16).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// 1 connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audio_of_a_shared_song_is_said_before_it_goes_while_it_arrives_and_where_it_is_held() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, ben) = (program().await, program().await);
+    let vocal = tone(folder.path().join("Ada's music").join("vocal take.wav"), 220.0, 1.0);
+    let track = ok(&ada.client, "create_track", json!({ "name": "Vocal" })).await["track_id"].clone();
+    let arguments = json!({ "track": track, "path": vocal, "start": 0, "name": "Verse vocal" });
+    let verse = ok(&ada.client, "create_audio_clip", arguments).await["clip_id"].clone();
+
+    // Before it is shared: what would go, and from where.
+    let goes = ok(&ada.client, "shared_song", json!({ "action": "what_goes" })).await;
+    assert_eq!(goes["files"], 1, "{goes}");
+    assert_eq!(goes["outside_the_songs_folders"], json!([vocal]), "a file outside the song's folders, by name");
+    assert!(goes["says"].as_str().unwrap().starts_with("1 file ("), "{goes}");
+    assert!(!ada.runtime.together().is_on(), "asking shares nothing");
+    // The reply to `share` says it again.
+    let shared = ok(&ada.client, "shared_song", json!({ "action": "share", "name": "Ada" })).await;
+    assert_eq!(shared["audio_files"]["files"], 1, "{shared}");
+    let invitation = shared["invitation"].as_str().unwrap().to_owned();
+
+    // Ben joins: the recording arrives, and is at no time a missing file.
+    ok(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "name": "Ben" })).await;
+    let missing = ok(&ben.client, "missing_files", json!({})).await;
+    assert_eq!(missing["missing"], 0, "a file on its way is not a missing file: {missing}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let whole = |runtime: &Runtime| {
+        let files = runtime.session.lock().files_here();
+        files.len() == 1 && std::fs::read(&files[0].path).ok() == std::fs::read(&vocal).ok()
+    };
+    while !whole(&ben.runtime) {
+        assert!(Instant::now() < deadline, "the recording never arrived");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let here = |reply: &Value| reply.get("arriving").is_none() && reply["connected_programs"] == 1;
+    until(&ben.client, "shared_song", json!({ "action": "status" }), "nothing is on its way any more", here).await;
+    let at_ben = ben.runtime.session.lock().files_here();
+    assert_eq!(at_ben.len(), 1);
+    assert_eq!(std::fs::read(&at_ben[0].path).unwrap(), std::fs::read(&vocal).unwrap(), "the same bytes, at Ben's");
+    assert!(!at_ben[0].path.contains("Ada's music"), "under a place of his own: {}", at_ben[0].path);
+    let song = ok(&ben.client, "get_project", json!({})).await.to_string();
+    assert!(!song.contains("Ada's music"), "and nothing he is told names her folder: {song}");
+
+    // Something that is not the user's hand names a file in the shared
+    // song: it is held, said, and goes when the user lets it.
+    let demo = tone(folder.path().join("Ada's music").join("demo.wav"), 330.0, 0.5);
+    let held = {
+        let recording = trill_core::project::AudioContent::new(demo.clone());
+        let track = trill_core::TrackId(track.as_u64().unwrap());
+        ada.runtime.session.lock().edit(|song| song.add_audio_clip(track, "Demo", 8.0, 1.0, recording)).unwrap()
+    };
+    let is_held = |reply: &Value| reply["held"]["files"] == json!([demo]);
+    let status = until(&ada.client, "shared_song", json!({ "action": "status" }), "it is held", is_held).await;
+    assert!(status["held"]["why"].as_str().unwrap().contains("nobody was shown them"), "{status}");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let named = |runtime: &Runtime, clip: trill_core::ClipId| {
+        let files = runtime.session.lock().files_here();
+        files.into_iter().find(|file| file.place == trill_core::FilePlace::Clip(clip)).map(|file| file.path)
+    };
+    assert_eq!(named(&ben.runtime, held), None, "nothing of it has gone to Ben");
+    let after = ok(&ada.client, "shared_song", json!({ "action": "let_files_go" })).await;
+    assert!(after.get("held").is_none(), "{after}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while named(&ben.runtime, held).is_none_or(|path| std::fs::read(&path).ok() != std::fs::read(&demo).ok()) {
+        assert!(Instant::now() < deadline, "the file that was let go never arrived");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // A file that is pointed at is taken only where it is the song's file.
+    let relink = |path: &str| json!({ "files": [{ "clip": verse, "to": path }] });
+    let refused = call(&ben.client, "relink_files", relink(&demo)).await.unwrap_err();
+    assert!(refused.contains("is not the file the song names as 'vocal take.wav'"), "{refused}");
+    let own = folder.path().join("Ben's packs").join("the same take.wav");
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::copy(&vocal, &own).unwrap();
+    let taken = ok(&ben.client, "relink_files", relink(&own.to_string_lossy())).await;
+    assert_eq!(taken["relinked"]["places"], 1, "{taken}");
+    let verse = trill_core::ClipId(verse.as_u64().unwrap());
+    assert_eq!(named(&ben.runtime, verse), Some(own.to_string_lossy().into_owned()));
+    assert_eq!(named(&ada.runtime, verse), Some(vocal.clone()), "and Ada's place for it is as it was");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn what_goes_wrong_with_sharing_and_joining_is_a_sentence_that_says_what_to_do() {
     let (ada, ben) = (program().await, program().await);

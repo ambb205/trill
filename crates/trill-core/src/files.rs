@@ -50,6 +50,141 @@ use crate::project::{Clip, ClipContent, Device, EditError, Project};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// ---- what a file is ---------------------------------------------------------
+//
+// A path means one place on one machine, so a song that several programs
+// hold cannot know a file by it. There a file is known by what it *is*:
+// its bytes, by their SHA-256 and their number. Where it lies is each
+// machine's own, said to nobody and taken from nobody
+// (`merge::Key::is_personal`).
+
+/// The bytes of a file, whoever has them and wherever: their SHA-256 and
+/// how many they are. This is what one program asks another for a file
+/// by. It is never a place.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Content {
+    /// The SHA-256 of the bytes: 64 digits, `0-9a-f`.
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+/// The kinds of file a song plays, by the ending of their names: what a
+/// file that came from another program is named with here, so that
+/// whatever reads it knows what it is reading. A name another program
+/// said chooses one of these and is never part of a name on this disk.
+const KINDS: [&str; 17] = [
+    "wav", "wave", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "opus", "m4a", "mp4", "aac", "caf", "w64", "wv",
+    "sfz",
+];
+
+/// The kind of file a name says it is: one of a fixed list, or `bin` for
+/// a name that says none of them. Whatever the name is, what comes back
+/// is text of this program's own.
+pub fn kind_of(name: &str) -> &'static str {
+    let ending = name.rsplit_once('.').map(|(_, ending)| ending.to_ascii_lowercase()).unwrap_or_default();
+    KINDS.iter().copied().find(|kind| *kind == ending).unwrap_or("bin")
+}
+
+impl Content {
+    /// The content of a file whose bytes hash to `sha256`.
+    pub fn new(sha256: &[u8; 32], bytes: u64) -> Self {
+        let sha256 = sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self { sha256, bytes }
+    }
+
+    /// Whether this is written as one is: a hash of 64 digits in lower
+    /// case. Says nothing about whether any file has these bytes.
+    pub fn is_well_formed(&self) -> bool {
+        self.sha256.len() == 64 && self.sha256.bytes().all(|digit| matches!(digit, b'0'..=b'9' | b'a'..=b'f'))
+    }
+
+    /// The hash as bytes; `None` for one that is not well formed.
+    pub fn hash(&self) -> Option<[u8; 32]> {
+        if !self.is_well_formed() {
+            return None;
+        }
+        let mut hash = [0u8; 32];
+        for (at, byte) in hash.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&self.sha256[at * 2..at * 2 + 2], 16).ok()?;
+        }
+        Some(hash)
+    }
+}
+
+impl std::fmt::Display for Content {
+    /// A few digits of it and its size: enough to tell two apart in a
+    /// sentence or a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({} bytes)", self.sha256.get(..8).unwrap_or("?"), self.bytes)
+    }
+}
+
+/// What a song says a file it plays is: its content, and the name its
+/// maker has it under. The name is for showing and for the kind of file it
+/// is; it is the last part of a path and never a path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FileIs {
+    pub sha256: String,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+impl FileIs {
+    /// What the file at `path` is, given the hash of its bytes: named by
+    /// the last part of the path.
+    pub fn new(content: Content, path: &str) -> Self {
+        let name: String = file_name(path).chars().filter(|c| !c.is_control()).take(MAX_FILE_NAME).collect();
+        Self { sha256: content.sha256, bytes: content.bytes, name }
+    }
+
+    /// The bytes it is, without the name.
+    pub fn content(&self) -> Content {
+        Content { sha256: self.sha256.clone(), bytes: self.bytes }
+    }
+
+    /// Whether this is written as one is: a well-formed hash, and a name
+    /// that is a name (no part of a path, nothing that is not text, of a
+    /// length).
+    pub fn is_well_formed(&self) -> bool {
+        let named = self.name.chars().count() <= MAX_FILE_NAME
+            && !self.name.chars().any(|c| c.is_control() || is_separator(c) || c == ':');
+        named && self.content().is_well_formed()
+    }
+
+    /// The kind of file it is, by its name: one of a fixed list, or
+    /// `bin` for a name that says none of them.
+    pub fn kind(&self) -> &'static str {
+        kind_of(&self.name)
+    }
+
+    /// The name the file has in a folder of files that came from other
+    /// programs: its hash and its kind. Made here, of nothing a program
+    /// could choose but which of the kinds it is; two files of the same
+    /// bytes are one file there.
+    pub fn kept_as(&self) -> String {
+        format!("{}.{}", self.sha256, self.kind())
+    }
+}
+
+/// The longest name a file is said by.
+pub const MAX_FILE_NAME: usize = 255;
+
+/// Whether `path`, as it is written, lies in `folder`: it begins with the
+/// folder, and what follows names things in it and nothing else. A path
+/// that begins with a folder and leaves it again (`folder\..\elsewhere`)
+/// does not lie in it, whatever its first words say.
+///
+/// This is the test for "a place of this program's own making": a path
+/// someone else wrote (a song file, another program) must never pass for
+/// one by how it is spelled. It reads no disk, so it says nothing of
+/// links; the folders it is asked about are the program's own, where
+/// nobody else puts any.
+pub fn lies_in(path: &std::path::Path, folder: &std::path::Path) -> bool {
+    path.strip_prefix(folder)
+        .is_ok_and(|rest| rest.components().all(|part| matches!(part, std::path::Component::Normal(_))))
+}
+
 /// Where a song names a file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FilePlace {
@@ -612,6 +747,39 @@ pub fn read(json: &str) -> Result<(Project, FileTable), EditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_that_begins_with_a_folder_and_leaves_it_again_does_not_lie_in_it() {
+        use std::path::Path;
+        let folder = Path::new("profile").join("received").join("0a1b");
+        let lies = |path: std::path::PathBuf| lies_in(&path, &folder);
+        assert!(lies(folder.join("9f2c.wav")));
+        assert!(lies(folder.join("of devices").join("7").join("sample.wav")));
+        assert!(lies(folder.join(".").join("9f2c.wav")), "a dot names the folder it stands in");
+        // Out of it again, by any number of steps, and back in by another way.
+        assert!(!lies(folder.join("..").join("0a1b").join("9f2c.wav")));
+        assert!(!lies(folder.join("..").join("..").join("..").join("Music").join("memo.wav")));
+        assert!(!lies(folder.join("of devices").join("..").join("..").join("other song").join("9f2c.wav")));
+        // Beside it, above it, and the folder itself with nothing in it named.
+        assert!(!lies(Path::new("profile").join("received").join("0a1b more").join("9f2c.wav")));
+        assert!(!lies(Path::new("profile").join("received").join("9f2c.wav")));
+        assert!(!lies(Path::new("elsewhere").join("9f2c.wav")));
+        assert!(lies_in(&folder, &folder), "the folder lies in itself, and names no file");
+        #[cfg(windows)]
+        {
+            let folder = Path::new(r"C:\Users\Jo\AppData\Roaming\trill\received\0a1b");
+            assert!(lies_in(Path::new(r"C:\Users\Jo\AppData\Roaming\trill\received\0a1b\9f2c.wav"), folder));
+            assert!(!lies_in(
+                Path::new(r"C:\Users\Jo\AppData\Roaming\trill\received\0a1b\..\..\..\..\Music\memo.wav"),
+                folder
+            ));
+            assert!(!lies_in(
+                Path::new(r"C:/Users/Jo/AppData/Roaming/trill/received/0a1b/../../../../Music/memo.wav"),
+                folder
+            ));
+            assert!(!lies_in(Path::new(r"D:\Users\Jo\AppData\Roaming\trill\received\0a1b\9f2c.wav"), folder));
+        }
+    }
     use crate::project::{AudioContent, ChainRef, WarpMode};
 
     /// Devices whose state is their files, a line each: `slot=path`.

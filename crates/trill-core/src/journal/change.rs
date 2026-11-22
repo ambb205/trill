@@ -414,7 +414,7 @@ fn track_of(track: &Track) -> Track {
 
 /// Whether two devices are the same but for their state.
 fn same_device(a: &Device, b: &Device) -> bool {
-    let Device { id, uri, name, enabled, params, state: _, preset, from_preset, sidechain } = a;
+    let Device { id, uri, name, enabled, params, state: _, preset, from_preset, sidechain, files } = a;
     *id == b.id
         && *uri == b.uri
         && *name == b.name
@@ -423,11 +423,12 @@ fn same_device(a: &Device, b: &Device) -> bool {
         && *preset == b.preset
         && *from_preset == b.from_preset
         && *sidechain == b.sidechain
+        && *files == b.files
 }
 
 /// A device without its state.
 fn device_of(device: &Device) -> Device {
-    let Device { id, uri, name, enabled, params, state: _, preset, from_preset, sidechain } = device;
+    let Device { id, uri, name, enabled, params, state: _, preset, from_preset, sidechain, files } = device;
     Device {
         id: *id,
         uri: uri.clone(),
@@ -438,6 +439,7 @@ fn device_of(device: &Device) -> Device {
         preset: preset.clone(),
         from_preset: from_preset.clone(),
         sidechain: *sidechain,
+        files: files.clone(),
     }
 }
 

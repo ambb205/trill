@@ -660,6 +660,9 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some("leave") => about("Leaving", "Left", "the shared song"),
             Some("put_back") => Wording::new("Putting back what gave way", "Put back what gave way"),
             Some("dismiss") => about("Reading", "Read", "a notice"),
+            Some("what_goes") => about("Looking at", "Looked at", "which files would go with the song"),
+            Some("let_files_go") => about("Letting go", "Let go", "the files that were held"),
+            Some("let_files_arrive") => about("Letting in", "Let in", "the audio that waited"),
             _ => about("Looking at", "Looked at", "who is here"),
         },
         "listen" | "transcribe" => {

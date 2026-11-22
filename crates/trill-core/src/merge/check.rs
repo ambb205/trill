@@ -117,6 +117,7 @@ fn shape(shape: Segment) -> Result<(), Refused> {
 
 fn audio(audio: &AudioContent) -> Result<(), Refused> {
     text(&audio.path)?;
+    audio.is.as_ref().map_or(Ok(()), file_is)?;
     audio.validate()?;
     if !audio.gain_db.is_finite() {
         return refused("a clip's gain is not a number");
@@ -221,7 +222,24 @@ fn device(device: &Device) -> Result<(), Refused> {
         text(name)?;
         finite(*value, "a parameter")?;
     }
+    if device.files.len() > MAX_SLOTS {
+        return refused(format!("a device with {} files", device.files.len()));
+    }
+    for (slot, is) in &device.files {
+        text(slot)?;
+        file_is(is)?;
+    }
     Ok(())
+}
+
+/// How many files one device may be said to play.
+const MAX_SLOTS: usize = 4096;
+
+fn file_is(is: &crate::files::FileIs) -> Result<(), Refused> {
+    match is.is_well_formed() {
+        true => Ok(()),
+        false => refused("what a file is said to be is no hash of 64 digits with a file's name"),
+    }
 }
 
 fn track(mut track: Track) -> Result<Track, Refused> {
@@ -260,9 +278,16 @@ impl Op {
     /// one's own and nobody else's to say.
     pub fn checked(self) -> Result<Op, Refused> {
         if self.is_personal() {
-            return refused("what is one's own listening is not said to anyone else");
+            return refused(
+                "what is one's own (what one listens to, which input one records, where one has a file) is not said \
+                 to anyone else",
+            );
         }
-        Ok(match self {
+        // A thing that arrives whole says nothing of what is one's own
+        // either: where a clip's file lies is not taken from anyone.
+        let mut part = self;
+        part.forget_what_is_ones_own();
+        Ok(match part {
             Op::Song(set) => {
                 match &set {
                     SongSet::Name(name) => text(name)?,
@@ -457,6 +482,12 @@ impl Op {
                     finite(set, "a parameter")?;
                 }
                 Op::Param(of, name, set)
+            }
+            Op::Sample(of, slot, is) => {
+                id(of.0)?;
+                text(&slot)?;
+                is.as_ref().map_or(Ok(()), file_is)?;
+                Op::Sample(of, slot, is)
             }
             Op::Envelopes(order) => {
                 if order.len() > MAX_OPS {

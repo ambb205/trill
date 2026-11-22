@@ -322,9 +322,17 @@ impl TrillApp {
                 let saved =
                     session.is_modified() != self.snapshot.modified || session.path() != self.snapshot.path.as_deref();
                 if session.revision() != self.snapshot.revision || saved {
+                    let was_arriving = std::mem::take(&mut self.snapshot.arriving);
                     self.snapshot = Snapshot::capture(&session, &params_tracks(&self.state));
                     self.state.reconcile(&self.snapshot.project);
                     self.recheck_problem_files();
+                    // A file that was on its way and is here: its waveform
+                    // is read now, where a moment ago there was no file.
+                    for clip in was_arriving.difference(&self.snapshot.arriving) {
+                        if let Some(audio) = self.snapshot.clip(*clip).and_then(|(_, clip)| clip.audio()) {
+                            self.sounds.recheck(&audio.path);
+                        }
+                    }
                 }
                 // The selection moved or a lane was opened (by the user,
                 // or by `reconcile` just now): cover the devices now shown.

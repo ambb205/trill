@@ -2263,7 +2263,9 @@ fn a_take_is_said_to_whoever_else_has_the_song_when_it_has_landed_and_is_its_mak
     let file = rig.session.last_recording().unwrap().takes[0].file.clone();
 
     // Landed: said, and the other has the take in its lane and what the
-    // track plays of it, naming the file where its maker has it.
+    // track plays of it. Where its maker has the file is its maker's own:
+    // the other is not told, and has no place for it until the maker has
+    // said what the file is.
     let said = rig.session.take_said();
     assert!(!said.is_empty());
     let floors = rig.session.floors();
@@ -2275,7 +2277,8 @@ fn a_take_is_said_to_whoever_else_has_the_song_when_it_has_landed_and_is_its_mak
     };
     assert_eq!(held(&other), held(&rig.session));
     assert_eq!((held(&other).0.len(), held(&other).1.len()), (1, 1), "a take, and the clip that plays it");
-    assert_eq!(take_paths(&other, voice), [file]);
+    assert_eq!(take_paths(&rig.session, voice), [file]);
+    assert_eq!(take_paths(&other, voice), [std::path::PathBuf::new()], "no place of another program's is taken");
     assert_eq!(other.project().track(voice).unwrap().input, None);
     assert!(other.input_status().open.is_none(), "and nothing of it opens an input there");
 

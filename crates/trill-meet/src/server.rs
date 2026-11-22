@@ -868,7 +868,13 @@ fn hold(
                     // A key that has passed its bytes of the day is told so
                     // in place of the answer, and holds its meeting on.
                     let day = shared.day_of(&mut lock(&shared.state), key);
-                    if !word(&say, if shared.spent(&day) { Word::No(No::Spent) } else { Word::Pong }) {
+                    // With the answer, what the key may still pass today
+                    // and how long the day goes on: its holder leaves what
+                    // is left for what matters most to it.
+                    let left = shared.limits.bytes_a_day.saturating_sub(day.bytes.load(Ordering::Relaxed));
+                    let over = shared.began.elapsed().as_secs().saturating_sub(day.since.load(Ordering::Relaxed));
+                    let pong = Word::Pong { left, seconds: A_DAY.as_secs().saturating_sub(over) };
+                    if !word(&say, if shared.spent(&day) { Word::No(No::Spent) } else { pong }) {
                         break;
                     }
                 }

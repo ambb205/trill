@@ -18,6 +18,7 @@
 //! the end of its list.
 
 use crate::channel::Channel;
+use crate::files::FileIs;
 use crate::instrument::InstrumentProfile;
 use crate::presets::{PresetInfo, PresetRef};
 use crate::project::{
@@ -204,8 +205,20 @@ props! {
         Transpose(f64) = transpose,
         Looped(Option<AudioLoop>) = looped,
         Crossfade(bool) = crossfade,
+        Is(Option<FileIs>) = is,
     }
     beside { }
+}
+
+/// The number of the property that says where an audio clip's file lies:
+/// each machine's own, said to nobody and taken from nobody.
+pub fn path_prop() -> u8 {
+    AudioSet::Path(String::new()).prop()
+}
+
+/// The number of the property that says what an audio clip's file is.
+pub fn is_prop() -> u8 {
+    AudioSet::Is(None).prop()
 }
 
 props! {
@@ -234,7 +247,7 @@ props! {
         FromPreset(Option<PresetInfo>) = from_preset,
         Sidechain(Option<TrackId>) = sidechain,
     }
-    beside { id, uri, params }
+    beside { id, uri, params, files }
 }
 
 props! {

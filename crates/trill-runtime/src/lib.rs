@@ -54,6 +54,7 @@
 //! # }
 //! ```
 
+mod files;
 mod housekeeping;
 mod instruments;
 pub mod jobs;
@@ -70,11 +71,14 @@ mod studying;
 pub mod taking;
 pub mod together;
 
+pub use files::{Going, OnItsWay, RECEIVED_FOLDER, Waiting};
 pub use instruments::{Arrived, Ask, INSTRUMENTS, SETS_FOLDER, fetch_list, part_of};
 pub use jobs::{Jobs, Program};
 pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
-pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
+pub use missing::{
+    Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in, the_songs_files,
+};
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
@@ -320,6 +324,22 @@ impl Runtime {
             session.remove_recordings_into(trill_engine::Bin::System);
         }
         session.set_journal_keeping(settings.current().journal.keep);
+        // Files of a shared song that come from other programs are kept in
+        // a folder of the program's own, beside what else is large (its
+        // studies). A program that keeps nothing has a folder for the run,
+        // which goes with it.
+        let received = match &options.storage {
+            Storage::User => trill_library::data_dir().map(|data| data.join(RECEIVED_FOLDER)),
+            Storage::At { .. } => settings.folder().map(|folder| folder.join(RECEIVED_FOLDER)),
+            Storage::Nowhere => None,
+        };
+        let for_the_run = received.is_none();
+        let received = received.unwrap_or_else(|| {
+            let run =
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+            std::env::temp_dir().join(format!("trill-received-{}-{run}", std::process::id()))
+        });
+        session.keep_received_in(Some(received.clone()));
         let live = session.live();
         let session: SharedSession = Arc::new(Mutex::new(session));
 
@@ -352,7 +372,12 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
-        let sharing = together::Sharing::new(session.clone(), settings.lock().current().together.name.clone());
+        let (name, unasked) = {
+            let settings = settings.lock();
+            let together = &settings.current().together;
+            (together.name.clone(), together.ask_above_mb.saturating_mul(1 << 20))
+        };
+        let sharing = together::Sharing::new(session.clone(), name, received, for_the_run, media.clone(), unasked);
         let runtime = Self {
             _housekeeper: housekeeper,
             midi,

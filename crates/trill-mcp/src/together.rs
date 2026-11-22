@@ -33,7 +33,7 @@ use rmcp::{tool, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
-use trill_runtime::{Meeting, Reach};
+use trill_runtime::{Meeting, Reach, Waiting};
 
 /// Appended to the server's instructions.
 pub(crate) const INSTRUCTIONS: &str = "\
@@ -50,9 +50,18 @@ since: its reply says how many things stayed theirs.
 work done through this program and someone else's could not both hold (two moves of one clip, a track removed while \
 it was being written in). Each notice is a sentence, and where it names an `action`, `put_back` with its id does \
 that as one undoable edit. Tell the user about a notice; put theirs back when they ask.
-- A take someone else recorded is in the song with its lane and what the track plays of it, and names a file on \
-their computer: here it is a missing file (missing_files) until the file is here too. Which input of the audio \
-device a track records (track_input) is each person's own and is not shared: set it for this program only.
+- The audio a shared song plays travels with it: what its clips and takes play, and what its samplers and drum \
+racks play, arrives by itself from whoever in the song has it. Status lists what is on its way as `arriving`, each \
+with how far it is, from whom, and why it `waits` where it does. A file on its way is not a missing file and no \
+problem: do not look for it or relink it, and say that it is arriving. Nobody is told where anyone has a file: a \
+place is each computer's own, so a path you give a clip or a sampler is this computer's only. What a plugin names \
+inside its own state travels as the plugin wrote it. A sampled instrument's recordings do not travel.
+- `held` in status is files the song names on this computer that have not gone to the others, because nobody was \
+shown them (a song file that was opened named them, or you did): tell the user which, and let them go \
+(`let_files_go`) only when the user says so. `what_goes` says, before sharing, how many files would go, how large, \
+and from which folders; tell the user before you share.
+- Which input of the audio device a track records (track_input) is each person's own and is not shared: set it for \
+this program only.
 - Share and join when the user asks to, never on your own: both let someone else read and change the song. An \
 invitation (`trill:HOST:PORT:SECRET`, or `trill:meet:HOST:PORT:SECRET` through a meeting point) is whoever holds \
 it's key to the song while it is shared. With someone on another network, share with reach `meeting_point`: the \
@@ -78,6 +87,16 @@ pub enum SharedSongAction {
     PutBack,
     /// Take the notice numbered `notice` as read.
     Dismiss,
+    /// What sharing the open song would hand to whoever joins: how many audio files, how large, in which
+    /// folders, and each file that lies outside the song's own folder, Trill's recordings and the sample
+    /// library. Reads only: nothing is shared. Tell the user before sharing.
+    WhatGoes,
+    /// Let the files in `held` go to the others: the files the song names on this computer that nobody was
+    /// shown. The user's to decide, having been told which they are.
+    LetFilesGo,
+    /// The user's word that however much of the song's audio may be on its way to this computer at once: the
+    /// files in `arriving` that wait for it arrive.
+    LetFilesArrive,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -186,6 +205,47 @@ impl TrillServer {
         if !notices.is_empty() {
             out["notices"] = json!(notices);
         }
+        // The song's audio: what is on its way here, and what has not
+        // gone from here.
+        if !status.files.is_empty() {
+            let mb = |bytes: u64| round(bytes as f64 / f64::from(1 << 20));
+            let arriving: Vec<Value> = (status.files.iter())
+                .map(|file| {
+                    let mut said = json!({ "name": file.name, "mb": mb(file.bytes), "here_mb": mb(file.here) });
+                    if let Some(from) = &file.from {
+                        said["from"] = json!(from);
+                    }
+                    if let Some(waits) = &file.waits {
+                        said["waits"] = json!(match waits {
+                            Waiting::ForAWord => {
+                                "for the user's word: more is on its way than arrives unasked (let_files_arrive)"
+                                    .to_owned()
+                            }
+                            Waiting::ForRoom { short } => {
+                                format!("for room on the disk: {} MB are missing", mb(*short).max(1.0))
+                            }
+                            Waiting::ForTheWay { seconds } => format!(
+                                "the meeting point has nearly passed its day's allowance; goes on in about {} min",
+                                seconds.div_ceil(60)
+                            ),
+                            Waiting::ForSomeone => "nobody who is in the song has said they have it".to_owned(),
+                        });
+                    }
+                    said
+                })
+                .collect();
+            out["arriving"] = json!(arriving);
+        }
+        if !status.held.is_empty() {
+            out["held"] = json!({
+                "files": status.held,
+                "why": "the song names these on this computer and nobody was shown them: they have not gone to \
+                        the others. let_files_go lets them, once the user has said so.",
+            });
+        }
+        if let Some(seconds) = status.files_wait {
+            out["audio_files_wait_minutes"] = json!(seconds.div_ceil(60));
+        }
         let said: Vec<String> =
             self.runtime.said_together(0).into_iter().rev().take(5).rev().map(|(_, said)| said).collect();
         if !said.is_empty() {
@@ -196,6 +256,32 @@ impl TrillServer {
 }
 
 impl TrillServer {
+    /// What the open song hands to whoever joins it: how many audio files
+    /// it names on this computer, how large, and where they lie.
+    fn what_goes(&self) -> Value {
+        let going = self.runtime.files_to_go();
+        let mut out = json!({
+            "files": going.files,
+            "mb": round(going.bytes as f64 / f64::from(1 << 20)),
+            "says": going.sentence(),
+        });
+        if !going.folders.is_empty() {
+            let folders: Vec<Value> = (going.folders.iter())
+                .map(|(folder, files, bytes)| {
+                    json!({ "in": folder, "files": files, "mb": round(*bytes as f64 / f64::from(1 << 20)) })
+                })
+                .collect();
+            out["folders"] = json!(folders);
+        }
+        if !going.elsewhere.is_empty() {
+            out["outside_the_songs_folders"] = json!(going.elsewhere);
+        }
+        if going.gone > 0 {
+            out["not_there"] = json!(going.gone);
+        }
+        out
+    }
+
     /// Shares through the meeting point the user has set, and says how
     /// things stand once the meeting is open there, or why it is not.
     fn share_through_meeting_point(&self) -> Result<Value, String> {
@@ -235,7 +321,10 @@ impl TrillServer {
     /// the `notices`: where this program's work and someone else's clashed, each a sentence, with an `action`
     /// that `put_back` performs as one undoable edit. Sharing opens the song to whoever holds the invitation, so
     /// do it when the user asks. For someone on another network share with reach `meeting_point`. A connection
-    /// that is lost on the way comes back by itself (`reconnecting`). Every reply is the status after the action.
+    /// that is lost on the way comes back by itself (`reconnecting`). The song's audio files go to whoever joins:
+    /// `what_goes` says which before sharing, and the reply to `share` says it again as `audio_files`. `arriving`
+    /// is the audio on its way to this computer; `held` is what has not gone from it. Every reply is the status
+    /// after the action.
     #[tool(annotations(title = "Share the song, join one, see who is here"))]
     fn shared_song(&self, Parameters(request): Parameters<SharedSongRequest>) -> CallToolResult {
         use SharedSongAction as Action;
@@ -247,22 +336,45 @@ impl TrillServer {
                                `status`."
                 .to_owned()));
         }
+        if matches!(request.action, Action::LetFilesGo | Action::LetFilesArrive) && self.is_guarded() {
+            return finish(Err("Which of the user's files go to other people, and how much arrives on this \
+                               computer, is the user's to say, in the window (File, Share this song). Say which \
+                               files are held or wait (action `status`), and that the answer is theirs to give there."
+                .to_owned()));
+        }
         if let Some(name) = &request.name {
             self.runtime.set_name_together(name);
         }
         let reply = (|| match request.action {
             Action::Status => Ok(self.together_json()),
+            Action::WhatGoes => Ok(self.what_goes()),
+            Action::LetFilesGo => {
+                self.runtime.let_files_go();
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(self.together_json())
+            }
+            Action::LetFilesArrive => {
+                self.runtime.let_files_arrive();
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(self.together_json())
+            }
             Action::Share => {
+                // What goes with it, as it stands before it is shared.
+                let goes = self.what_goes();
+                let with_what_goes = |mut reply: Value| {
+                    reply["audio_files"] = goes.clone();
+                    reply
+                };
                 let reach = match request.reach.as_deref() {
                     None | Some("this_machine") => Reach::ThisMachine,
                     Some("network") => Reach::Network,
-                    Some("meeting_point") => return self.share_through_meeting_point(),
+                    Some("meeting_point") => return self.share_through_meeting_point().map(with_what_goes),
                     Some(other) => {
                         return Err(format!("reach is `this_machine`, `network` or `meeting_point`, not `{other}`"));
                     }
                 };
                 self.runtime.share(reach, request.port.unwrap_or(0))?;
-                Ok(self.together_json())
+                Ok(with_what_goes(self.together_json()))
             }
             Action::StopSharing => {
                 self.runtime.stop_sharing();
