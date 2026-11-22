@@ -183,6 +183,9 @@ pub struct Holding {
     said: Instant,
     asked: Option<Instant>,
     spent: bool,
+    /// What the meeting point last said the key may still pass today,
+    /// and when that day is over.
+    left: Option<(u64, Instant)>,
     ping: Duration,
 }
 
@@ -232,7 +235,10 @@ impl Holding {
             }
         });
         hearing.map_err(gone)?;
-        Ok(Holding { say, socket, heard, said: Instant::now(), asked: None, spent: false, ping: PING })
+        // (It says that it is there at once, the first time: the answer says
+        // what the key may still pass today, which its holder goes by.)
+        let said = Instant::now().checked_sub(PING).unwrap_or_else(Instant::now);
+        Ok(Holding { say, socket, heard, said, asked: None, spent: false, left: None, ping: PING })
     }
 
     /// Waits `within` for someone to knock. `None` is nobody; an error is
@@ -252,8 +258,14 @@ impl Holding {
             let wait = end.saturating_duration_since(now).min(Duration::from_millis(250));
             match self.heard.recv_timeout(wait) {
                 Ok(Ok(Some(Word::Knock(ticket)))) => return Ok(Some(ticket)),
-                Ok(Ok(Some(Word::Pong))) => (self.asked, self.spent) = (None, false),
-                Ok(Ok(Some(Word::No(No::Spent)))) => (self.asked, self.spent) = (None, true),
+                Ok(Ok(Some(Word::Pong { left, seconds }))) => {
+                    (self.asked, self.spent) = (None, false);
+                    self.left = Some((left, Instant::now() + Duration::from_secs(seconds.min(7 * 86_400))));
+                }
+                Ok(Ok(Some(Word::No(No::Spent)))) => {
+                    (self.asked, self.spent) = (None, true);
+                    self.left = self.left.map(|(_, over)| (0, over));
+                }
                 Ok(Ok(Some(Word::No(no)))) => return Err(Turned::No(no)),
                 Ok(Ok(_)) => return Err(Turned::NotOne),
                 Ok(Err(error)) => return Err(broken(error)),
@@ -271,6 +283,12 @@ impl Holding {
     /// nobody is let into it until the day is over.
     pub fn spent(&self) -> bool {
         self.spent
+    }
+
+    /// What the meeting point last said the key may still pass today, in
+    /// bytes, and when that day is over. `None` until it has said.
+    pub fn left(&self) -> Option<(u64, Instant)> {
+        self.left
     }
 
     /// How often it says that it is there, in place of every twenty

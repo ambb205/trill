@@ -71,7 +71,7 @@ mod studying;
 pub mod taking;
 pub mod together;
 
-pub use files::{OnItsWay, RECEIVED_FOLDER};
+pub use files::{Going, OnItsWay, RECEIVED_FOLDER, Waiting};
 pub use instruments::{Arrived, Ask, INSTRUMENTS, SETS_FOLDER, fetch_list, part_of};
 pub use jobs::{Jobs, Program};
 pub use listening::{LONGEST_SECONDS, ListenError};
@@ -370,8 +370,12 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
-        let name = settings.lock().current().together.name.clone();
-        let sharing = together::Sharing::new(session.clone(), name, received, for_the_run);
+        let (name, unasked) = {
+            let settings = settings.lock();
+            let together = &settings.current().together;
+            (together.name.clone(), together.ask_above_mb.saturating_mul(1 << 20))
+        };
+        let sharing = together::Sharing::new(session.clone(), name, received, for_the_run, media.clone(), unasked);
         let runtime = Self {
             _housekeeper: housekeeper,
             midi,

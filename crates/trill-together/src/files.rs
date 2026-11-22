@@ -17,6 +17,12 @@
 //!   this place in it, no more than the file is), and is a file of the
 //!   song only once all of it is here and its bytes hash to what was asked
 //!   for. Otherwise it is thrown away.
+//! * **What a file may cost is settled before its first byte**
+//!   ([`Bounds`], in [`Received::begin`]): a length nobody could mean is
+//!   refused, a file the disk has not the room for waits, and more than
+//!   the user said may arrive unasked waits for their word. A program that
+//!   says it has a file of 2^60 bytes costs this one nothing: no name is
+//!   made for it and nothing is asked for.
 //!
 //! Nothing here knows of a song, a connection or a thread: whoever drives
 //! the song says what is offered and what is wanted, and hands across what
@@ -128,6 +134,37 @@ impl Offered {
     }
 }
 
+/// What taking files in may cost this machine, settled before the first
+/// byte of each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    /// The longest file there is: one that is said to be longer is said
+    /// by a program that means something else by it.
+    pub longest: u64,
+    /// How many bytes may be on their way at once without anyone having
+    /// been asked: above it, files wait for the user's word.
+    pub unasked: u64,
+    /// How much room the disk keeps free beside what is taken in.
+    pub spare: u64,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self { longest: 64 << 30, unasked: 500 << 20, spare: 256 << 20 }
+    }
+}
+
+/// Why a file that is wanted is not begun yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Waits {
+    /// The disk has not the room: what is still to arrive of the file,
+    /// and what the disk has free.
+    ForRoom { needs: u64, free: u64 },
+    /// More would be on its way at once than may be without the user's
+    /// word: how much with this file.
+    ForAWord { on_the_way: u64 },
+}
+
 /// How taking a file in begins.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Begun {
@@ -135,6 +172,8 @@ pub enum Begun {
     Here(PathBuf),
     /// This many bytes of it are here: the rest is to be asked for.
     From(u64),
+    /// It is not begun, and nothing was made for it: see [`Waits`].
+    Waits(Waits),
 }
 
 /// What came of bytes that arrived.
@@ -170,14 +209,66 @@ struct Arriving {
 pub struct Received {
     dir: PathBuf,
     arriving: HashMap<Content, Arriving>,
+    bounds: Bounds,
+    /// How much room the disk a folder is on has free, where the machine
+    /// can be asked.
+    room: Option<Room>,
 }
+
+/// How much room the disk a folder is on has free, in bytes: `None`
+/// where the machine cannot be asked.
+pub type Room = Box<dyn Fn(&Path) -> Option<u64> + Send>;
 
 impl Received {
     /// The files that came from other programs are kept in `dir`: a
     /// folder of this program's own. Nothing is made until a file is
     /// begun.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), arriving: HashMap::new() }
+        Self { dir: dir.into(), arriving: HashMap::new(), bounds: Bounds::default(), room: None }
+    }
+
+    /// With what taking in may cost, and how the room on a disk is asked.
+    pub fn bounded(mut self, bounds: Bounds, room: Option<Room>) -> Self {
+        (self.bounds, self.room) = (bounds, room);
+        self
+    }
+
+    pub fn bounds(&self) -> &Bounds {
+        &self.bounds
+    }
+
+    /// The user's word: from here on, however much is on its way.
+    pub fn allow_any_amount(&mut self) {
+        self.bounds.unasked = u64::MAX;
+    }
+
+    /// How many bytes are still to arrive of the files that are on their
+    /// way.
+    pub fn on_the_way(&self) -> u64 {
+        self.arriving.iter().map(|(file, arriving)| file.bytes - arriving.have).sum()
+    }
+
+    /// Removes the parts of files that are not among `named`, the files
+    /// the song says it plays: a part is kept to be gone on from, and one
+    /// of a file the song no longer names never will be. Returns how many
+    /// went. (Whole files are never removed here, whatever the song names.)
+    pub fn sweep(&mut self, named: &std::collections::HashSet<Content>) -> usize {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
+        let mut gone = 0;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(hash) = name.strip_suffix(&format!(".{PART}")).and_then(|name| name.split('.').next()) else {
+                continue;
+            };
+            let wanted = |file: &Content| file.sha256 == hash;
+            if !named.iter().any(wanted)
+                && !self.arriving.keys().any(wanted)
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                gone += 1;
+            }
+        }
+        gone
     }
 
     pub fn dir(&self) -> &Path {
@@ -203,10 +294,17 @@ impl Received {
     /// Begins to take in a file, or goes on with one of which a part is
     /// here (from before a connection was lost, or from an earlier run of
     /// the program): says how much of it is here. A file that is said to
-    /// be something that is not written as a content is refused.
+    /// be something that is not written as a content is refused, and so
+    /// is one of a length nobody could mean. Where the disk has not the
+    /// room, or more would be on its way than may be unasked, the file
+    /// waits ([`Begun::Waits`]) and nothing is made for it.
     pub fn begin(&mut self, is: &FileIs) -> io::Result<Begun> {
         if !is.is_well_formed() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "what the file is said to be is no hash and name"));
+        }
+        if is.bytes > self.bounds.longest {
+            let said = format!("it is said to be {} bytes long, which no file of a song is", is.bytes);
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, said));
         }
         let (content, home) = (is.content(), self.home(is));
         if std::fs::metadata(&home).is_ok_and(|found| found.is_file() && found.len() == is.bytes) {
@@ -216,8 +314,20 @@ impl Received {
         if let Some(arriving) = self.arriving.get(&content) {
             return Ok(Begun::From(arriving.have));
         }
-        std::fs::create_dir_all(&self.dir)?;
         let part = home.with_extension(format!("{}.{PART}", is.kind()));
+        // What it may cost is settled before anything is made for it.
+        let here = std::fs::metadata(&part).map_or(0, |found| found.len().min(is.bytes));
+        let needs = is.bytes - here;
+        let on_the_way = self.on_the_way() + needs;
+        if on_the_way > self.bounds.unasked {
+            return Ok(Begun::Waits(Waits::ForAWord { on_the_way }));
+        }
+        if let Some(free) = self.room.as_ref().and_then(|room| room(&self.dir))
+            && free < on_the_way.saturating_add(self.bounds.spare)
+        {
+            return Ok(Begun::Waits(Waits::ForRoom { needs, free }));
+        }
+        std::fs::create_dir_all(&self.dir)?;
         let mut file = File::options().read(true).write(true).create(true).truncate(false).open(&part)?;
         // What is here of it from before is read again, so that the hash
         // of the whole can be told when the rest has arrived.
@@ -361,6 +471,7 @@ mod tests {
         let mut at = match received.begin(is).unwrap() {
             Begun::Here(home) => return Took::Whole(home),
             Begun::From(have) => have,
+            Begun::Waits(waits) => panic!("the file waits: {waits:?}"),
         };
         loop {
             let piece = offered.read(&content, at, MAX_PIECE as u64).expect("the file is offered");
@@ -504,6 +615,94 @@ mod tests {
         // Asked for again, from someone who has it, it arrives.
         assert!(matches!(cross(&offered, &mut received, &is), Took::Whole(_)));
         assert_eq!(std::fs::read(received.home(&is)).unwrap(), sung);
+    }
+
+    #[test]
+    fn what_a_file_may_cost_is_settled_before_its_first_byte() {
+        let (theirs, mine) = (Folder::new("costly"), Folder::new("bounded"));
+        let dir = mine.0.join("received");
+        // A length nobody could mean, from a program that says it has it.
+        let mut received = Received::new(&dir);
+        let endless = FileIs::new(Content::new(&[9; 32], 1 << 60), "everything.wav");
+        let refused = received.begin(&endless).unwrap_err().to_string();
+        assert!(refused.contains("which no file of a song is"), "{refused}");
+        assert_eq!(received.take(&endless.content(), 0, &[1, 2, 3]), Took::NotAsked);
+        assert!(!dir.exists(), "and nothing was made for it");
+
+        // The disk has not the room for it and what is to stay free.
+        let (is, offered) = offer(&theirs.file("long.wav", &bytes(3 * MAX_PIECE, 1)));
+        let room = |free: u64| -> Option<Room> { Some(Box::new(move |_| Some(free))) };
+        let tight = Bounds { spare: 1000, ..Bounds::default() };
+        let mut received = Received::new(&dir).bounded(tight.clone(), room(is.bytes + 999));
+        let waits = Waits::ForRoom { needs: is.bytes, free: is.bytes + 999 };
+        assert_eq!(received.begin(&is).unwrap(), Begun::Waits(waits));
+        assert!(!dir.exists(), "nothing was made for it either");
+        let mut received = Received::new(&dir).bounded(tight, room(is.bytes + 1000));
+        assert_eq!(received.begin(&is).unwrap(), Begun::From(0), "with the room, it is begun");
+        drop(received);
+
+        // More on its way at once than may be without anyone having been
+        // asked: the file that would make it so waits for the user's word.
+        let (second, _) = offer(&theirs.file("second.wav", &bytes(2 * MAX_PIECE, 2)));
+        let asked = Bounds { unasked: is.bytes + second.bytes - 1, ..Bounds::default() };
+        let mut received = Received::new(&dir).bounded(asked, None);
+        assert_eq!(received.begin(&is).unwrap(), Begun::From(0));
+        let both = is.bytes + second.bytes;
+        assert_eq!(received.begin(&second).unwrap(), Begun::Waits(Waits::ForAWord { on_the_way: both }));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the first has a part");
+        // What has arrived is no longer on its way.
+        let piece = offered.read(&is.content(), 0, MAX_PIECE as u64).unwrap();
+        assert_eq!(received.take(&is.content(), 0, &piece), Took::More(MAX_PIECE as u64));
+        assert_eq!(received.on_the_way(), is.bytes - MAX_PIECE as u64);
+        assert_eq!(received.begin(&second).unwrap(), Begun::From(0));
+        // And with the user's word, however much.
+        let (third, _) = offer(&theirs.file("third.wav", &bytes(4 * MAX_PIECE, 3)));
+        assert!(matches!(received.begin(&third).unwrap(), Begun::Waits(Waits::ForAWord { .. })));
+        received.allow_any_amount();
+        assert_eq!(received.begin(&third).unwrap(), Begun::From(0));
+    }
+
+    #[test]
+    fn a_part_of_a_file_the_song_no_longer_names_goes_and_whole_files_stay() {
+        let (theirs, mine) = (Folder::new("named"), Folder::new("swept"));
+        let dir = mine.0.join("received");
+        let mut received = Received::new(&dir);
+        let (whole, offered) = offer(&theirs.file("whole.wav", &bytes(MAX_PIECE, 1)));
+        assert!(matches!(cross(&offered, &mut received, &whole), Took::Whole(_)));
+        let (half, offered) = offer(&theirs.file("half.wav", &bytes(2 * MAX_PIECE, 2)));
+        let (dropped, of_dropped) = offer(&theirs.file("dropped.flac", &bytes(2 * MAX_PIECE, 3)));
+        for (is, offered) in [(&half, &offered), (&dropped, &of_dropped)] {
+            assert_eq!(received.begin(is).unwrap(), Begun::From(0));
+            let piece = offered.read(&is.content(), 0, MAX_PIECE as u64).unwrap();
+            assert!(matches!(received.take(&is.content(), 0, &piece), Took::More(_)));
+        }
+        std::fs::write(dir.join("something of the user's.txt"), b"left alone").unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 4);
+        // The song names the first two. A part that is on its way stays
+        // whatever the song names; let go of, the one it no longer names goes.
+        let named: std::collections::HashSet<Content> = [whole.content(), half.content()].into();
+        assert_eq!(received.sweep(&named), 0);
+        received.let_go(&dropped.content());
+        received.let_go(&half.content());
+        assert_eq!(received.sweep(&named), 1);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let expected = [
+            format!("{}.wav", whole.sha256),
+            format!("{}.wav.{PART}", half.sha256),
+            "something of the user's.txt".to_owned(),
+        ];
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(left, expected);
+        // Nothing the song names any more: the part goes, the whole file stays.
+        assert_eq!(received.sweep(&std::collections::HashSet::new()), 1);
+        assert!(received.home(&whole).exists(), "what arrived whole is never removed here");
+        assert_eq!(received.begin(&half).unwrap(), Begun::From(0), "and is begun from nothing if it is named again");
     }
 
     #[test]

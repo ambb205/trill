@@ -247,7 +247,7 @@ props! {
         FromPreset(Option<PresetInfo>) = from_preset,
         Sidechain(Option<TrackId>) = sidechain,
     }
-    beside { id, uri, params }
+    beside { id, uri, params, files }
 }
 
 props! {

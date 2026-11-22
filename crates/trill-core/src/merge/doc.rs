@@ -373,7 +373,7 @@ impl Doc {
             // that it is a take is as old as itself.
             Key::Clip(_, LANE) => None,
             Key::Send(track, _) => self.tracks.get(track).map(|track| track.held.made),
-            Key::Param(device, _) => self.devices.get(device).map(|device| device.held.made),
+            Key::Param(device, _) | Key::Sample(device, _) => self.devices.get(device).map(|device| device.held.made),
             key => key.thing().and_then(|thing| self.made(&thing)),
         };
         made.unwrap_or(Stamp::ZERO)
@@ -497,7 +497,7 @@ impl Doc {
     pub fn is_within(&self, key: &Key, thing: &Thing) -> bool {
         let mut at = match key {
             Key::Send(track, _) => Some(Thing::Track(*track)),
-            Key::Param(device, _) => Some(Thing::Device(*device)),
+            Key::Param(device, _) | Key::Sample(device, _) => Some(Thing::Device(*device)),
             Key::Lane(target, _) => target_holder(target),
             key => key.thing(),
         };
@@ -635,6 +635,9 @@ impl Doc {
             Key::Param(id, name) => {
                 Op::Param(*id, name.clone(), self.devices.get(id)?.held.it.params.get(name).copied())
             }
+            Key::Sample(id, slot) => {
+                Op::Sample(*id, slot.clone(), self.devices.get(id)?.held.it.files.get(slot).cloned())
+            }
             Key::Lane(target, prop) => {
                 let default = LaneHeld::default();
                 let lane = self.lanes.get(target).unwrap_or(&default);
@@ -757,7 +760,7 @@ impl Doc {
             Op::Track(id, _) | Op::Send(id, ..) => self.tracks.contains_key(id),
             Op::Clip(id, _) | Op::Notes(id, _) => self.clips.contains_key(id),
             Op::Note(clip, id, _) => self.clips.get(clip).is_some_and(|clip| clip.notes.contains_key(id)),
-            Op::Device(id, _) | Op::Param(id, ..) => self.devices.contains_key(id),
+            Op::Device(id, _) | Op::Param(id, ..) | Op::Sample(id, ..) => self.devices.contains_key(id),
             Op::Points(home, _) => match home {
                 Home::Lane(_) => true,
                 Home::Curve(clip, ..) => self.clips.contains_key(clip),
@@ -862,6 +865,13 @@ impl Doc {
                 match value {
                     Some(value) => device.held.it.params.insert(name, value),
                     None => device.held.it.params.remove(&name),
+                };
+            }
+            Op::Sample(id, slot, is) => {
+                let Some(device) = self.devices.get_mut(&id) else { return };
+                match is {
+                    Some(is) => device.held.it.files.insert(slot, is),
+                    None => device.held.it.files.remove(&slot),
                 };
             }
             Op::Lane(target, set) => {
@@ -1012,6 +1022,12 @@ impl Doc {
                             let value = device.params.get(&name).copied();
                             Op::Param(*id, name, value)
                         }));
+                        let held: Vec<String> = self.devices[id].held.it.files.keys().cloned().collect();
+                        let slots = device.files.keys().cloned().chain(held);
+                        sets.extend(slots.map(|slot| {
+                            let is = device.files.get(&slot).cloned();
+                            Op::Sample(*id, slot, is)
+                        }));
                         let mut any = self.remake(stamp, made, sets);
                         let greater = device.uri > self.devices[id].held.it.uri;
                         if self.remakes(&Key::Device(*id, KIND), made, stamp, greater)
@@ -1103,6 +1119,21 @@ impl Doc {
             }
         }
         any
+    }
+
+    /// Gives a device the state it has on this machine: `state` is the
+    /// state the song holds for it with the files it names where *this*
+    /// machine has them. It is the same state as far as anyone else is
+    /// concerned, so nothing of when it was set changes, and nobody is
+    /// told. `false` for a device that is not held.
+    pub fn place_state(&mut self, device: DeviceId, state: Option<Vec<u8>>) -> bool {
+        match self.devices.get_mut(&device) {
+            Some(held) => {
+                held.held.it.state = state;
+                true
+            }
+            None => false,
+        }
     }
 
     // ---- what another program lacks ---------------------------------------

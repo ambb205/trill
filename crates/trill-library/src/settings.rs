@@ -46,7 +46,7 @@ pub struct Settings {
 }
 
 /// What is remembered for working in a song with others.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TogetherSettings {
     /// The name this person goes by among the others. `None` is the name
     /// they are signed in to the machine by.
@@ -54,6 +54,19 @@ pub struct TogetherSettings {
     /// The meeting point this person shares songs through, where they
     /// have one: what its keeper handed them.
     pub meeting_point: Option<MeetingPointSettings>,
+    /// How many megabytes of a shared song's audio may be on their way to
+    /// this computer at once without this person having been asked.
+    pub ask_above_mb: u64,
+}
+
+/// How much of a shared song's audio arrives unasked, unless the settings
+/// say otherwise: in megabytes.
+pub const ASK_ABOVE_MB: u64 = 500;
+
+impl Default for TogetherSettings {
+    fn default() -> Self {
+        Self { name: None, meeting_point: None, ask_above_mb: ASK_ABOVE_MB }
+    }
 }
 
 /// A meeting point as its keeper handed it over: where it is, and the
@@ -332,6 +345,7 @@ impl Reader {
         if let Some(together) = self.section(document, "together") {
             self.value(together, "together.name", &mut settings.together.name);
             self.value(together, "together.meeting_point", &mut settings.together.meeting_point);
+            self.value(together, "together.ask_above_mb", &mut settings.together.ask_above_mb);
         }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
@@ -532,6 +546,7 @@ mod tests {
                     address: "meet.example.org:443".into(),
                     key: "0000-1111-2222-3333-4444-5555-6666-7777-8888-9999".into(),
                 }),
+                ask_above_mb: 2000,
             },
         }
     }

@@ -302,6 +302,7 @@ fn what(doc: &merge::Doc, key: &Key, op: &Op) -> String {
             }
         }
         Op::Param(device, name, _) => format!("{name} on {}", of(Thing::Device(*device))),
+        Op::Sample(device, slot, _) => format!("what the file in {slot} of {} is", of(Thing::Device(*device))),
         Op::Lane(target, _) => envelope(doc, target),
         Op::Envelopes(_) => "the order of the envelopes".to_owned(),
         Op::Point(home, id, _) => of(Thing::Point(home.clone(), *id)),
@@ -421,7 +422,13 @@ impl Session {
     /// here.
     pub fn since(&self, floors: &Floors) -> Vec<Said> {
         let knew = Some(self.doc.floors().clone());
-        self.doc.since(floors).into_iter().map(|change| Said { change, knew: knew.clone() }).collect()
+        let said = |mut change: Change| {
+            for op in &mut change.ops {
+                self.forget_device_places(op);
+            }
+            Said { change, knew: knew.clone() }
+        };
+        self.doc.since(floors).into_iter().map(said).collect()
     }
 
     /// The song with everything that is held beside it, as the text of a
@@ -431,11 +438,15 @@ impl Session {
         let id = self.share();
         self.absorb_editor_edits();
         self.capture_device_state();
-        let kept = self.doc.kept(id, &self.project).impersonal();
+        let mut kept = self.doc.kept(id, &self.project).impersonal();
         // Without what is one's own: one's listening, and where one has
-        // the song's files. What is written down of those files (their
-        // places, from the song's folder too) is not handed over either.
-        let song = merge::said_song(&self.project);
+        // the song's files, a clip's or a sampler's. What is written down
+        // of those files (their places, from the song's folder too) is
+        // not handed over either.
+        let song = self.said_song();
+        for op in &mut kept.hidden {
+            self.forget_device_places(op);
+        }
         trill_core::files::write_shared(&song, &trill_core::FileTable::default(), Some(&kept))
     }
 
@@ -528,6 +539,9 @@ impl Session {
     /// Takes a change made here into the properties: the one way the song
     /// is written. Returns what it did, for the history.
     pub(super) fn write(&mut self, ops: Vec<Op>) -> merge::Taken {
+        // What it names on this disk is named here, and may go where the
+        // hand named it.
+        self.note_what_is_named(&ops);
         let stamp = self.next_stamp();
         let change = Change { stamp, ops };
         let taken = self.doc.apply(&change);
@@ -553,8 +567,12 @@ impl Session {
         }
         // Said without what is one's own, which never leaves the program.
         if self.sharing.live
-            && let Some(change) = change.impersonal()
+            && let Some(mut change) = change.impersonal()
         {
+            // (Nor with where a built-in device has its files.)
+            for op in &mut change.ops {
+                self.forget_device_places(op);
+            }
             let said = Said { change, knew: Some(self.doc.floors().clone()) };
             match self.sharing.holding {
                 true => self.sharing.held.push(said),
@@ -653,13 +671,11 @@ impl Session {
         // tracks with what was written here that their makers had not seen.
         let mut raised: Vec<u64> = Vec::new();
         let mut recorded: Vec<(Vec<ClipId>, Vec<ClipId>)> = Vec::new();
-        // The clips of which it is said here what their file is.
+        // The clips, and the slots of devices, of which it is said here
+        // what their file is.
         let mut said_to_be: Vec<ClipId> = Vec::new();
-        for Said { mut change, knew } in checked {
-            // No place is taken from another program: a clip's is not in
-            // the change, and what a device's state names is given places
-            // made here.
-            self.keep_out_places(&mut change);
+        let mut slots_said: Vec<(DeviceId, String)> = Vec::new();
+        for Said { change, knew } in checked {
             let stamp = change.stamp;
             // Whether its maker had seen a change made here.
             let seen = |held: Stamp| knew.as_ref().or(floors).is_some_and(|knew| knew.has(held));
@@ -700,10 +716,13 @@ impl Session {
                 })
                 .collect();
             said_to_be.extend(made.iter().copied());
-            said_to_be.extend(taken.won.iter().filter_map(|part| match &part.op {
-                Op::Clip(id, ClipOp::Audio(merge::AudioSet::Is(Some(_)))) => Some(*id),
-                _ => None,
-            }));
+            for part in &taken.won {
+                match &part.op {
+                    Op::Clip(id, ClipOp::Audio(merge::AudioSet::Is(Some(_)))) => said_to_be.push(*id),
+                    Op::Sample(device, slot, Some(_)) => slots_said.push((*device, slot.clone())),
+                    _ => {}
+                }
+            }
             if !made.is_empty() {
                 let earlier = |(own, _): &&(Stamp, Key)| *own < stamp && !seen(*own);
                 let unseen: Vec<ClipId> = (self.sharing.recent.iter().filter(earlier))
@@ -729,8 +748,9 @@ impl Session {
             return Ok(news);
         }
         let before = self.rederive();
-        // What arrived is given this machine's own place for what it is.
-        self.give_places(&said_to_be);
+        // What arrived is given this machine's own place for what it is,
+        // and no place another program named is left in a device's state.
+        self.give_places(&said_to_be, &slots_said, Some(&before));
         if self.project == before {
             // Nothing of it is in the song as it stands (it is held in
             // something that was removed): there is nothing to play anew.

@@ -436,6 +436,14 @@ pub fn diff(before: &Project, after: &Project, doc: &Doc) -> Vec<Op> {
                     ops.push(Op::Param(id, name.clone(), Some(*value)));
                 }
             }
+            if old.files != device.files {
+                for slot in old.files.keys().filter(|slot| !device.files.contains_key(*slot)) {
+                    ops.push(Op::Sample(id, slot.clone(), None));
+                }
+                for (slot, is) in device.files.iter().filter(|(slot, is)| old.files.get(*slot) != Some(is)) {
+                    ops.push(Op::Sample(id, slot.clone(), Some(is.clone())));
+                }
+            }
         }
         // The ones that are gone from this chain, if they are gone from
         // the song.

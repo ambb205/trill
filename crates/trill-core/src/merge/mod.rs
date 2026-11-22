@@ -252,6 +252,9 @@ pub enum Op {
     /// A parameter's value by its name, or with `None` whatever the device
     /// has it at by itself.
     Param(DeviceId, String, Option<f64>),
+    /// What the file in a slot of a device is (`sample`, `pad 36`), or
+    /// with `None` that nothing is said of it.
+    Sample(DeviceId, String, Option<crate::files::FileIs>),
     Lane(AutomationTarget, LaneSet),
     /// Points made in an envelope or a curve.
     Points(Home, Vec<AutomationPoint>),
@@ -297,6 +300,8 @@ pub enum Key {
     Note(ClipId, u64, u8),
     Device(DeviceId, u8),
     Param(DeviceId, String),
+    /// What the file in a slot of a device is, by the slot's name.
+    Sample(DeviceId, String),
     Lane(AutomationTarget, u8),
     Point(Home, u64, u8),
     /// The order of the song's envelopes.
@@ -331,6 +336,7 @@ impl Key {
             | Key::Meter(_)
             | Key::Send(..)
             | Key::Param(..)
+            | Key::Sample(..)
             | Key::Lane(..)
             | Key::Envelopes => return None,
         })
@@ -449,6 +455,7 @@ impl Op {
             Op::Device(id, DeviceOp::At(..)) => Key::Device(*id, PLACE),
             Op::Device(id, DeviceOp::Set(set)) => Key::Device(*id, set.prop()),
             Op::Param(device, name, _) => Key::Param(*device, name.clone()),
+            Op::Sample(device, slot, _) => Key::Sample(*device, slot.clone()),
             Op::Lane(target, set) => Key::Lane(target.clone(), set.prop()),
             Op::Point(home, id, PointOp::Alive(_)) => Key::Point(home.clone(), *id, ALIVE),
             Op::Point(home, id, PointOp::Set(set)) => Key::Point(home.clone(), *id, set.prop()),

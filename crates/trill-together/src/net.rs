@@ -108,6 +108,13 @@ pub enum Event {
         turned: Turned,
         again: bool,
     },
+    /// What the meeting point says the key this program shares with may
+    /// still pass today, in bytes, and when that day is over. Said when
+    /// the meeting point says, every twenty seconds or so.
+    Allowance {
+        left: u64,
+        over: Instant,
+    },
 }
 
 /// One connection, as the program that drives the song holds it.
@@ -283,6 +290,7 @@ impl Hold {
                     pause = FIRST_PAUSE;
                     let _ = self.happened.send(Event::Held);
                     let mut spent = false;
+                    let mut left = None;
                     loop {
                         if self.stop.load(Ordering::Relaxed) {
                             // Whoever asks from here on is told it is over.
@@ -293,6 +301,12 @@ impl Hold {
                             Ok(Some(ticket)) => self.take(ticket),
                             Ok(None) => {}
                             Err(turned) => break turned,
+                        }
+                        if holding.left() != left {
+                            left = holding.left();
+                            if let Some((left, over)) = left {
+                                let _ = self.happened.send(Event::Allowance { left, over });
+                            }
                         }
                         if holding.spent() != spent {
                             spent = holding.spent();

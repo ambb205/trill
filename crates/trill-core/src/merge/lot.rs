@@ -212,7 +212,7 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
         _ => AutomationTarget::Send { track, to: other },
     };
     let kinds = [TrackKind::Normal, TrackKind::Normal, TrackKind::Group, TrackKind::Return];
-    match lot.below(54) {
+    match lot.below(55) {
         0 => Box::new(move |song| {
             song.add_track_of_kind(format!("Track {a}"), kinds[b % 4]);
             Ok(())
@@ -343,6 +343,19 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
             );
             if let crate::project::ClipContent::Audio(audio) = &mut song.clip_mut(clip)?.content {
                 audio.is = (a % 4 != 0).then_some(is);
+            }
+            Ok(())
+        }),
+        53 => Box::new(move |song| {
+            // And what the file in a slot of a device is.
+            let is = crate::files::FileIs::new(
+                crate::files::Content::new(&[(b % 5) as u8; 32], 2000 + (c % 4) as u64),
+                &format!("hit {}.wav", c % 3),
+            );
+            let slot = ["sample", "pad 36", "pad 38"][a % 3].to_owned();
+            match b % 4 {
+                0 => drop(song.device_mut(device)?.files.remove(&slot)),
+                _ => drop(song.device_mut(device)?.files.insert(slot, is)),
             }
             Ok(())
         }),

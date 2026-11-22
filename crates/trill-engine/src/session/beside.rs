@@ -26,6 +26,12 @@
 //! before it (a song that was recovered names recordings of an earlier
 //! run). Not only at the first save: a take that was still being recorded
 //! when the song was saved is brought when it ends.
+//!
+//! **What a shared song brought from other programs comes beside it the
+//! same way**, into `<song> files/from others`, under the name the song
+//! says the file by: until then it lies in a folder of the program's own
+//! (`session/content.rs`). A song that was saved is whole in its own
+//! folder, whoever recorded what is in it.
 
 use super::{Session, SessionError};
 use parking_lot::Mutex;
@@ -38,6 +44,10 @@ use trill_core::merge::{self, AudioSet, ClipOp, DeviceOp, DeviceSet, Doc, Op};
 use trill_core::project::AudioContent;
 use trill_core::{ChainRef, Project};
 use trill_dsp::SampleFiles;
+
+/// The folder beside a song's takes that holds what the song brought
+/// from other programs.
+pub const FROM_OTHERS_FOLDER: &str = "from others";
 
 /// A path as two spellings of it are told to be one: Windows minds
 /// neither the case of a name nor which way its strokes lean, and a song
@@ -243,6 +253,10 @@ impl Session {
     /// was recorded: it lies in a folder of such a song, of this run of
     /// the program or of one before it.
     fn has_no_place(&self, path: &Path) -> bool {
+        // What the open song brought from other programs, where it is whole.
+        if self.is_awaited(&path.to_string_lossy()) {
+            return path.extension().is_some_and(|ending| ending != "part");
+        }
         let base = self.unsaved_base();
         let Some(root) = base.parent() else { return false };
         // `<root>/<a run>/song N/<the recording>`
@@ -291,6 +305,7 @@ impl Session {
         for (old, new) in moved {
             self.audio.media().forget(Path::new(old));
             self.audio.media().forget(Path::new(new));
+            self.follow_renamed(old, new);
         }
         // The same sound from another name: the graph is made again, and
         // whoever shows the song reads it again. Whether the song has
@@ -325,7 +340,19 @@ impl Session {
                 continue;
             }
             let stem = from.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-            let to = Self::free_recording_name(&folder, &stem, &mut names);
+            let to = match self.is_awaited(old) {
+                false => Self::free_recording_name(&folder, &stem, &mut names),
+                // What came from another program, under the name the song
+                // says it by and with the ending of the kind it is.
+                true => {
+                    let others = folder.with_file_name(FROM_OTHERS_FOLDER);
+                    std::fs::create_dir_all(&others).map_err(|error| super::io_error(&others, error))?;
+                    let said = self.said_name_of(old).unwrap_or_default();
+                    let said = Path::new(&said).file_stem().map(|stem| stem.to_string_lossy().into_owned());
+                    let kind = trill_core::files::kind_of(old);
+                    Self::free_name_of_kind(&others, &said.unwrap_or_default(), kind, &mut names)
+                }
+            };
             let new = to.to_string_lossy().into_owned();
             // A second name for the same file, where the volume gives one.
             if !self.copies_recordings() && std::fs::hard_link(from, &to).is_ok() {

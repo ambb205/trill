@@ -39,7 +39,7 @@ fn a_stranger_who_says_nothing_or_too_slowly_or_too_much_or_nonsense_is_let_go_o
     // has, and the whole has no longer for it.
     let slow = point.stranger();
     let began = Instant::now();
-    for byte in b"trill-meet 1 join 0000".iter().cycle() {
+    for byte in b"trill-meet 2 join 0000".iter().cycle() {
         if (&slow).write_all(&[*byte]).is_err() || began.elapsed() > Duration::from_secs(20) {
             break;
         }
@@ -60,7 +60,7 @@ fn a_stranger_who_says_nothing_or_too_slowly_or_too_much_or_nonsense_is_let_go_o
     let nobodys = Meeting::of(b"nobody opened this");
     for (said, answer) in [
         ("GET / HTTP/1.1".to_owned(), "no what"),
-        (format!("trill-meet 2 join {nobodys}"), "no version"),
+        (format!("trill-meet 1 join {nobodys}"), "no version"),
         // A knock nobody was told of.
         (Hello::Take(Ticket::new().unwrap()).line(), "no ticket"),
     ] {

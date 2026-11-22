@@ -203,6 +203,9 @@ pub struct Session {
     /// since then means a stand-in may be ready to be replaced.
     stretches_seen: u64,
     problems: Vec<Problem>,
+    /// The places of the song whose file is on its way from another
+    /// program: not here yet, and no problem. See `session/content.rs`.
+    arriving_files: Vec<trill_core::FilePlace>,
     path: Option<PathBuf>,
     /// Bumped on every change to the project, so views know when to refresh.
     revision: u64,
@@ -231,6 +234,17 @@ pub struct Session {
     /// The folder files that come from other programs are kept in, where
     /// whoever fetches them has said; see `session/content.rs`.
     received: Option<std::path::PathBuf>,
+    /// The paths that were named on this machine, in this song: by the
+    /// song's file as it was opened, by a change made here, by a recording.
+    /// Any other path in a device's state arrived from another program,
+    /// and is no place here.
+    named_here: std::collections::HashSet<String>,
+    /// Of those, the ones that may be read to be said and handed out: the
+    /// user was shown them, or their own hand brought them into the song.
+    let_go: std::collections::HashSet<String>,
+    /// Where this machine was found to have which bytes, as of the last
+    /// time the song's files were looked at.
+    read_here: std::collections::HashMap<trill_core::Content, String>,
     /// What is kept of the song being one that others hold too.
     sharing: together::Sharing,
 }
@@ -296,6 +310,7 @@ impl Session {
             stand_ins: StandIns::default(),
             stretches_seen: 0,
             problems: Vec::new(),
+            arriving_files: Vec::new(),
             path: None,
             revision: 0,
             saved_revision: 0,
@@ -309,6 +324,9 @@ impl Session {
             opening,
             files: trill_core::FileTable::default(),
             received: None,
+            named_here: Default::default(),
+            let_go: Default::default(),
+            read_here: Default::default(),
             sharing: together::Sharing::new(),
         };
         session.replace_project(Self::blank_project("Untitled"));
@@ -1337,6 +1355,9 @@ impl Session {
             // The song is what its properties come to.
             let _ = self.rederive();
         }
+        // What it names on this disk was named here, and none of it may
+        // go to anyone until its user says so.
+        self.forget_what_may_go();
         self.undo.clear();
         self.redo.clear();
         // Ids restart in every project; nothing running may be mistaken for
@@ -1410,7 +1431,9 @@ impl Session {
             purpose: trill_core::device::Purpose::Playing,
         }
         .compile_live(heard.as_ref().unwrap_or(&self.project), looping, &live);
-        self.problems = problems;
+        // A file that is on its way from another program is no problem:
+        // it is said as arriving, as a device is.
+        (self.arriving_files, self.problems) = self.arriving_among(problems);
         // Which of its tracks can be made at once, for when the song is
         // more than one thread plays in time.
         let mut graph = graph;

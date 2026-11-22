@@ -166,6 +166,11 @@ pub enum Message {
     /// file, the program has not got it, it is gone): nobody learns by
     /// asking what a program has.
     Nothing { file: Content },
+    /// The answer to a [`Message::Want`] where the way between the two
+    /// passes no files for now (a meeting point whose keeper's allowance
+    /// for the day is nearly spent, which is left for what is said of the
+    /// song): asked again in this many seconds, it may be answered.
+    Later { seconds: u64 },
     /// Bytes of a file that were asked for, from `at`. Written as bytes
     /// and not as text ([`Message::encode`]).
     #[serde(skip)]

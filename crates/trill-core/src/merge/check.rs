@@ -117,9 +117,7 @@ fn shape(shape: Segment) -> Result<(), Refused> {
 
 fn audio(audio: &AudioContent) -> Result<(), Refused> {
     text(&audio.path)?;
-    if audio.is.as_ref().is_some_and(|is| !is.is_well_formed()) {
-        return refused("what a file is said to be is no hash of 64 digits with a file's name");
-    }
+    audio.is.as_ref().map_or(Ok(()), file_is)?;
     audio.validate()?;
     if !audio.gain_db.is_finite() {
         return refused("a clip's gain is not a number");
@@ -224,7 +222,24 @@ fn device(device: &Device) -> Result<(), Refused> {
         text(name)?;
         finite(*value, "a parameter")?;
     }
+    if device.files.len() > MAX_SLOTS {
+        return refused(format!("a device with {} files", device.files.len()));
+    }
+    for (slot, is) in &device.files {
+        text(slot)?;
+        file_is(is)?;
+    }
     Ok(())
+}
+
+/// How many files one device may be said to play.
+const MAX_SLOTS: usize = 4096;
+
+fn file_is(is: &crate::files::FileIs) -> Result<(), Refused> {
+    match is.is_well_formed() {
+        true => Ok(()),
+        false => refused("what a file is said to be is no hash of 64 digits with a file's name"),
+    }
 }
 
 fn track(mut track: Track) -> Result<Track, Refused> {
@@ -467,6 +482,12 @@ impl Op {
                     finite(set, "a parameter")?;
                 }
                 Op::Param(of, name, set)
+            }
+            Op::Sample(of, slot, is) => {
+                id(of.0)?;
+                text(&slot)?;
+                is.as_ref().map_or(Ok(()), file_is)?;
+                Op::Sample(of, slot, is)
             }
             Op::Envelopes(order) => {
                 if order.len() > MAX_OPS {

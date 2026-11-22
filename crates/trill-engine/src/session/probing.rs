@@ -165,6 +165,7 @@ impl Session {
                     preset: None,
                     from_preset: None,
                     sidechain: None,
+                    files: Default::default(),
                 };
                 let mut to_load = None;
                 if let Some(wanted) = preset {

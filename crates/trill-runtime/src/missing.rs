@@ -524,7 +524,14 @@ fn difference(was: &KnownFile, is: &KnownFile) -> String {
 /// [`Runtime::files_missing`], for a caller that holds the session.
 pub fn files_missing_in(session: &Session) -> Missing {
     let tracks = session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
-    whole(session.files(), tracks, session.known_files())
+    whole(not_awaited(session), tracks, session.known_files())
+}
+
+/// The places the song names a file, without the ones whose file is on
+/// its way from another program: such a file is arriving, not missing,
+/// and nobody is to go looking for it.
+fn not_awaited(session: &Session) -> Vec<FileUse> {
+    session.files().into_iter().filter(|file| !session.is_awaited(&file.path)).collect()
 }
 
 /// What is missing among `uses`, in a song whose tracks are `tracks`, in
@@ -544,7 +551,7 @@ impl Runtime {
             let session = self.session.lock();
             let tracks: Vec<(TrackId, String)> =
                 session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
-            (session.files(), tracks, session.known_files().clone())
+            (not_awaited(&session), tracks, session.known_files().clone())
         };
         // The disk is asked with the session free.
         whole(uses, tracks, &table)
@@ -733,11 +740,45 @@ impl Runtime {
     /// ([`trill_engine::Session::relink`]). The files are decoded here
     /// first, with the session free, so that the song keeps playing while
     /// a long one is read. Returns how many places now play another file.
+    ///
+    /// **In a song others hold too, a file that is pointed at is taken
+    /// where its bytes are what the song says.** The song says what each
+    /// of its files is; a file given for a place of which it says so is
+    /// read here, with the session free, and held against that: taken
+    /// where it is the file (nothing is fetched then, which is how two
+    /// people with the same sample pack each play their own), and refused
+    /// in a sentence where it is not, with nothing relinked. Of a place
+    /// the song says nothing of, the file is taken as it always was.
     pub fn relink(&self, relinks: &[Relink]) -> Result<usize, SessionError> {
         let paths: BTreeSet<&str> = relinks.iter().map(|relink| relink.path.as_str()).collect();
-        for path in paths {
+        for path in &paths {
             // What cannot be read is said by the session, which refuses it.
             let _ = self.media.audio(Path::new(path));
+        }
+        // What the song says each place's file is.
+        let said: BTreeMap<trill_core::FilePlace, trill_core::FileIs> = {
+            let session = self.session.lock();
+            session.files_here().into_iter().filter_map(|file| Some((file.place, file.is?))).collect()
+        };
+        let mut read: BTreeMap<&str, Option<trill_core::Content>> = BTreeMap::new();
+        for relink in relinks {
+            let Some(is) = said.get(&relink.place) else { continue };
+            let found = read
+                .entry(relink.path.as_str())
+                .or_insert_with(|| trill_together::files::content_of(Path::new(&relink.path), |_| true).ok().flatten());
+            // (One that cannot be read at all is the session's to refuse.)
+            if let Some(found) = found
+                && *found != is.content()
+            {
+                return Err(SessionError::Io(format!(
+                    "'{}' is not the file the song names as '{}': its bytes are others ({} against the song's {}). \
+                     Nothing was relinked. The song's own file arrives from whoever has it",
+                    relink.path,
+                    is.name,
+                    found,
+                    is.content()
+                )));
+            }
         }
         self.session.lock().relink(relinks)
     }
