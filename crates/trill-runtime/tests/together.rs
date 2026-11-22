@@ -549,6 +549,9 @@ fn a_link_that_is_lost_comes_back_by_itself_and_what_each_did_meanwhile_is_merge
     assert!(at_ada.contains("Ben is away: the connection was lost"), "{at_ada}");
     assert!(at_ada.contains(&format!("The meeting point {} is away", point.address)), "{at_ada}");
     assert!(!at_ben.contains("invitation again"), "nobody is asked to paste anything: {at_ben}");
+    // What the system says of a connection that was closed is about
+    // buffers: neither is told that.
+    assert!(!at_ada.contains("buffer") && !at_ben.contains("buffer"), "{at_ada}\n{at_ben}");
 
     // Each goes on alone meanwhile.
     ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();

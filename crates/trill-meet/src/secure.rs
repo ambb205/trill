@@ -65,6 +65,9 @@ pub enum Broken {
 impl std::fmt::Display for Broken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // (What the system says of a connection that was closed is
+            // about buffers, and is nobody's to read.)
+            Broken::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => write!(f, "the connection was closed"),
             Broken::Io(error) => write!(f, "the connection ended: {error}"),
             Broken::NotTrusted => write!(
                 f,

@@ -53,6 +53,15 @@ impl Turned {
         }
     }
 
+    /// In a few words, for where the meeting point is named already and
+    /// what there is to do about it is said beside this.
+    pub fn briefly(&self) -> String {
+        match self {
+            Turned::NoAnswer(why) => why.clone(),
+            other => other.sentence(),
+        }
+    }
+
     /// Whether asking again by itself is no use: something has to be
     /// changed first (the key, the address, the build), or the meeting is
     /// over.
@@ -65,7 +74,12 @@ impl Turned {
 }
 
 fn gone(error: io::Error) -> Turned {
-    Turned::NoAnswer(error.to_string())
+    match error.kind() {
+        // (What the system says of a connection that ended is about
+        // buffers, and is nobody's to read.)
+        io::ErrorKind::UnexpectedEof => Turned::NoAnswer("the connection was closed".to_owned()),
+        _ => Turned::NoAnswer(error.to_string()),
+    }
 }
 
 fn broken(broken: Broken) -> Turned {
@@ -104,7 +118,7 @@ fn said_and_heard(stream: &TcpStream, line: &str, end: Instant) -> Result<String
     let said = say_line(stream, line, ANSWERING);
     match hear_line(stream, end) {
         Ok(line) => Ok(line),
-        Err(NoLine::Late) => Err(Turned::NoAnswer("it did not answer in time".to_owned())),
+        Err(NoLine::Late) => Err(Turned::NoAnswer("nothing came back in time".to_owned())),
         Err(NoLine::NoLine) => Err(Turned::NotOne),
         Err(NoLine::Gone(error)) => Err(gone(said.err().unwrap_or(error))),
     }

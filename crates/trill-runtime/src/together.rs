@@ -735,6 +735,7 @@ impl Driver {
                         ));
                     } else {
                         // Said when it begins, and not again for every try.
+                        let sentence = turned.briefly();
                         let news = *meeting != Meeting::Away(sentence.clone());
                         let was_held = *meeting == Meeting::Held;
                         *meeting = Meeting::Away(sentence.clone());
