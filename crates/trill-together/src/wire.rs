@@ -10,7 +10,9 @@ use trill_core::{ClipId, TrackId};
 ///
 /// 2: a take is said (a clip that is kept beside its track, in a lane),
 /// and the order of a song's envelopes.
-pub const PROTOCOL: u32 = 2;
+///
+/// 3: the order of a track's sends is said.
+pub const PROTOCOL: u32 = 3;
 
 /// The most one message may be: a whole song with its plugins' states.
 pub const MAX_MESSAGE: usize = 256 << 20;

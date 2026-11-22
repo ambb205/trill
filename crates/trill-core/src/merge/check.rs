@@ -360,6 +360,15 @@ impl Op {
                         set @ (TrackSet::Mute(_) | TrackSet::Solo(_)) => set,
                     }),
                     part @ (TrackOp::Alive(_) | TrackOp::Listening(_)) => part,
+                    TrackOp::Sends(order) => {
+                        if order.len() > MAX_OPS {
+                            return refused(format!("the order of {} sends at once", order.len()));
+                        }
+                        for to in &order {
+                            id(to.0)?;
+                        }
+                        TrackOp::Sends(order)
+                    }
                 };
                 Op::Track(of, part)
             }

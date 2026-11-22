@@ -25,6 +25,7 @@ trill-theory = { path = "crates/trill-theory" }
 trill-together = { path = "crates/trill-together" }
 trill-mcp = { path = "crates/trill-mcp" }
 trill-media = { path = "crates/trill-media" }
+trill-meet = { path = "crates/trill-meet" }
 trill-noir = { path = "crates/trill-noir" }
 
 anyhow = "1"

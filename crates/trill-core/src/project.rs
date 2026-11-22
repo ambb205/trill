@@ -1545,7 +1545,8 @@ impl Project {
             sort_clips(&mut track.clips);
             // Takes in the order they were made, which their ids say.
             track.takes.sort_by_key(|take| take.clip.id);
-            track.sends.sort_by_key(|send| send.to);
+            // (Its sends are left in the order they were made in, as a
+            // file has them: a song is not written anew by being opened.)
         }
         for lane in &mut self.automation {
             let was = before.and_then(|before| before.automation.iter().find(|was| was.target == lane.target));
@@ -1942,13 +1943,18 @@ impl Project {
         let level_db = level_db.map(validate_volume).transpose()?;
         let before = self.track(id)?.sends.clone();
         let sends = &mut self.track_mut(id)?.sends;
-        sends.retain(|send| send.to != to);
-        if let Some(level_db) = level_db {
-            sends.push(Send { to, level_db });
-            if let Err(error) = self.no_loop(format!("sending {id} to {to}")) {
-                self.track_mut(id)?.sends = before;
-                return Err(error);
-            }
+        // A track's sends are held in the order they were made in: one
+        // that is there keeps its place, and a new one is the last.
+        match (level_db, sends.iter_mut().find(|send| send.to == to)) {
+            (Some(level_db), Some(send)) => send.level_db = level_db,
+            (Some(level_db), None) => sends.push(Send { to, level_db }),
+            (None, _) => sends.retain(|send| send.to != to),
+        }
+        if level_db.is_some()
+            && let Err(error) = self.no_loop(format!("sending {id} to {to}"))
+        {
+            self.track_mut(id)?.sends = before;
+            return Err(error);
         }
         Ok(())
     }

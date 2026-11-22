@@ -1,0 +1,36 @@
+[package]
+name = "trill-meet"
+description = "A meeting point: a small server through which two Trills that cannot reach each other connect, and which can neither read nor join their song"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Nothing of Trill is in here, and nothing of Windows: no song, no audio,
+# no window. It builds as one static file for a Linux server
+# (`--target x86_64-unknown-linux-musl`), and the same code is the client
+# half that Trill links (`trill-together`).
+
+[[bin]]
+name = "trill-meet"
+path = "src/main.rs"
+
+[dependencies]
+# The Noise protocol: who may open a meeting is proved by it, and two
+# Trills prove an invitation to each other by it, through the meeting
+# point. No cipher is written here. Only the pieces one handshake needs
+# are built: X25519, ChaCha20-Poly1305 and BLAKE2 (Apache-2.0 or MIT).
+# (Without its `std` feature, which would bring in `ring` and a second
+# SHA-2 that nothing here uses.)
+snow = { version = "0.10", default-features = false, features = [
+    "use-chacha20poly1305",
+    "use-blake2",
+    "use-curve25519",
+    "use-getrandom",
+] }
+# A key's secret and a knock's ticket, from the system's own source. In
+# the tree already, through snow.
+getrandom = "0.3"
+# What a meeting is known by, worked out one way from an invitation's
+# secret, and what proves a key. In the tree already.
+sha2 = "0.11"

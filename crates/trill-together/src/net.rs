@@ -10,7 +10,7 @@
 //! falls too far behind is let go of.
 
 use crate::invite::Invitation;
-use crate::secure::{Broken, Hearer, Sayer, secure};
+use crate::point::MeetingPoint;
 use crate::wire::{MAX_MESSAGE, Message};
 use std::collections::HashMap;
 use std::io;
@@ -19,9 +19,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use trill_meet::secure::{Broken, Hearer, Sayer, secure};
+use trill_meet::{Door, Holding, Key, Meeting, No, Ticket, Turned};
 
 /// Which connection.
 pub type LinkId = u64;
+/// Which asking for a connection ([`Net::join`]).
+pub type JoinId = u64;
 
 /// How much may wait to be said to one program before it is taken to
 /// have stopped hearing.
@@ -37,6 +41,13 @@ const CONNECTING: Duration = Duration::from_secs(8);
 /// seconds at the most), on a thread of its own: whoever opens many
 /// without it gets no more threads than this.
 const MAX_MEETING: usize = 16;
+/// How long a meeting point that could not be reached, or was lost, is
+/// left alone before it is tried again: this long the first time and
+/// twice as long each time after, up to the longest.
+const FIRST_PAUSE: Duration = Duration::from_secs(1);
+const LONGEST_PAUSE: Duration = Duration::from_secs(20);
+/// How often the thread that holds a meeting looks whether it is to stop.
+const LOOKING: Duration = Duration::from_millis(100);
 
 /// Where to listen.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -53,30 +64,50 @@ pub enum Reach {
 #[derive(Debug)]
 pub enum Event {
     /// A connection is there, proved and encrypted: nothing has been said
-    /// over it yet. `joined` for one this program asked for.
+    /// over it yet. `joined` for one this program asked for, with which
+    /// asking it was.
     Open {
         link: LinkId,
-        joined: bool,
+        joined: Option<JoinId>,
     },
     Heard {
         link: LinkId,
         message: Message,
     },
-    /// A connection is gone, and why.
+    /// A connection is gone, and why. `told`: one side ended it and said
+    /// so (the other's last words, or this program's own). Otherwise it
+    /// was lost on the way, and whoever asked for it may ask again.
     Lost {
         link: LinkId,
         why: String,
+        told: bool,
     },
-    /// Joining did not come to a connection.
+    /// Joining did not come to a connection. `for_good`: asking again by
+    /// itself is no use (the invitation is another's or no longer one);
+    /// otherwise what was in the way may be gone a moment later.
     Failed {
+        join: JoinId,
         why: String,
+        for_good: bool,
+    },
+    /// The meeting this program shares through is open at the meeting
+    /// point: whoever has the invitation gets in.
+    Held,
+    /// It is not, and why. With `again` this program goes on trying by
+    /// itself, and a [`Event::Held`] follows when it has it back; without,
+    /// something has to be changed first (the key, the address) and
+    /// nothing is listened for any more.
+    Unheld {
+        turned: Turned,
+        again: bool,
     },
 }
 
 /// One connection, as the program that drives the song holds it.
 struct Link {
     say: Sender<Arc<Vec<u8>>>,
-    socket: TcpStream,
+    /// The connection's one handle, to end it by.
+    socket: Arc<TcpStream>,
     /// How many bytes wait to be said.
     waiting: Arc<AtomicUsize>,
 }
@@ -84,6 +115,110 @@ struct Link {
 struct Listening {
     invitation: Invitation,
     stop: Arc<AtomicBool>,
+    /// For a meeting held at a meeting point: where the thread that holds
+    /// it says that it has ended it there.
+    ended: Option<Receiver<()>>,
+}
+
+/// What the thread that holds a meeting at a meeting point has.
+struct Hold {
+    address: String,
+    key: Key,
+    meeting: Meeting,
+    /// What whoever asks for the meeting has to show that they have.
+    door: Door,
+    /// What the two programs prove to each other: the invitation's.
+    proved_by: [u8; 32],
+    stop: Arc<AtomicBool>,
+    /// How many knocks are being taken up and proved at the moment.
+    proving: Arc<AtomicUsize>,
+    links: Arc<Mutex<HashMap<LinkId, Link>>>,
+    last: Arc<AtomicU64>,
+    happened: Sender<Event>,
+}
+
+impl Hold {
+    /// Holds the meeting open until it is told to stop: lost, it is
+    /// opened again, after a pause that grows.
+    fn run(self) {
+        let mut pause = FIRST_PAUSE;
+        while !self.stop.load(Ordering::Relaxed) {
+            let turned = match Holding::open(&self.address, &self.key, self.meeting, self.door) {
+                Ok(mut holding) => {
+                    pause = FIRST_PAUSE;
+                    let _ = self.happened.send(Event::Held);
+                    let mut spent = false;
+                    loop {
+                        if self.stop.load(Ordering::Relaxed) {
+                            // Whoever asks from here on is told it is over.
+                            holding.close();
+                            return;
+                        }
+                        match holding.next(LOOKING) {
+                            Ok(Some(ticket)) => self.take(ticket),
+                            Ok(None) => {}
+                            Err(turned) => break turned,
+                        }
+                        if holding.spent() != spent {
+                            spent = holding.spent();
+                            let _ = self.happened.send(match spent {
+                                true => Event::Unheld { turned: Turned::No(No::Spent), again: true },
+                                false => Event::Held,
+                            });
+                        }
+                    }
+                }
+                Err(turned) => turned,
+            };
+            if self.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let again = !turned.for_good();
+            let _ = self.happened.send(Event::Unheld { turned, again });
+            if !again {
+                return;
+            }
+            let until = Instant::now() + pause;
+            while Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
+                std::thread::sleep(LOOKING);
+            }
+            pause = (pause * 2).min(LONGEST_PAUSE);
+        }
+    }
+
+    /// Someone asked the meeting point for this meeting: a connection to
+    /// them is taken up, through it, and they prove the invitation over it
+    /// as on a connection of their own, on a thread of its own.
+    fn take(&self, ticket: Ticket) {
+        // (As many as may be proving who they are: this one is let go of,
+        // and the meeting point tells it that nobody answered in time.)
+        if self.proving.load(Ordering::Relaxed) >= MAX_MEETING {
+            return;
+        }
+        let (address, proved_by, proving) = (self.address.clone(), self.proved_by, self.proving.clone());
+        let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
+        proving.fetch_add(1, Ordering::Relaxed);
+        let met = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
+            let secured = match trill_meet::client::take(&address, ticket) {
+                Ok(stream) => secure(stream, &proved_by, false).map_err(|broken| broken.to_string()),
+                Err(turned) => Err(turned.sentence()),
+            };
+            proving.fetch_sub(1, Ordering::Relaxed);
+            match secured {
+                Ok(pair) => {
+                    if let Err(error) = open(pair, None, &links, &last, &happened) {
+                        log::warn!("a program that connected could not be heard: {error}");
+                    }
+                }
+                // Someone without the invitation: nothing is said of it
+                // to anyone but the log.
+                Err(why) => log::info!("a connection through the meeting point was not taken: {why}"),
+            }
+        });
+        if met.is_err() {
+            self.proving.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The connections of one program.
@@ -110,20 +245,20 @@ impl Default for Net {
 /// says that it is open.
 fn open(
     (mut sayer, mut hearer): (Sayer, Hearer),
-    joined: bool,
+    joined: Option<JoinId>,
     links: &Arc<Mutex<HashMap<LinkId, Link>>>,
     last: &Arc<AtomicU64>,
     happened: &Sender<Event>,
 ) -> io::Result<()> {
     let link = last.fetch_add(1, Ordering::Relaxed) + 1;
-    let socket = hearer.socket()?;
+    let socket = hearer.socket();
     let (say, to_say) = channel::<Arc<Vec<u8>>>();
     let waiting = Arc::new(AtomicUsize::new(0));
-    links.lock().unwrap().insert(link, Link { say, socket: socket.try_clone()?, waiting: waiting.clone() });
+    links.lock().unwrap().insert(link, Link { say, socket: socket.clone(), waiting: waiting.clone() });
     // Open is said before anything can be heard.
     let _ = happened.send(Event::Open { link, joined });
 
-    let saying_socket = socket.try_clone()?;
+    let saying_socket = socket.clone();
     std::thread::Builder::new().name("trill-together-say".into()).spawn(move || {
         for message in to_say {
             let said = sayer.say(&message);
@@ -140,36 +275,40 @@ fn open(
     let (links, happened) = (links.clone(), happened.clone());
     std::thread::Builder::new().name("trill-together-hear".into()).spawn(move || {
         let (mut since, mut count) = (Instant::now(), 0u32);
-        let why = loop {
+        // Why it ended, and whether a side ended it and said so: what is
+        // neither was lost on the way.
+        let (why, told) = loop {
             let message = match hearer.hear(MAX_MESSAGE) {
                 Ok(bytes) => Message::decode(&bytes),
                 Err(Broken::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                    break "the other program closed the connection".to_owned();
+                    break ("the other program closed the connection".to_owned(), false);
                 }
-                Err(broken) => break broken.to_string(),
+                Err(Broken::Io(error)) => break (Broken::Io(error).to_string(), false),
+                Err(broken) => break (broken.to_string(), true),
             };
             if since.elapsed() > WINDOW {
                 (since, count) = (Instant::now(), 0);
             }
             count += 1;
             if count > MAX_IN_WINDOW {
-                break "the other program said more, faster, than anything it could be doing to a song".to_owned();
+                let why = "the other program said more, faster, than anything it could be doing to a song";
+                break (why.to_owned(), true);
             }
             match message {
                 // In the other side's own words.
-                Ok(Message::Bye { why }) => break shortened(&why),
+                Ok(Message::Bye { why }) => break (shortened(&why), true),
                 Ok(message) => {
                     if happened.send(Event::Heard { link, message }).is_err() {
-                        break "this program stopped listening".to_owned();
+                        break ("this program stopped listening".to_owned(), true);
                     }
                 }
-                Err(why) => break why,
+                Err(why) => break (why, true),
             }
         };
         let _ = socket.shutdown(Shutdown::Both);
         // Only if it was not let go of from here, which is said there.
         if links.lock().unwrap().remove(&link).is_some() {
-            let _ = happened.send(Event::Lost { link, why });
+            let _ = happened.send(Event::Lost { link, why, told });
         }
     })?;
     Ok(())
@@ -241,7 +380,7 @@ impl Net {
                     proving.fetch_sub(1, Ordering::Relaxed);
                     match secured {
                         Ok(pair) => {
-                            if let Err(error) = open(pair, false, &links, &last, &happened) {
+                            if let Err(error) = open(pair, None, &links, &last, &happened) {
                                 log::warn!("a program that connected could not be heard: {error}");
                             }
                         }
@@ -255,7 +394,42 @@ impl Net {
                 }
             }
         })?;
-        self.listening = Some(Listening { invitation: invitation.clone(), stop });
+        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: None });
+        Ok(invitation)
+    }
+
+    /// Shares through a meeting point, and returns the invitation, which
+    /// carries the meeting point's address. Nothing listens: this program
+    /// connects outward, holds a meeting open there with the key its
+    /// keeper gave, and takes up a connection through it for whoever asks
+    /// for the meeting. Whether the meeting is open there follows as an
+    /// [`Event::Held`] or an [`Event::Unheld`]; lost, it is opened again
+    /// by itself. A program that shares already goes on under the
+    /// invitation it has.
+    pub fn listen_through(&mut self, point: &MeetingPoint) -> io::Result<Invitation> {
+        if let Some(listening) = &self.listening {
+            return Ok(listening.invitation.clone());
+        }
+        let invitation = Invitation::through(point.host.clone(), point.port)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let hold = Hold {
+            address: point.address(),
+            key: point.key.clone(),
+            meeting: invitation.meeting(),
+            door: invitation.door(),
+            proved_by: invitation.key(),
+            stop: stop.clone(),
+            proving: Arc::default(),
+            links: self.links.clone(),
+            last: self.last.clone(),
+            happened: self.happened.clone(),
+        };
+        let (done, ended) = channel();
+        std::thread::Builder::new().name("trill-together-hold".into()).spawn(move || {
+            hold.run();
+            let _ = done.send(());
+        })?;
+        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: Some(ended) });
         Ok(invitation)
     }
 
@@ -264,37 +438,77 @@ impl Net {
         self.listening.as_ref().map(|listening| &listening.invitation)
     }
 
-    /// Stops listening: the port is closed, and the invitation is no
-    /// longer one. The programs that are connected stay.
+    /// Stops listening: the port is closed, or the meeting ended at its
+    /// meeting point, and the invitation is no longer one. The programs
+    /// that are connected stay.
     pub fn stop_listening(&mut self) {
         if let Some(listening) = self.listening.take() {
             listening.stop.store(true, Ordering::Relaxed);
+            // A meeting is ended where it is held, so that whoever asks
+            // for it is told that it is over and not that its holder is
+            // away: waited for, a moment, because a program that is being
+            // closed ends before a thread of its own has said so.
+            if let Some(ended) = listening.ended {
+                let _ = ended.recv_timeout(Duration::from_secs(1));
+            }
         }
     }
 
     /// Connects to the program that handed out `invitation`, on a thread
     /// of its own: what comes of it is an [`Event::Open`] or an
-    /// [`Event::Failed`].
-    pub fn join(&mut self, invitation: Invitation) {
+    /// [`Event::Failed`], each with the number this returns.
+    pub fn join(&mut self, invitation: Invitation) -> JoinId {
+        let join = self.last.fetch_add(1, Ordering::Relaxed) + 1;
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
         let failed = self.happened.clone();
         let spawned = std::thread::Builder::new().name("trill-together-join".into()).spawn(move || {
-            let connect = || -> Result<(), String> {
+            // Why not, and whether asking again by itself is no use.
+            let connect = || -> Result<(), (String, bool)> {
                 use std::net::ToSocketAddrs;
                 let address = invitation.address();
-                let found = address.to_socket_addrs().map_err(|error| format!("{address} is no address: {error}"))?;
-                let mut last_error = format!("{address} is no address");
+                let unheard = |error: io::Error| (error.to_string(), false);
+                if invitation.meet {
+                    // Through the meeting point the invitation names: it
+                    // is asked for the meeting, and what comes back is a
+                    // connection to the program that shares, over which
+                    // the two prove the invitation as they would directly.
+                    let stream = trill_meet::client::join(&address, invitation.meeting(), invitation.door())
+                        .map_err(|turned| (turned.sentence(), turned.for_good()))?;
+                    let pair = secure(stream, &invitation.key(), true).map_err(|broken| match broken {
+                        Broken::Io(_) | Broken::NotTrusted => {
+                            let why = "the program that shares the song did not answer through the meeting point: \
+                                       its connection may have just dropped";
+                            (why.to_owned(), false)
+                        }
+                        broken => (broken.to_string(), false),
+                    })?;
+                    return open(pair, Some(join), &links, &last, &happened).map_err(unheard);
+                }
+                let found = (address.to_socket_addrs())
+                    .map_err(|error| (format!("{address} is no address this machine finds: {error}"), false))?;
+                let mut last_error = format!("{address} is no address this machine finds");
                 for candidate in found {
                     match TcpStream::connect_timeout(&candidate, CONNECTING) {
                         Ok(stream) => {
                             let pair = secure(stream, &invitation.key(), true).map_err(|broken| match broken {
-                                Broken::Io(_) | Broken::NotTrusted => format!(
-                                    "the program at {address} did not take this invitation: it is listening under \
-                                     another, or no longer shares its song"
-                                ),
-                                broken => broken.to_string(),
+                                // Told so by the program there.
+                                Broken::NotTrusted => {
+                                    let why = format!(
+                                        "the program at {address} did not take this invitation: it is listening \
+                                         under another, or no longer shares its song"
+                                    );
+                                    (why, true)
+                                }
+                                Broken::Io(_) => {
+                                    let why = format!(
+                                        "the connection to the program at {address} ended before the invitation \
+                                         was proved: it may have as many joining at once as it takes"
+                                    );
+                                    (why, false)
+                                }
+                                broken => (broken.to_string(), false),
                             })?;
-                            return open(pair, true, &links, &last, &happened).map_err(|error| error.to_string());
+                            return open(pair, Some(join), &links, &last, &happened).map_err(unheard);
                         }
                         Err(error) => {
                             last_error = format!(
@@ -304,15 +518,17 @@ impl Net {
                         }
                     }
                 }
-                Err(last_error)
+                Err((last_error, false))
             };
-            if let Err(why) = connect() {
-                let _ = happened.send(Event::Failed { why });
+            if let Err((why, for_good)) = connect() {
+                let _ = happened.send(Event::Failed { join, why, for_good });
             }
         });
         if let Err(error) = spawned {
-            let _ = failed.send(Event::Failed { why: format!("no thread could be started to connect: {error}") });
+            let why = format!("no thread could be started to connect: {error}");
+            let _ = failed.send(Event::Failed { join, why, for_good: false });
         }
+        join
     }
 
     /// Says `message` to one program. Nothing waits: it is said when the
@@ -380,7 +596,7 @@ impl Net {
             // takes it: the thread that says closes the connection when
             // its queue has ended, which it has now.
             drop(held);
-            let _ = self.happened.send(Event::Lost { link, why: why.to_owned() });
+            let _ = self.happened.send(Event::Lost { link, why: why.to_owned(), told: true });
         }
     }
 
@@ -404,6 +620,15 @@ impl Net {
         let mut events = std::mem::take(&mut self.early);
         events.extend(self.events.try_iter());
         events
+    }
+
+    /// Waits `at_most` so long for the next thing that happened, and
+    /// returns it alone: what happened after it stays to be asked for.
+    pub fn next(&mut self, at_most: Duration) -> Option<Event> {
+        match self.early.is_empty() {
+            true => self.events.recv_timeout(at_most).ok(),
+            false => Some(self.early.remove(0)),
+        }
     }
 
     /// Waits until something has happened, `at_most` so long: it is there

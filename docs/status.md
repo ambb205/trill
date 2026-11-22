@@ -129,8 +129,12 @@ Only Windows has been run so far.
 - Audio files that travel between machines. Each person needs the files where the song names them; a take one
   of them records is a file only they have, and a missing file for the others until it is there.
 - Hearing a plugin one has not got (a stem from whoever has it). Its place is kept and its settings are carried.
-- A meeting point for two home networks. A program joins wherever it can open a connection: the same machine, a
-  local network, a VPN, a forwarded port.
+- A direct way between two programs that met through a meeting point, where there is one. Everything they say
+  goes through it for as long as they are in the song.
+- Taking one person's leave away from a meeting, and a meeting point that is encrypted as a web site is (TLS).
+- A meeting point on ARM: nothing in the program is written for one processor, and nobody has built or run it
+  there.
+- A connection that is asked for again giving up by itself: it is asked for every half minute until one leaves.
 - A view of what happened while one was away. The notices say where work clashed; the journal has every step
   with who made it.
 - The assistant as a person of its own in the song. It acts as its user.
@@ -143,8 +147,9 @@ Only Windows has been run so far.
   arriving.
 - A journal that keeps what it keeps by the comparison everything else uses. It still has its own, coarser one;
   a step that arrives from someone else is entered under their name.
-- A second machine, and *My network*. Everything was run with both programs on one computer, over its
-  loopback; sharing to a network has not been run once, because it asks the firewall a question that is its
+- A second machine, and *My network*. Everything was run on one computer: both programs on Windows, and the
+  meeting point as the Linux program under WSL beside them. Nothing has crossed a real network, a router or the
+  internet; sharing to a network has not been run once, because it asks the firewall a question that is its
   user's to answer.
 
 ## Sounds of more than one device

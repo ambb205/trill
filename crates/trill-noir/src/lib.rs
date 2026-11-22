@@ -63,7 +63,7 @@ pub use bar::{Bar, BarOutput, bar};
 pub use button::{Variant, bare_icon_button, button, button_width, icon_button, tab, tab_width};
 pub use chip::{Chip, chip, chip_row, chip_row_width};
 pub use fader::{Fader, fader};
-pub use field::{NumberField, NumberOutput, number_field, text_field};
+pub use field::{NumberField, NumberOutput, number_field, secret_field, text_field};
 pub use icon::{Icon, paint_icon};
 pub use keymap::{KeyBox, KeyMap, key_map};
 pub use menu::{MenuItem, dropdown, dropdown_width, menu_heading, menu_separator, menu_title};

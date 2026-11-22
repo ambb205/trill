@@ -657,6 +657,76 @@ fn envelopes_are_held_in_the_order_they_were_made_in_wherever_the_song_is_held()
     assert_eq!(order(&b.project), [targets[2].clone(), targets[0].clone()]);
 }
 
+#[test]
+fn a_tracks_sends_are_held_in_the_order_they_were_made_in_wherever_the_song_is_held() {
+    let (mut a, mut b) = two();
+    let keys = find_track(&a.project, "Keys");
+    let order =
+        |project: &Project| -> Vec<TrackId> { project.track(keys).unwrap().sends.iter().map(|send| send.to).collect() };
+    // Three returns, sent to in an order that is not the order of the returns.
+    let mut said = Vec::new();
+    let mut returns = Vec::new();
+    for name in ["Hall", "Echo", "Plate"] {
+        let mut made = None;
+        said.extend(a.edit(|song| {
+            made = Some(song.add_track_of_kind(name, TrackKind::Return));
+            Ok(())
+        }));
+        returns.push(made.unwrap());
+    }
+    // (Keys sends to the song's own return already, which stays the first.)
+    let first = order(&a.project);
+    let sent: Vec<TrackId> = first.iter().copied().chain([returns[2], returns[0], returns[1]]).collect();
+    let mut parts = Vec::new();
+    for to in &sent[first.len()..] {
+        let change = a.edit(|song| song.set_send(keys, *to, Some(-12.0))).unwrap();
+        parts.push(change.ops.len());
+        said.push(change);
+    }
+    // One that lies last by itself says nothing of the order; one that
+    // does not (the second, to a return made before the first's) says
+    // all of it, and after that the next is the last by itself again.
+    assert_eq!(parts, [1, 2, 1]);
+    assert_eq!(order(&a.project), sent);
+    for change in &said {
+        b.take(change);
+    }
+    assert_eq!(order(&b.project), sent, "in that order wherever the song is held");
+    // A song that is opened holds them in the order its file has them in,
+    // and has nothing to say of it.
+    let opened = Peer::new(&a.project, 70_005);
+    assert_eq!(order(&opened.project), sent);
+    assert_eq!(text(&Doc::from_project(&a.project).derive().project), text(&a.project));
+
+    // One whose level is set again keeps its place; one that is taken
+    // away and made again is the last.
+    let level = a.edit(|song| song.set_send(keys, sent[0], Some(-3.0))).unwrap();
+    assert_eq!((level.ops.len(), order(&a.project)), (1, sent.clone()));
+    let again: Vec<TrackId> = sent[1..].iter().copied().chain([sent[0]]).collect();
+    let mut said = vec![level];
+    said.extend(a.edit(|song| song.set_send(keys, sent[0], None)));
+    said.extend(a.edit(|song| song.set_send(keys, sent[0], Some(-9.0))));
+    assert_eq!(order(&a.project), again);
+    for change in &said {
+        b.take(change);
+    }
+    assert_eq!(order(&b.project), again);
+    assert_eq!(a.text(), b.text());
+    // A return that goes takes the sends to it with it: nothing is said
+    // of the order, and what is left is in the order it was in.
+    let gone = a.edit(|song| song.remove_track(sent[2]).map(drop)).unwrap();
+    assert_eq!(gone.ops.len(), 1, "{:?}", gone.ops);
+    b.take(&gone);
+    let left: Vec<TrackId> = again.iter().copied().filter(|to| *to != sent[2]).collect();
+    assert_eq!(order(&b.project), left);
+    // A track that is made with its sends is made with their order.
+    let copy = a.edit(|song| song.duplicate_track(keys).map(drop));
+    if let Some(copy) = copy {
+        b.take(&copy);
+        assert_eq!(a.text(), b.text());
+    }
+}
+
 // ---- a file, and a program that was away ------------------------------------
 
 #[test]
@@ -849,6 +919,7 @@ fn any_op(lot: &mut Lot, project: &Project) -> Op {
         20 => Op::Marker(wild(lot), MarkerOp::Whole(crate::Marker { beat: beat(lot), name: "Wild".into(), id: 0 })),
         21 | 22 => Op::Clip(clip(lot), ClipOp::Lane(lot.chance(4).then_some(lot.below(3) as u32).xor(Some(0)))),
         23 => Op::Envelopes(vec![target(lot), target(lot), target(lot)]),
+        24 => Op::Track(track(lot), TrackOp::Sends(vec![track(lot), track(lot)])),
         _ => Op::Track(track(lot), TrackOp::Set(TrackSet::Profile(InstrumentProfile::default()))),
     }
 }

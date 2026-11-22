@@ -49,7 +49,7 @@ pub fn number_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, field: &Numb
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 0.0, theme.bg);
         paint::frame(&painter, rect, theme.ink);
-        let response = edit_line(ui, inner, id, &mut buffer, field.style);
+        let response = edit_line(ui, inner, id, &mut buffer, field.style, false);
         let mut value = None;
         if response.lost_focus() {
             if ui.input(|input| input.key_pressed(Key::Enter)) {
@@ -120,10 +120,20 @@ pub fn number_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, field: &Numb
 /// A single line of editable text in a hairline box, with `hint` shown
 /// while it is empty.
 pub fn text_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, buffer: &mut String, hint: &str) -> Response {
+    field(ui, theme, rect, id, buffer, hint, false)
+}
+
+/// [`text_field`] for something that is nobody else's to read (a key):
+/// what is typed or pasted is shown as dots.
+pub fn secret_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, buffer: &mut String, hint: &str) -> Response {
+    field(ui, theme, rect, id, buffer, hint, true)
+}
+
+fn field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, buffer: &mut String, hint: &str, secret: bool) -> Response {
     let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, theme.bg);
     let inner = rect.shrink2(vec2(theme.metric.pad + 2.0, 0.0));
-    let response = edit_line(ui, inner, id, buffer, theme.text.body);
+    let response = edit_line(ui, inner, id, buffer, theme.text.body, secret);
     paint::frame(&painter, rect, if response.has_focus() { theme.ink_faint } else { theme.hairline });
     if buffer.is_empty() && !response.has_focus() {
         let style = TextStyle { size: theme.text.value.size, ..theme.text.body };
@@ -133,7 +143,7 @@ pub fn text_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, buffer: &mut S
 }
 
 /// egui's single-line editor without its own frame, centered in `rect`.
-fn edit_line(ui: &mut Ui, rect: Rect, id: Id, buffer: &mut String, style: TextStyle) -> Response {
+fn edit_line(ui: &mut Ui, rect: Rect, id: Id, buffer: &mut String, style: TextStyle, secret: bool) -> Response {
     let font = FontId::proportional(style.size);
     let row = ui.fonts_mut(|fonts| fonts.row_height(&font));
     let line = Rect::from_center_size(rect.center(), vec2(rect.width(), row));
@@ -142,6 +152,7 @@ fn edit_line(ui: &mut Ui, rect: Rect, id: Id, buffer: &mut String, style: TextSt
         .font(font)
         .frame(egui::Frame::NONE)
         .margin(egui::Margin::ZERO)
+        .password(secret)
         .desired_width(line.width());
     ui.put(line, editor)
 }

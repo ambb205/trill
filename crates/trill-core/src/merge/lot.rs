@@ -62,7 +62,9 @@ pub fn check(project: &Project) {
             assert_eq!(kinds.get(&send.to), Some(&TrackKind::Return), "a send goes to a return that is there");
             assert!(send.level_db.is_finite() && send.level_db <= crate::project::MAX_VOLUME_DB);
         }
-        assert!(track.sends.windows(2).all(|pair| pair[0].to < pair[1].to), "a send to a return once, in order");
+        let mut sent_to: Vec<TrackId> = track.sends.iter().map(|send| send.to).collect();
+        sent_to.sort();
+        assert!(sent_to.windows(2).all(|pair| pair[0] != pair[1]), "a send to a return once");
         if track.reference.is_some() {
             let sent = |lane: &crate::AutomationLane| matches!(lane.target, AutomationTarget::Send { track: from, .. } if from == track.id);
             assert!(track.group.is_none() && track.sends.is_empty() && !project.automation.iter().any(sent));

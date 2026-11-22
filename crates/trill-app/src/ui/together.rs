@@ -5,11 +5,14 @@
 //! `together`). The window does four things with it:
 //!
 //! * **File, Share this song and Join a song** open a panel: the name one
-//!   goes by, where to be reached, the invitation to hand to someone or
-//!   the one that was handed over.
+//!   goes by, where to be reached (this computer, its networks, or
+//!   through a meeting point, whose address and key are given there
+//!   once), the invitation to hand to someone or the one that was handed
+//!   over.
 //! * **Who is here** is in the status bar while the song is shared, each
 //!   person in their colour ([`trill_noir::people`]); a click opens the
-//!   panel.
+//!   panel. A connection that was lost, and a meeting point that is away,
+//!   are said there for as long as they are being tried again.
 //! * **What they hold** is drawn where it is: an outline in their colour
 //!   on the clips and notes they have selected, a bar on their tracks, a
 //!   line with their name where their song stands. None of it is part of
@@ -30,7 +33,7 @@ use std::time::{Duration, Instant};
 use trill_core::{ClipId, Project, TrackId};
 use trill_engine::Notice;
 use trill_noir::{Chip, MenuItem, Variant, paint, text};
-use trill_runtime::{Here, Mine, Person, Reach, Runtime};
+use trill_runtime::{Away, Here, Meeting, MeetingPointSet, Mine, Person, Reach, Runtime};
 
 const WIDTH: f32 = 520.0;
 const ROW: f32 = 18.0;
@@ -44,6 +47,19 @@ pub enum Panel {
     Join,
 }
 
+/// Where a song that is shared is reached from.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Reached {
+    /// From this computer only.
+    #[default]
+    ThisComputer,
+    /// From the networks this computer is on.
+    Network,
+    /// From anywhere, through a meeting point both programs connect out
+    /// to: nothing listens here.
+    MeetingPoint,
+}
+
 /// What the window keeps for working together: what its panel shows and
 /// what it last told the others.
 #[derive(Default)]
@@ -53,8 +69,17 @@ pub struct TogetherState {
     pub invitation: String,
     /// The name as it is typed. Empty until the panel first opens.
     pub name: String,
-    /// Whether to be reached from the network, or from this computer only.
-    pub network: bool,
+    /// Where to be reached from.
+    pub reach: Reached,
+    /// The meeting point the settings name, as of when the panel opened
+    /// or it was last set here. (Whether it has a key: never the key.)
+    pub point: Option<MeetingPointSet>,
+    /// A meeting point's address and key as they are typed, while one is
+    /// being set. The key is let go of as soon as it is kept.
+    pub point_address: String,
+    pub point_key: String,
+    /// Whether the two fields are shown where a meeting point is set.
+    pub changing_point: bool,
     /// Join: the song that is open may be replaced though it has changes
     /// that are not saved.
     pub replace: bool,
@@ -80,12 +105,17 @@ pub struct Seen {
     pub people: Vec<Here>,
     /// Where one's own work and someone else's clashed.
     pub notices: Vec<Notice>,
+    /// Where the song is shared through a meeting point: its address,
+    /// and how the meeting stands there.
+    pub meeting: Option<(String, Meeting)>,
+    /// The connections that were lost and are being asked for again.
+    pub away: Vec<Away>,
 }
 
 impl Seen {
     /// Whether the song is being worked in with others, or offered to be.
     pub fn is_on(&self) -> bool {
-        self.invitation.is_some() || self.joining || self.connected > 0
+        self.invitation.is_some() || self.joining || self.connected > 0 || !self.away.is_empty()
     }
 
     fn who(&self, has: impl Fn(&Here) -> bool) -> Option<&Here> {
@@ -115,11 +145,21 @@ pub enum TogetherScene {
     Two,
     /// The song is shared and nobody has come yet.
     Waiting,
+    /// The song is shared through a meeting point, and a friend who is
+    /// somewhere else is in it.
+    Meeting,
+    /// One joined a friend's song and the connection was lost: it is
+    /// being asked for again.
+    Lost,
 }
 
 impl TogetherScene {
-    pub const ALL: [(&'static str, TogetherScene); 2] =
-        [("two", TogetherScene::Two), ("waiting", TogetherScene::Waiting)];
+    pub const ALL: [(&'static str, TogetherScene); 4] = [
+        ("two", TogetherScene::Two),
+        ("waiting", TogetherScene::Waiting),
+        ("meeting", TogetherScene::Meeting),
+        ("lost", TogetherScene::Lost),
+    ];
 
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.iter().find(|(known, _)| *known == name).map(|(_, scene)| *scene)
@@ -132,6 +172,10 @@ impl TogetherScene {
         let invitation = Some("trill:192.168.1.20:47474:7Q2M-K9TX-4HNB-V3RC-8WJD-6PFA-ZY5E-1GSK".to_owned());
         if self == TogetherScene::Waiting {
             return Seen { me: Some(me), invitation, ..Seen::default() };
+        }
+        if self == TogetherScene::Lost {
+            let away = Away { name: "Jo".into(), since: Instant::now(), tries: 3 };
+            return Seen { me: Some(me), away: vec![away], ..Seen::default() };
         }
         let tracks: Vec<TrackId> = project.tracks.iter().map(|track| track.id).collect();
         let clips: Vec<ClipId> = project.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.id).collect();
@@ -165,8 +209,17 @@ impl TogetherScene {
         };
         // And a clash to answer, in the words a real one has.
         let text = "Jo set where the clip \u{201C}Lead\u{201D} starts at the same moment as you, and theirs is what the song has.";
+        if self == TogetherScene::Meeting {
+            // (No meeting point is anywhere but in someone's settings:
+            // this one is nobody's.)
+            let at = "meet.example.org:443";
+            let invitation = Some(format!("trill:meet:{at}:7Q2M-K9TX-4HNB-V3RC-8WJD-6PFA-ZY5E-1GSK"));
+            let meeting = Some((at.to_owned(), Meeting::Held));
+            return Seen { me: Some(me), invitation, connected: 1, people: vec![jo], meeting, ..Seen::default() };
+        }
         let notices = vec![Notice::made_up(1, text, Some("Put mine back"))];
-        Seen { me: Some(me), invitation, joining: false, connected: 2, people: vec![jo, sam], notices }
+        let (connected, people) = (2, vec![jo, sam]);
+        Seen { me: Some(me), invitation, connected, people, notices, ..Seen::default() }
     }
 }
 
@@ -187,14 +240,21 @@ pub fn sync(state: &mut UiState, live: &mut Live, snapshot: &Snapshot, runtime: 
         connected: status.connected,
         people: status.people,
         notices,
+        meeting: status.meeting,
+        away: status.away,
     };
-    // What happened: who came, who went and why, what was refused.
+    // What happened: who came, who went and why, what was refused, what
+    // was lost and is being tried again.
     for (number, sentence) in runtime.said_together(state.together.heard) {
         state.together.heard = number;
-        let refused = sentence.starts_with("Not joined") || sentence.starts_with("No connection");
-        if refused {
+        let refused = ["Not joined", "No connection", "Not shared", "No longer in the song"];
+        // (Not refused, and to be read all the same: it stays a while.)
+        let lost = ["The connection to", "The meeting point"];
+        if refused.iter().any(|start| sentence.starts_with(start)) {
             state.together.refusal = Some(sentence.clone());
             state.toasts.lasting(ToastKind::Error, sentence, Duration::from_secs(12));
+        } else if lost.iter().any(|start| sentence.starts_with(start)) && !sentence.contains("is back") {
+            state.toasts.lasting(ToastKind::Info, sentence, Duration::from_secs(12));
         } else {
             state.toasts.info(sentence);
         }
@@ -240,6 +300,10 @@ fn open(cx: &mut Cx, panel: Panel) {
     together.refusal = None;
     together.focus = panel == Panel::Join;
     together.panel = Some(panel);
+    // The meeting point, as the settings have it now. (Asked when the
+    // panel opens and not while it is drawn.)
+    together.point = cx.sounds.runtime.meeting_point();
+    (together.changing_point, together.point_key) = (false, String::new());
 }
 
 /// The File menu's items.
@@ -269,11 +333,23 @@ pub fn status_words(seen: &Seen) -> Option<String> {
         return None;
     }
     let names: Vec<&str> = seen.people.iter().map(|here| here.person.name.as_str()).collect();
-    Some(match (names.as_slice(), seen.joining) {
-        ([], true) => "Joining\u{2026}".to_owned(),
-        ([], false) => "Shared \u{00B7} nobody else is here".to_owned(),
-        (names, _) => format!("Here: {}", names.join(", ")),
-    })
+    // A connection that was lost is said for as long as it is asked for
+    // again: nobody has to do anything, and should know why they are alone.
+    let mut words = match (names.as_slice(), seen.joining, seen.away.first()) {
+        ([], _, Some(away)) => format!("Connection to {} lost \u{00B7} trying again", away.name),
+        ([], true, None) => "Joining\u{2026}".to_owned(),
+        ([], false, None) => "Shared \u{00B7} nobody else is here".to_owned(),
+        (names, _, Some(away)) => {
+            format!("Here: {} \u{00B7} connection to {} lost, trying again", names.join(", "), away.name)
+        }
+        (names, _, None) => format!("Here: {}", names.join(", ")),
+    };
+    match &seen.meeting {
+        Some((_, Meeting::Away(_))) => words.push_str(" \u{00B7} meeting point away, trying again"),
+        Some((_, Meeting::Reaching)) => words.push_str(" \u{00B7} reaching the meeting point"),
+        Some((_, Meeting::Held)) | None => {}
+    }
+    Some(words)
 }
 
 /// The status bar's item: a square in each person's colour and the words.
@@ -363,6 +439,20 @@ fn people(ui: &mut Ui, cx: &Cx) {
     for here in &seen.people {
         row(here.person.colour, &here.person.name, &about(here, &cx.snap.project));
     }
+    // Who is away because the connection was lost: asked for again, with
+    // nothing for anyone to do.
+    for away in &seen.away {
+        let about = match away.tries {
+            0 | 1 => "the connection was lost; Trill is asking for it again".to_owned(),
+            tries => format!("the connection was lost; Trill has asked for it {tries} times and goes on"),
+        };
+        let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
+        let name_room = rect.with_min_x(rect.left() + 16.0).with_max_x(rect.left() + 150.0);
+        text::paint(ui.painter(), name_room, Align2::LEFT_CENTER, theme.text.body, &away.name, theme.ink_faint);
+        let about_room = rect.with_min_x(rect.left() + 156.0);
+        text::paint(ui.painter(), about_room, Align2::LEFT_CENTER, theme.text.micro, &about, theme.warn);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{}: {about}", away.name)));
+    }
 }
 
 /// What someone holds, in a few words.
@@ -423,6 +513,8 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
         });
     if modal.should_close() {
         cx.state.together.panel = None;
+        // (A key that was typed and not kept is not kept by the window either.)
+        cx.state.together.point_key.clear();
     }
 }
 
@@ -435,36 +527,85 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
                          the host: each of you has all of it, and can go on alone and merge again later. They need \
                          the same plugins and audio files to hear what you hear.";
             line(ui, cx, about, theme.ink_dim);
-            heading(ui, cx, "Who can reach this computer");
+            heading(ui, cx, "Who can reach this song");
             let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.chip), Sense::hover());
-            let labels = ["This computer only", "My network"];
-            let at = usize::from(cx.state.together.network);
+            let labels = ["This computer only", "My network", "A meeting point"];
+            let reaches = [Reached::ThisComputer, Reached::Network, Reached::MeetingPoint];
+            let at = reaches.iter().position(|reach| *reach == cx.state.together.reach);
             let id = ui.scope_id().with("reach");
-            if let (Some(chosen), _) = trill_noir::chip_row(ui, theme, rect.min, WIDTH, id, &labels, Some(at), false) {
-                cx.state.together.network = chosen == 1;
+            if let (Some(chosen), _) = trill_noir::chip_row(ui, theme, rect.min, WIDTH, id, &labels, at, false) {
+                cx.state.together.reach = reaches[chosen];
+                cx.state.together.refusal = None;
             }
             ui.add_space(6.0);
-            let about = match cx.state.together.network {
-                false => "Another Trill on this computer can join. Nothing is opened to any network.",
-                true => {
+            let reach = cx.state.together.reach;
+            let about = match reach {
+                Reached::ThisComputer => "Another Trill on this computer can join. Nothing is opened to any network.",
+                Reached::Network => {
                     "Computers on the networks this one is on can join: at home, over a VPN, or through a port you \
                      forwarded. The first time, Windows asks whether Trill may be reached; say yes for the network \
                      you are on."
                 }
+                Reached::MeetingPoint => {
+                    "Someone anywhere can join, each of you at home behind your own router. Both programs connect \
+                     out to a meeting point, a small server that someone you know keeps, and it passes on what the \
+                     two say to each other. It cannot read the song or join it. Nothing listens on this computer, \
+                     so no firewall asks."
+                }
             };
             line(ui, cx, about, theme.ink_faint);
-            ui.add_space(12.0);
-            if trill_noir::button(ui, theme, "Share", Variant::Primary).clicked() {
-                let reach = if cx.state.together.network { Reach::Network } else { Reach::ThisMachine };
-                match cx.sounds.runtime.share(reach, 0) {
-                    Ok(_) => cx.state.together.refusal = None,
-                    Err(why) => cx.state.together.refusal = Some(why),
-                }
+            let mut ready = true;
+            if reach == Reached::MeetingPoint {
+                ui.add_space(8.0);
+                ready = meeting_point(ui, cx);
             }
+            ui.add_space(12.0);
+            ui.add_enabled_ui(ready, |ui| {
+                if trill_noir::button(ui, theme, "Share", Variant::Primary).clicked() {
+                    let shared = match reach {
+                        Reached::ThisComputer => cx.sounds.runtime.share(Reach::ThisMachine, 0),
+                        Reached::Network => cx.sounds.runtime.share(Reach::Network, 0),
+                        Reached::MeetingPoint => cx.sounds.runtime.share_through_meeting_point(),
+                    };
+                    match shared {
+                        Ok(_) => cx.state.together.refusal = None,
+                        Err(why) => cx.state.together.refusal = Some(why),
+                    }
+                }
+            });
         }
         Some(invitation) => {
             line(ui, cx, "Hand this invitation to whoever is to join. They choose File, Join a song.", theme.ink_dim);
             ui.add_space(8.0);
+            // Through a meeting point: whether the invitation lets anyone
+            // in right now is the meeting point's to say.
+            if let Some((at, meeting)) = cx.live.together.meeting.clone() {
+                let (words, ink) = match meeting {
+                    Meeting::Reaching => (
+                        format!(
+                            "Reaching the meeting point {at}\u{2026} The invitation lets nobody in until it is \
+                             reached."
+                        ),
+                        theme.ink_dim,
+                    ),
+                    Meeting::Held => (
+                        format!(
+                            "Open at the meeting point {at}: whoever has the invitation gets in, from anywhere. \
+                             Nothing listens on this computer."
+                        ),
+                        theme.ink_dim,
+                    ),
+                    Meeting::Away(why) => (
+                        format!(
+                            "The meeting point {at} is away: {why}. Trill goes on trying and the invitation stays \
+                             the one it is; the song is yours to go on with meanwhile."
+                        ),
+                        theme.warn,
+                    ),
+                };
+                line(ui, cx, &words, ink);
+                ui.add_space(8.0);
+            }
             let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, 30.0), Sense::click());
             ui.painter().rect_filled(rect, 0.0, theme.bg);
             paint::frame(ui.painter(), rect, theme.hairline);
@@ -499,13 +640,102 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
+/// A row of the panel with a caption and a field after it. Returns the
+/// field's place.
+fn captioned(ui: &mut Ui, cx: &Cx, caption: &str) -> Rect {
+    let theme = cx.theme;
+    let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.control), Sense::hover());
+    let label = rect.with_max_x(rect.left() + 110.0);
+    text::paint(ui.painter(), label, Align2::LEFT_CENTER, theme.text.micro, caption, theme.ink_faint);
+    rect.with_min_x(label.right())
+}
+
+/// The meeting point a song is shared through: the one that is set, or
+/// the two fields that set one. Returns whether there is one to share
+/// through.
+fn meeting_point(ui: &mut Ui, cx: &mut Cx) -> bool {
+    let theme = cx.theme;
+    let set = cx.state.together.point.clone();
+    if let Some(point) = set.as_ref().filter(|_| !cx.state.together.changing_point) {
+        let words = format!(
+            "Through {} \u{00B7} the key its keeper gave you is kept in this computer's settings",
+            point.address
+        );
+        let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
+        text::paint(ui.painter(), rect, Align2::LEFT_CENTER, theme.text.body, &words, theme.ink);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Meeting point: {}", point.address))
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+            if trill_noir::button(ui, theme, "Change the meeting point", Variant::Default).clicked() {
+                let together = &mut cx.state.together;
+                (together.changing_point, together.point_address) = (true, point.address.clone());
+                together.point_key.clear();
+            }
+            if trill_noir::button(ui, theme, "Forget it", Variant::Default).clicked() {
+                cx.state.together.point = None;
+                cx.sounds.quietly(|runtime| runtime.forget_meeting_point());
+            }
+        });
+        return true;
+    }
+    let about = "Its keeper gives you two things: where it is, and a key that is yours. Both are kept in this \
+                 computer's settings and nowhere else: not in a song, and the key is shown to nobody again.";
+    line(ui, cx, about, theme.ink_faint);
+    ui.add_space(8.0);
+    let field = captioned(ui, cx, "Address").with_max_x(ui.min_rect().left() + 110.0 + 300.0);
+    let id = egui::Id::unique("together-point-address");
+    let address =
+        trill_noir::text_field(ui, theme, field, id, &mut cx.state.together.point_address, "meet.example.org:443");
+    address.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Meeting point's address"));
+    ui.add_space(6.0);
+    let field = captioned(ui, cx, "Key");
+    let id = egui::Id::unique("together-point-key");
+    let hint = match set.is_some() {
+        true => "Leave empty to keep the key you have",
+        false => "Ten groups of four letters, as its keeper wrote them",
+    };
+    let key = trill_noir::secret_field(ui, theme, field, id, &mut cx.state.together.point_key, hint);
+    key.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Meeting point's key"));
+    ui.add_space(8.0);
+    let typed = !cx.state.together.point_address.trim().is_empty();
+    let keyed = !cx.state.together.point_key.trim().is_empty() || set.is_some();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        ui.add_enabled_ui(typed && keyed, |ui| {
+            if trill_noir::button(ui, theme, "Keep this meeting point", Variant::Default).clicked() {
+                let together = &mut cx.state.together;
+                // The key leaves the window with this, whatever comes of it.
+                let key = Some(std::mem::take(&mut together.point_key)).filter(|key| !key.trim().is_empty());
+                let address = together.point_address.clone();
+                match Runtime::read_meeting_point(&address, key.as_deref()) {
+                    Ok(shown) => {
+                        together.point = Some(MeetingPointSet { address: shown, has_key: true });
+                        (together.changing_point, together.refusal) = (false, None);
+                        cx.sounds.quietly(move |runtime| runtime.set_meeting_point(&address, key.as_deref()));
+                    }
+                    Err(why) => together.refusal = Some(why),
+                }
+            }
+        });
+        if set.is_some() && trill_noir::button(ui, theme, "Cancel", Variant::Default).clicked() {
+            cx.state.together.changing_point = false;
+            cx.state.together.point_key.clear();
+        }
+    });
+    false
+}
+
 fn join_panel(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
     line(ui, cx, "Paste the invitation the other person's Trill shows (File, Share this song).", theme.ink_dim);
     ui.add_space(8.0);
     let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, 30.0), Sense::hover());
     let id = egui::Id::unique("together-invitation");
-    trill_noir::text_field(ui, theme, rect, id, &mut cx.state.together.invitation, "trill:HOST:PORT:SECRET");
+    let hint = "trill:HOST:PORT:SECRET, or trill:meet:HOST:PORT:SECRET";
+    trill_noir::text_field(ui, theme, rect, id, &mut cx.state.together.invitation, hint);
     if std::mem::take(&mut cx.state.together.focus) {
         ui.memory_mut(|memory| memory.request_focus(id.with("editor")));
     }
@@ -663,6 +893,26 @@ mod tests {
         assert_eq!(status_words(&waiting).as_deref(), Some("Shared \u{00B7} nobody else is here"));
         let two = TogetherScene::Two.of(&project);
         assert_eq!(status_words(&two).as_deref(), Some("Here: Jo, Sam"));
+        // Through a meeting point, and what the bar says while something
+        // is away and being tried again.
+        let meeting = TogetherScene::Meeting.of(&project);
+        assert_eq!(status_words(&meeting).as_deref(), Some("Here: Jo"));
+        assert!(meeting.invitation.as_deref().is_some_and(|invitation| invitation.starts_with("trill:meet:")));
+        let away =
+            |meeting| Seen { meeting: Some(("meet.example.org:443".to_owned(), meeting)), ..meeting_seen(&project) };
+        assert_eq!(
+            status_words(&away(Meeting::Away("it did not answer".into()))).as_deref(),
+            Some("Here: Jo \u{00B7} meeting point away, trying again")
+        );
+        assert_eq!(
+            status_words(&away(Meeting::Reaching)).as_deref(),
+            Some("Here: Jo \u{00B7} reaching the meeting point")
+        );
+        let lost = TogetherScene::Lost.of(&project);
+        assert!(lost.is_on(), "someone whose connection was lost is still in a shared song");
+        assert_eq!(status_words(&lost).as_deref(), Some("Connection to Jo lost \u{00B7} trying again"));
+        let both = Seen { away: lost.away.clone(), ..two.clone() };
+        assert_eq!(status_words(&both).as_deref(), Some("Here: Jo, Sam \u{00B7} connection to Jo lost, trying again"));
         assert_eq!(two.on_track(bass).map(|here| here.person.name.as_str()), Some("Jo"));
         assert_eq!(about(&two.people[0], &project), "has hold of the volume of the track \u{201C}Bass\u{201D}");
         let on = |clips: Vec<ClipId>, notes: usize| Here {
@@ -674,5 +924,10 @@ mod tests {
         assert_eq!(about(&on(vec![verse], 0), &project), "on the clip \u{201C}Verse\u{201D}");
         assert_eq!(about(&on(vec![verse], 3), &project), "on 3 notes in \u{201C}Verse\u{201D}");
         assert_eq!((TogetherScene::named("two"), TogetherScene::named("nope")), (Some(TogetherScene::Two), None));
+        assert_eq!(TogetherScene::named("lost"), Some(TogetherScene::Lost));
+    }
+
+    fn meeting_seen(project: &Project) -> Seen {
+        TogetherScene::Meeting.of(project)
     }
 }

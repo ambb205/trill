@@ -23,6 +23,22 @@
 //! Nobody is the host. A program that is connected to two others passes
 //! on to each what it hears from the other, so three people need only
 //! two connections between them.
+//!
+//! **A link that is lost comes back by itself.** A connection this
+//! program asked for and lost on the way (not one that either side ended
+//! and said so) is asked for again, after a pause that grows, for as long
+//! as the song is open and nobody leaves: what each did meanwhile is
+//! merged when it is back, as when two meet again by hand. Nobody pastes
+//! an invitation twice in one sitting. Only where asking again is no use
+//! (the invitation is another's, or its meeting was ended) does it stop,
+//! with the sentence that says to ask for the invitation again.
+//!
+//! **Through a meeting point** ([`Runtime::share_through_meeting_point`])
+//! this program listens for nothing: it holds a meeting open at the
+//! meeting point the settings name, which is opened again by itself when
+//! it is lost. The meeting point's address and the key its keeper gave
+//! are in the settings and nowhere else; the key is said to nobody, not
+//! by [`Runtime::meeting_point`] either.
 
 use crate::{Runtime, SharedSession};
 use parking_lot::Mutex;
@@ -33,7 +49,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use trill_core::merge::{Key, Replica, Said};
 use trill_core::{ClipId, TrackId};
-use trill_together::{Event, Invitation, LinkId, Message, Net, PROTOCOL, Person, Presence, Reach};
+use trill_together::meet::{No, Turned};
+use trill_together::{
+    Event, Invitation, JoinId, LinkId, MeetingPoint, Message, Net, PROTOCOL, Person, Presence, Reach,
+};
 
 /// How often the thread looks at the session and the wire.
 const TICK: Duration = Duration::from_millis(25);
@@ -48,6 +67,11 @@ const SAID_KEPT: usize = 64;
 /// What a program says as it leaves, and as it is closed.
 const LEFT: &str = "left";
 const CLOSED: &str = "the program was closed";
+/// How long a connection that was lost is left alone before it is asked
+/// for again: this long the first time and twice as long each time
+/// after, up to the longest.
+const FIRST_PAUSE: Duration = Duration::from_secs(1);
+const LONGEST_PAUSE: Duration = Duration::from_secs(30);
 
 /// Someone else who has the song open, as a front end shows them.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +100,38 @@ pub struct Mine {
     pub holding: Option<String>,
 }
 
+/// How a meeting stands at the meeting point a song is shared through.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Meeting {
+    /// The meeting point is being reached.
+    Reaching,
+    /// The meeting is open there: whoever has the invitation gets in.
+    Held,
+    /// It is not at the moment, and why. This program goes on trying,
+    /// and the song is its person's to go on with meanwhile.
+    Away(String),
+}
+
+/// A connection this program asked for and lost on the way, which it is
+/// asking for again by itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Away {
+    /// Who was at the other end, as they said.
+    pub name: String,
+    pub since: Instant,
+    /// How often it has been asked for again.
+    pub tries: u32,
+}
+
+/// The meeting point a program shares through, as the settings have it.
+/// (Never the key: whether there is one.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingPointSet {
+    /// Its address as its keeper wrote it: `meet.example.org:443`.
+    pub address: String,
+    pub has_key: bool,
+}
+
 /// How this program stands with the others.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Together {
@@ -95,18 +151,24 @@ pub struct Together {
     /// How many bytes this program has said to the others, and in how
     /// many messages: for whoever measures.
     pub said: (u64, u64),
+    /// Where the song is shared through a meeting point: its address as
+    /// its keeper wrote it, and how the meeting stands there.
+    pub meeting: Option<(String, Meeting)>,
+    /// The connections that were lost and are being asked for again.
+    pub away: Vec<Away>,
 }
 
 impl Together {
     /// Whether the song is being worked in with others, or offered to be.
     pub fn is_on(&self) -> bool {
-        self.invitation.is_some() || self.joining || self.connected > 0
+        self.invitation.is_some() || self.joining || self.connected > 0 || !self.away.is_empty()
     }
 }
 
 /// What a front end asks of the thread.
 enum Ask {
     Share(Reach, u16),
+    ShareThrough(MeetingPoint),
     StopSharing,
     Join(Invitation, bool),
     Leave,
@@ -206,11 +268,58 @@ struct Peer {
     /// Whether a song it hands over may take the place of one with
     /// changes that are not saved.
     replace: bool,
+    /// The invitation it was asked for by: what it is asked for again by
+    /// when it is lost.
+    invitation: Option<Invitation>,
     person: Option<Person>,
     replica: Option<Replica>,
     /// Both hold the same song, and each has been handed what it lacked:
     /// from here on changes go both ways as they are made.
     synced: bool,
+}
+
+/// A connection that was asked for and has not come about yet.
+struct Joining {
+    join: JoinId,
+    replace: bool,
+    invitation: Invitation,
+    /// Whether it is one that was lost, asked for again.
+    again: bool,
+}
+
+/// A connection this program asked for and lost on the way.
+struct Again {
+    invitation: Invitation,
+    name: String,
+    since: Instant,
+    tries: u32,
+    next: Instant,
+    state: Trying,
+}
+
+/// How far asking again has got.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Trying {
+    /// Left alone until its time.
+    Waiting,
+    /// Asked for.
+    Asked(JoinId),
+    /// Connected, and waiting for the other to say who it is.
+    Greeting(LinkId),
+}
+
+impl Again {
+    fn new(invitation: Invitation, name: String) -> Again {
+        let now = Instant::now();
+        Again { invitation, name, since: now, tries: 0, next: now + FIRST_PAUSE, state: Trying::Waiting }
+    }
+
+    /// It did not come about this time: left alone for longer than the
+    /// time before.
+    fn wait(&mut self) {
+        let doubled = FIRST_PAUSE.saturating_mul(1u32 << self.tries.min(8));
+        (self.state, self.next) = (Trying::Waiting, Instant::now() + doubled.min(LONGEST_PAUSE));
+    }
 }
 
 /// What the thread holds.
@@ -223,16 +332,21 @@ struct Driver {
     people: Vec<(Here, LinkId, u64)>,
     /// The song the connections are about: another one ends them.
     epoch: Option<u64>,
-    /// Joins asked for that have not come to a connection yet, each with
-    /// whether it may replace a song that is not saved.
-    joining: Vec<bool>,
+    /// Joins asked for that have not come to a connection yet.
+    joining: Vec<Joining>,
+    /// The connections that were lost and are asked for again.
+    again: Vec<Again>,
+    /// The meeting point the song is shared through, and how the meeting
+    /// stands there.
+    through: Option<(MeetingPoint, Meeting)>,
     presence_seq: u64,
     presence_said: Option<(Presence, Instant)>,
 }
 
 impl Driver {
     fn is_live(&self) -> bool {
-        self.net.listening().is_some() || !self.peers.is_empty() || !self.joining.is_empty()
+        let waited_for = !self.joining.is_empty() || !self.again.is_empty();
+        self.net.listening().is_some() || !self.peers.is_empty() || waited_for
     }
 
     fn say(&self, sentence: impl Into<String>) {
@@ -250,6 +364,8 @@ impl Driver {
         self.peers.clear();
         self.people.clear();
         self.joining.clear();
+        self.again.clear();
+        self.through = None;
         self.epoch = None;
         self.session.lock().hear_changes(false);
     }
@@ -289,14 +405,35 @@ impl Driver {
                     self.show();
                     self.shared.lock().shared = Some(came);
                 }
-                Ask::StopSharing => self.net.stop_listening(),
+                Ask::ShareThrough(point) => {
+                    let came = self.net.listen_through(&point);
+                    if let Ok(invitation) = &came {
+                        let mut session = self.session.lock();
+                        session.share();
+                        session.hear_changes(true);
+                        self.epoch = Some(session.song_epoch());
+                        // (A program that shares already goes on as it does.)
+                        if invitation.meet && self.through.is_none() {
+                            self.through = Some((point, Meeting::Reaching));
+                        }
+                    }
+                    let came = came
+                        .map(|invitation| invitation.to_string())
+                        .map_err(|error| format!("this program could not start sharing through it: {error}"));
+                    self.show();
+                    self.shared.lock().shared = Some(came);
+                }
+                Ask::StopSharing => {
+                    self.net.stop_listening();
+                    self.through = None;
+                }
                 Ask::Join(invitation, replace) => {
                     let mut session = self.session.lock();
                     session.hear_changes(true);
                     self.epoch = Some(session.song_epoch());
                     drop(session);
-                    self.joining.push(replace);
-                    self.net.join(invitation);
+                    let join = self.net.join(invitation.clone());
+                    self.joining.push(Joining { join, replace, invitation, again: false });
                 }
                 Ask::Leave => {
                     if self.is_live() {
@@ -349,10 +486,17 @@ impl Driver {
                     (peer.person, peer.replica) = (Some(person), replica);
                     peer.synced = reply.is_some();
                 }
+                // A connection that was lost is back with this.
+                let before = self.again.len();
+                self.again.retain(|again| again.state != Trying::Greeting(link));
+                let back = self.again.len() != before;
                 // Whoever came is in the song once they have it: said now
                 // where both had it already, and else when it is handed
                 // over.
                 match (joined, reply.is_some()) {
+                    (true, true) if back => {
+                        self.say(format!("The connection is back: you are in the song with {name}."));
+                    }
                     (true, true) => self.say(format!("You are in the song with {name}.")),
                     (true, false) => {}
                     (false, _) => self.say(format!("{name} is here.")),
@@ -491,14 +635,28 @@ impl Driver {
         for event in self.net.events() {
             match event {
                 Event::Open { link, joined } => {
-                    let replace = joined && !self.joining.is_empty() && self.joining.remove(0);
-                    let peer = Peer { joined, replace, person: None, replica: None, synced: false };
+                    let asked = joined
+                        .and_then(|join| self.joining.iter().position(|joining| joining.join == join))
+                        .map(|at| self.joining.remove(at));
+                    // One that was lost and asked for again is as far as
+                    // the greeting.
+                    for again in &mut self.again {
+                        if joined.is_some_and(|join| again.state == Trying::Asked(join)) {
+                            again.state = Trying::Greeting(link);
+                        }
+                    }
+                    let (replace, invitation) = match asked {
+                        Some(asked) => (asked.replace, Some(asked.invitation)),
+                        None => (false, None),
+                    };
+                    let joined = joined.is_some();
+                    let peer = Peer { joined, replace, invitation, person: None, replica: None, synced: false };
                     self.peers.insert(link, peer);
                     let hello = self.hello();
                     self.net.say(link, &hello);
                 }
                 Event::Heard { link, message } => self.heard(link, message),
-                Event::Lost { link, why } => {
+                Event::Lost { link, why, told } => {
                     let Some(peer) = self.peers.remove(&link) else { continue };
                     // Whoever was heard of through it is gone with it.
                     let gone: Vec<u64> = self
@@ -511,28 +669,115 @@ impl Driver {
                     for person in gone {
                         self.say_to_greeted(&Message::Gone { person }, None);
                     }
-                    match peer.person {
-                        Some(person) => match why.as_str() {
+                    // One that was asked for again and lost again before
+                    // the greeting: nothing new to say, and asked for again.
+                    let greeting = self.again.iter_mut().find(|again| again.state == Trying::Greeting(link));
+                    if let Some(again) = greeting {
+                        again.wait();
+                        self.shared.lock().status.revision += 1;
+                        continue;
+                    }
+                    match (peer.person, peer.invitation) {
+                        // Lost on the way, and this program had asked for
+                        // it: it asks again by itself.
+                        (Some(person), Some(invitation)) if !told => {
+                            self.say(format!(
+                                "The connection to {} was lost ({why}). This program asks for it again by itself; \
+                                 what each of you does meanwhile is merged when it is back.",
+                                person.name
+                            ));
+                            self.again.push(Again::new(invitation, person.name));
+                        }
+                        (Some(person), _) => match why.as_str() {
                             LEFT => self.say(format!("{} left.", person.name)),
                             CLOSED => self.say(format!("{} closed their Trill.", person.name)),
+                            // Lost on the way, and theirs to ask for again.
+                            why if !told => self.say(format!(
+                                "{} is away: the connection was lost ({why}). Their program asks for it again by \
+                                 itself.",
+                                person.name
+                            )),
                             why => self.say(format!("{} is no longer here: {why}.", person.name)),
                         },
                         // A connection this program asked for, gone
                         // before the other had said who it is: the join
                         // came to nothing, and a failure is a sentence.
-                        None if peer.joined => self.say(format!(
+                        (None, _) if peer.joined => self.say(format!(
                             "Not joined: the connection ended before the other program had said who it is ({why}). \
                              It may not be a Trill, or it stopped sharing its song; ask for the invitation again."
                         )),
-                        None => {}
+                        (None, _) => {}
                     }
                     self.shared.lock().status.revision += 1;
                 }
-                Event::Failed { why } => {
-                    if !self.joining.is_empty() {
-                        self.joining.remove(0);
+                Event::Held => {
+                    let Some((point, meeting)) = &mut self.through else { continue };
+                    let back = matches!(meeting, Meeting::Away(_));
+                    *meeting = Meeting::Held;
+                    let at = point.shown();
+                    if back {
+                        self.say(format!("The meeting point {at} is back: whoever has the invitation gets in again."));
                     }
-                    self.say(format!("Not joined: {why}."));
+                    self.shared.lock().status.revision += 1;
+                }
+                Event::Unheld { turned, again } => {
+                    let Some((point, meeting)) = &mut self.through else { continue };
+                    let at = point.shown();
+                    let sentence = turned.sentence();
+                    if !again {
+                        // Something has to be changed first: nothing is
+                        // held there, and nothing is tried.
+                        self.through = None;
+                        self.net.stop_listening();
+                        self.say(format!(
+                            "Not shared through the meeting point {at}: {sentence}. The song is not shared, and is \
+                             yours as it was."
+                        ));
+                    } else {
+                        // Said when it begins, and not again for every try.
+                        let sentence = turned.briefly();
+                        let news = *meeting != Meeting::Away(sentence.clone());
+                        let was_held = *meeting == Meeting::Held;
+                        *meeting = Meeting::Away(sentence.clone());
+                        if news && turned == Turned::No(No::Spent) {
+                            self.say(format!(
+                                "The meeting point {at} passes no more for your key today: it has passed as much as \
+                                 its keeper lets a key pass in a day. Nobody gets into the song through it until \
+                                 tomorrow, or until its keeper allows more. The song is yours to go on with alone \
+                                 meanwhile, and what each of you does is merged when you meet again."
+                            ));
+                        } else if news && was_held {
+                            self.say(format!(
+                                "The meeting point {at} is away ({sentence}). This program goes on trying; the \
+                                 invitation stays the one it is, and the song is yours to go on with meanwhile."
+                            ));
+                        } else if news {
+                            self.say(format!(
+                                "The meeting point {at} is not reached ({sentence}). This program goes on trying; \
+                                 until it is reached nobody gets into the song by the invitation."
+                            ));
+                        }
+                    }
+                    self.shared.lock().status.revision += 1;
+                }
+                Event::Failed { join, why, for_good } => {
+                    if let Some(at) = self.joining.iter().position(|joining| joining.join == join) {
+                        self.joining.remove(at);
+                    }
+                    match self.again.iter().position(|again| again.state == Trying::Asked(join)) {
+                        // The invitation is no longer one: there is nothing
+                        // to ask for again.
+                        Some(at) if for_good => {
+                            let again = self.again.remove(at);
+                            self.say(format!(
+                                "No longer in the song with {}: {why}. Ask for the invitation again.",
+                                again.name
+                            ));
+                        }
+                        Some(at) => self.again[at].wait(),
+                        None => self.say(format!("Not joined: {why}.")),
+                    }
+                    self.shared.lock().status.revision += 1;
                 }
             }
         }
@@ -583,6 +828,20 @@ impl Driver {
         }
     }
 
+    /// Asks again for the connections that were lost, each when its time
+    /// has come.
+    fn ask_again(&mut self) {
+        let now = Instant::now();
+        for again in &mut self.again {
+            if again.state == Trying::Waiting && now >= again.next {
+                let join = self.net.join(again.invitation.clone());
+                (again.state, again.tries) = (Trying::Asked(join), again.tries + 1);
+                let invitation = again.invitation.clone();
+                self.joining.push(Joining { join, replace: false, invitation, again: true });
+            }
+        }
+    }
+
     /// What a front end is shown.
     fn show(&mut self) {
         let mut shared = self.shared.lock();
@@ -599,11 +858,15 @@ impl Driver {
         let status = Together {
             me: Person { colour: colours.get(&me).copied().unwrap_or(0), ..shared.status.me.clone() },
             invitation: self.net.listening().map(|invitation| invitation.to_string()),
-            joining: !self.joining.is_empty(),
+            joining: self.joining.iter().any(|joining| !joining.again),
             connected: self.peers.len(),
             people,
             revision: shared.status.revision,
             said: self.net.said(),
+            meeting: self.through.as_ref().map(|(point, meeting)| (point.shown(), meeting.clone())),
+            away: (self.again.iter())
+                .map(|again| Away { name: again.name.clone(), since: again.since, tries: again.tries })
+                .collect(),
         };
         if status != shared.status {
             shared.status = Together { revision: shared.status.revision + 1, ..status };
@@ -618,6 +881,7 @@ impl Driver {
                 // What arrives is taken in as it arrives; what was changed
                 // here is said once a tick, which is what thins a drag.
                 self.events();
+                self.ask_again();
                 if told.elapsed() >= TICK {
                     self.tell();
                     told = Instant::now();
@@ -674,6 +938,8 @@ impl Sharing {
             people: Vec::new(),
             revision: 0,
             said: (0, 0),
+            meeting: None,
+            away: Vec::new(),
         };
         let shared =
             Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
@@ -700,6 +966,8 @@ impl Sharing {
                     people: Vec::new(),
                     epoch: None,
                     joining: Vec::new(),
+                    again: Vec::new(),
+                    through: None,
                     presence_seq: 0,
                     presence_said: None,
                 };
@@ -735,8 +1003,72 @@ impl Runtime {
     /// program that is sharing already answers with the invitation it
     /// has.
     pub fn share(&self, reach: Reach, port: u16) -> Result<String, String> {
+        self.share_as(Ask::Share(reach, port))
+    }
+
+    /// Shares the open song through the meeting point the settings name
+    /// ([`Runtime::set_meeting_point`]), and returns the invitation, which
+    /// carries the meeting point's address: whoever is handed it sets
+    /// nothing up. This program listens for nothing; it connects outward,
+    /// as whoever joins does, so no firewall asks and no router has to let
+    /// anything in.
+    ///
+    /// The invitation is there at once. Whether the meeting is open at
+    /// the meeting point follows in [`Together::meeting`]; where the
+    /// meeting point does not take the key, sharing ends in a sentence
+    /// ([`Runtime::said_together`]).
+    pub fn share_through_meeting_point(&self) -> Result<String, String> {
+        let Some(set) = self.settings().together.meeting_point else {
+            return Err("no meeting point is set: its address and the key its keeper gave are set where the song \
+                        is shared in the window (File, Share this song), once"
+                .to_owned());
+        };
+        let point = MeetingPoint::parse(&set.address, &set.key)?;
+        self.share_as(Ask::ShareThrough(point))
+    }
+
+    /// The meeting point the settings name, as a front end shows it: its
+    /// address, and whether a key is given. The key itself is said to
+    /// nobody.
+    pub fn meeting_point(&self) -> Option<MeetingPointSet> {
+        let set = self.settings().together.meeting_point?;
+        Some(MeetingPointSet { address: set.address, has_key: !set.key.is_empty() })
+    }
+
+    /// Sets the meeting point this program shares through: its address as
+    /// its keeper wrote it, and the key the keeper gave. `None` for the
+    /// key keeps the one that is set (the address alone is changed). Both
+    /// are kept in the settings and nowhere else.
+    pub fn set_meeting_point(&self, address: &str, key: Option<&str>) -> Result<(), String> {
+        let kept = self.settings().together.meeting_point.map(|set| set.key);
+        let Some(key) = key.map(str::to_owned).or(kept).filter(|key| !key.trim().is_empty()) else {
+            return Err("a meeting point takes the key its keeper gave: ten groups of four letters".to_owned());
+        };
+        // Read as it will be when it is shared through, and kept as its
+        // keeper wrote it.
+        let point = MeetingPoint::parse(address, &key)?;
+        let set = trill_library::MeetingPointSettings { address: point.shown(), key: point.key.to_string() };
+        self.update_settings(|settings| settings.together.meeting_point = Some(set)).map_err(|error| error.to_string())
+    }
+
+    /// Reads a meeting point as its keeper wrote it, without keeping
+    /// it: the address as it will be shown, or the sentence that says
+    /// what is wrong with it. `None` for the key reads the address alone
+    /// (for where the key that is kept stays).
+    pub fn read_meeting_point(address: &str, key: Option<&str>) -> Result<String, String> {
+        // (A key of nothing but zeros is spelt right, and is nobody's.)
+        let spelt_right = "0000-0000-0000-0000-0000-0000-0000-0000-0000-0000";
+        Ok(MeetingPoint::parse(address, key.unwrap_or(spelt_right))?.shown())
+    }
+
+    /// Forgets the meeting point and its key.
+    pub fn forget_meeting_point(&self) -> Result<(), String> {
+        self.update_settings(|settings| settings.together.meeting_point = None).map_err(|error| error.to_string())
+    }
+
+    fn share_as(&self, ask: Ask) -> Result<String, String> {
         self.sharing.shared.lock().shared = None;
-        self.sharing.ask(Ask::Share(reach, port))?;
+        self.sharing.ask(ask)?;
         let until = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(came) = self.sharing.shared.lock().shared.take() {

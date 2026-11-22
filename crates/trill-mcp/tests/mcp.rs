@@ -2890,3 +2890,56 @@ async fn the_users_own_client_opens_the_microphone_and_what_no_hand_asked_for_is
     assert_eq!(opens(), before + 1);
     assert!(host.capturing().is_some());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistants_door_neither_shares_a_song_nor_sets_or_learns_a_meeting_point() {
+    let (fixture, _work) = connect_guarded().await;
+    let client = &fixture.client;
+    // The user has set a meeting point, in the window: its address and
+    // the key its keeper gave. (Nothing here connects to it.)
+    let key = "0123-4567-89AB-CDEF-GHJK-MNPQ-RSTV-WXYZ-0123-4567";
+    fixture.runtime.set_meeting_point("meet.example.org:443", Some(key)).unwrap();
+    let set = fixture.runtime.meeting_point();
+
+    // Sharing, by any reach, joining, by either form of an invitation,
+    // and ending either: the user's to do, in the window.
+    let invited = "trill:meet:meet.example.org:443:0000-0000-0000-0000-0000-0000-0000-0000";
+    for arguments in [
+        json!({ "action": "share" }),
+        json!({ "action": "share", "reach": "network" }),
+        json!({ "action": "share", "reach": "meeting_point" }),
+        json!({ "action": "join", "invitation": invited }),
+        json!({ "action": "join", "invitation": invited.replace("meet:", "") }),
+        json!({ "action": "stop_sharing" }),
+        json!({ "action": "leave" }),
+    ] {
+        let refusal = call(client, "shared_song", arguments.clone()).await.unwrap_err();
+        assert!(refusal.contains("it is the user's to do, in the window"), "{arguments}: {refusal}");
+    }
+    assert!(!fixture.runtime.together().is_on(), "nothing is shared and nothing was asked for");
+
+    // Who is here can be read, and says nothing of the meeting point's
+    // key; neither does anything else a tool says at this door.
+    for (tool, arguments) in
+        [("shared_song", json!({ "action": "status" })), ("get_project", json!({})), ("get_journal", json!({}))]
+    {
+        let reply = ok(client, tool, arguments).await.to_string();
+        assert!(!reply.contains(key) && !reply.contains(&key[10..]), "{tool} says the key: {reply}");
+    }
+
+    // There is nothing a meeting point or a key could be handed over in:
+    // no tool takes either, at this door or the other.
+    let tools = client.list_all_tools().await.unwrap();
+    let shared_song = tools.iter().find(|tool| tool.name == "shared_song").unwrap();
+    let schema = serde_json::to_value(&shared_song.input_schema).unwrap();
+    let mut takes: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    takes.sort_unstable();
+    assert_eq!(takes, ["action", "invitation", "name", "notice", "port", "reach", "replace_unsaved"]);
+    for tool in &tools {
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        for property in schema["properties"].as_object().into_iter().flat_map(|properties| properties.keys()) {
+            assert!(!property.contains("meeting_point"), "{} takes {property}", tool.name);
+        }
+    }
+    assert_eq!(fixture.runtime.meeting_point(), set, "and what the user set is as they set it");
+}

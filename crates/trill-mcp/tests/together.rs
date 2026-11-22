@@ -186,7 +186,7 @@ async fn what_goes_wrong_with_sharing_and_joining_is_a_sentence_that_says_what_t
     assert!(refused.contains("trill:HOST:PORT:SECRET"), "{refused}");
     let refused =
         call(&ada.client, "shared_song", json!({ "action": "share", "reach": "everywhere" })).await.unwrap_err();
-    assert!(refused.contains("`this_machine` or `network`"), "{refused}");
+    assert!(refused.contains("`this_machine`, `network` or `meeting_point`"), "{refused}");
 
     let invitation =
         ok(&ada.client, "shared_song", json!({ "action": "share" })).await["invitation"].as_str().unwrap().to_owned();
@@ -211,4 +211,62 @@ async fn what_goes_wrong_with_sharing_and_joining_is_a_sentence_that_says_what_t
     let refused =
         call(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation })).await.unwrap_err();
     assert!(refused.starts_with("Not joined"), "{refused}");
+}
+
+/// 3 connections.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_song_is_shared_through_a_meeting_point_by_tools_and_no_tool_takes_or_says_its_key() {
+    let (ada, ben) = (program().await, program().await);
+    ok(&ada.client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    // No meeting point is set: said, with whose it is to set one.
+    let share = json!({ "action": "share", "reach": "meeting_point", "name": "Ada" });
+    let refused = call(&ada.client, "shared_song", share.clone()).await.unwrap_err();
+    assert!(refused.contains("No meeting point is set") && refused.contains("no tool takes them"), "{refused}");
+
+    // A meeting point on this machine, and the key its keeper gave Ada:
+    // set as the window sets it. (No tool does: there is no argument a key
+    // could be handed over in.)
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let key = trill_meet::Key::new().unwrap();
+    let keys = trill_meet::Keys::of(vec![trill_meet::keys::Given::of(&key, "Ada")]);
+    let log: trill_meet::Log = Arc::new(|_: &str| {});
+    let _point = trill_meet::Server::start(vec![listener], keys, trill_meet::Limits::default(), log).unwrap();
+    ada.runtime.set_meeting_point(&at, Some(&key.to_string())).unwrap();
+
+    // Shared through it: the reply has the invitation, which carries the
+    // meeting point's address, and says that the meeting is open there.
+    let shared = ok(&ada.client, "shared_song", share).await;
+    let invitation = shared["invitation"].as_str().unwrap().to_owned();
+    assert!(invitation.starts_with(&format!("trill:meet:{at}:")), "{shared}");
+    assert_eq!(shared["meeting_point"], json!({ "at": at, "open": true }), "{shared}");
+    // Whoever is handed the invitation joins by it and sets nothing up.
+    let joined =
+        ok(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "name": "Ben" })).await;
+    assert_eq!(names(&joined), ["Ada"], "{joined}");
+    assert!(joined.get("meeting_point").is_none(), "{joined}");
+    ok(&ben.client, "create_track", json!({ "name": "Bass" })).await;
+    until(&ada.client, "get_project", json!({}), "Ada has Ben's track", |reply| {
+        reply["tracks"].as_array().is_some_and(|tracks| tracks.iter().any(|track| track["name"] == "Bass"))
+    })
+    .await;
+
+    // Nothing a tool says has the key: not how things stand, not the
+    // song, not the journal of the calls.
+    let key = key.to_string();
+    for (tool, arguments) in
+        [("shared_song", json!({ "action": "status" })), ("get_project", json!({})), ("get_journal", json!({}))]
+    {
+        let reply = ok(&ada.client, tool, arguments).await.to_string();
+        assert!(!reply.contains(&key) && !reply.contains(&key[10..]), "{tool} says the key: {reply}");
+    }
+    // A wrong key: sharing ends in the sentence that says so.
+    ok(&ben.client, "shared_song", json!({ "action": "leave" })).await;
+    ok(&ada.client, "shared_song", json!({ "action": "leave" })).await;
+    ada.runtime.set_meeting_point(&at, Some(&trill_meet::Key::new().unwrap().to_string())).unwrap();
+    let share = json!({ "action": "share", "reach": "meeting_point" });
+    let refused = call(&ada.client, "shared_song", share).await.unwrap_err();
+    assert!(refused.contains("Not shared through the meeting point") && refused.contains("did not take the key"));
+    assert!(!refused.contains(&key[10..]), "{refused}");
+    drop((ada.runtime, ben.runtime));
 }
