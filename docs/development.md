@@ -43,6 +43,7 @@ cargo test -p trill-engine --lib the_systems_bin -- --ignored --nocapture    # s
 cargo test -p trill-media what_putting_a_take -- --ignored --nocapture    # what putting a take through to the disk every second costs the thread that writes it, on this machine's disk (TRILL_TAKE_FOLDER names another disk)
 cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignored --nocapture    # what keeping the journal costs an edit on a large project (a measurement; run it alone)
 cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card makes of the stage, and a film as a file (a graphics card; two of them ffmpeg)
+cargo test -p trill-runtime --test together under_wsl -- --ignored --nocapture    # two programs on Windows sharing a song through the meeting point as the static Linux program, run under WSL on this machine: joined, an edit timed, the meeting point stopped and started again (WSL with a Linux distribution; build the program first with `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build -p trill-meet --release --target x86_64-unknown-linux-musl`)
 cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
 cargo test -p trill-app a_film_is_made_from_the_window -- --ignored --nocapture    # a film from the window's panel, watched as it is made, and one stopped (a graphics card)
 cargo test -p trill-dsp --test real_sfz -- --ignored --nocapture    # the SFZ reader on the files a synth installed here keeps: their text only, counted (TRILL_SFZ_FOLDER names another folder)
@@ -99,8 +100,11 @@ crates/
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
                   safety copies of unsaved work, and the thread that connects the session to other programs
                   in the same song.
-  trill-together  The wire between programs that hold the same song: invitations, an encrypted connection
-                  (the Noise protocol, through `snow`), the messages. Nothing of the song.
+  trill-meet      A meeting point: the small server two Trills that cannot reach each other both connect out
+                  to (the `trill-meet` program, one static file for Linux), and the half of it a Trill speaks.
+                  The encrypted connection (the Noise protocol, through `snow`) lives here. Nothing of Trill.
+  trill-together  The wire between programs that hold the same song: invitations, the messages, the
+                  connections of one program, directly or through a meeting point. Nothing of the song.
   trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, ornaments,
                   articulations, analysis.
   trill-mcp       MCP server (library) and the headless `trill-mcp` binary.

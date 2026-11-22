@@ -476,7 +476,8 @@ fn what_another_program_does_in_a_shared_song_opens_no_input_by_any_route() {
     assert_eq!((rig.session.project().track(voice).unwrap().pan, ben.project().tempo), (0.3, 98.0));
     assert_eq!(opens(&rig), by_hand);
     assert!(rig.session.is_armed(voice) && rig.host.capturing().is_some());
-    (rig.session.take_said(), ben.take_said());
+    rig.session.take_said();
+    ben.take_said();
 
     // 5. "Bring it back", asked at the assistant's door. The user has
     // switched the track's monitoring on by hand, so that it is always

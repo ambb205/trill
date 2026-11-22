@@ -47,6 +47,11 @@ fn same(a: &Runtime, b: &Runtime) -> bool {
     text(a) == text(b)
 }
 
+/// [`start`], for where that name is taken.
+fn start_named(folder: &Path, name: &str) -> Runtime {
+    start(folder, name)
+}
+
 /// A program with a small song in it.
 fn with_a_song(folder: &Path, name: &str) -> (Runtime, TrackId, ClipId) {
     let runtime = start(folder, name);
@@ -694,4 +699,198 @@ fn a_meeting_point_that_does_not_take_the_key_or_passes_no_more_today_is_said_in
     assert!(!said(&ben).contains("invitation again"), "{}", said(&ben));
     ben.leave();
     eventually("until he leaves", || !ben.together().is_on());
+}
+
+// ---- the Linux program, under WSL --------------------------------------------
+
+/// What the test has WSL run: the meeting point as a keeper would start
+/// it, in a folder of the test's own under `/tmp` there. `first` makes a
+/// key and says it; `again` starts the program where it was; `end` clears
+/// up. The number of the process is said first, to stop it by.
+const IN_LINUX: &str = "#!/bin/sh
+set -eu
+run=/tmp/trill-meet-test-$1
+case \"$4\" in
+    first) rm -rf \"$run\" && mkdir -p \"$run\" && cp \"$3\" \"$run/trill-meet\" && chmod +x \"$run/trill-meet\"
+           cd \"$run\" && ./trill-meet key Ada ;;
+    again) cd \"$run\" ;;
+    end) rm -rf \"$run\"; exit 0 ;;
+esac
+echo \"PID $$\"
+exec ./trill-meet serve --port \"$2\"
+";
+
+/// A path of this machine as WSL has it: `C:\x\y` is `/mnt/c/x/y`.
+fn in_wsl(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = path.strip_prefix("//?/").unwrap_or(&path);
+    match path.split_once(":/") {
+        Some((drive, rest)) => format!("/mnt/{}/{rest}", drive.to_lowercase()),
+        None => path.to_owned(),
+    }
+}
+
+/// The meeting point running under WSL, and what it has written.
+struct InLinux {
+    wsl: std::process::Child,
+    distribution: String,
+    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl InLinux {
+    fn wsl(distribution: &str) -> std::process::Command {
+        let mut wsl = std::process::Command::new("wsl");
+        wsl.args(["-d", distribution, "--"]);
+        wsl
+    }
+
+    fn start(distribution: &str, script: &Path, arguments: &[&str]) -> InLinux {
+        use std::io::BufRead;
+        let mut wsl = (Self::wsl(distribution).arg("sh").arg(in_wsl(script)).args(arguments))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("WSL is installed");
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for from in [
+            Box::new(wsl.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>,
+            Box::new(wsl.stderr.take().unwrap()),
+        ] {
+            let lines = lines.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(from).lines().map_while(Result::ok) {
+                    lines.lock().unwrap().push(line);
+                }
+            });
+        }
+        InLinux { wsl, distribution: distribution.to_owned(), lines }
+    }
+
+    fn said(&self) -> String {
+        self.lines.lock().unwrap().join("\n")
+    }
+
+    /// Waits for a line that has `words` in it, and returns it.
+    fn line_with(&self, words: &str) -> String {
+        let mut found = None;
+        eventually(&format!("the meeting point under WSL says \"{words}\""), || {
+            found = self.lines.lock().unwrap().iter().find(|line| line.contains(words)).cloned();
+            found.is_some()
+        });
+        found.unwrap()
+    }
+
+    /// Ends the program there, by its number.
+    fn stop(mut self) {
+        let pid = self.line_with("PID ").trim_start_matches("PID ").trim().to_owned();
+        let _ = Self::wsl(&self.distribution).args(["kill", &pid]).status();
+        let _ = self.wsl.wait();
+    }
+}
+
+/// The real thing, as far as one machine has it: the meeting point as the
+/// static Linux program, run under WSL, and two programs on Windows that
+/// share a song through it. It is reached on this machine's loopback,
+/// which WSL hands on to Linux; nothing leaves the machine.
+#[test]
+#[ignore = "needs WSL with a Linux distribution, and the Linux program built: \
+            `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build -p trill-meet --release --target \
+            x86_64-unknown-linux-musl`, then `cargo test -p trill-runtime --test together under_wsl -- --ignored \
+            --nocapture` (TRILL_WSL_DISTRIBUTION names another distribution than Ubuntu)"]
+fn two_programs_on_windows_share_a_song_through_the_linux_program_under_wsl() {
+    let built = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/x86_64-unknown-linux-musl/release/trill-meet");
+    let program = std::env::var_os("TRILL_MEET_LINUX").map_or(built, std::path::PathBuf::from);
+    assert!(program.is_file(), "the Linux program is not built at {}: see how above", program.display());
+    let distribution = std::env::var("TRILL_WSL_DISTRIBUTION").unwrap_or_else(|_| "Ubuntu".to_owned());
+    let folder = tempfile::tempdir().unwrap();
+    let script = folder.path().join("in-linux.sh");
+    std::fs::write(&script, IN_LINUX).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (id, port_said, program) = (std::process::id().to_string(), port.to_string(), in_wsl(&program));
+    let arguments = |how: &'static str| [id.clone(), port_said.clone(), program.clone(), how.to_owned()];
+    let start = |how: &'static str| {
+        let arguments = arguments(how);
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        InLinux::start(&distribution, &script, &arguments)
+    };
+
+    // Its keeper makes a key and starts it.
+    let point = start("first");
+    let listening = point.line_with("a meeting point on");
+    println!("under WSL ({distribution}): {listening}");
+    let said = point.said();
+    let key = said.lines().map(str::trim).find(|line| meet::Key::parse(line).is_ok()).expect("the key is shown, once");
+    let at = format!("127.0.0.1:{port}");
+
+    // Two programs on Windows. One shares through it, with the key; the
+    // other joins with the invitation and nothing else.
+    let (ada, _, verse) = with_a_song(folder.path(), "Ada");
+    let ben = start_named(folder.path(), "Ben");
+    ada.set_meeting_point(&at, Some(key)).unwrap();
+    let began = Instant::now();
+    let invitation = ada.share_through_meeting_point().unwrap();
+    eventually("the meeting is open there", || ada.together().meeting == Some((at.clone(), Meeting::Held)));
+    println!("the meeting was open at the meeting point {:.0} ms after sharing", began.elapsed().as_secs_f64() * 1e3);
+    assert!(invitation.starts_with(&format!("trill:meet:{at}:")), "{invitation}");
+    let began = Instant::now();
+    ben.join(&invitation, false).unwrap();
+    eventually("Ben has the song", || same(&ada, &ben) && ben.together().people.len() == 1);
+    println!("the one who joined had the song after {:.0} ms", began.elapsed().as_secs_f64() * 1e3);
+
+    // Both change it at once, and how long an edit takes to the other.
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    eventually("both have both", || {
+        same(&ada, &ben) && ada.session.lock().project().clip(verse).is_ok_and(|clip| clip.notes().len() == 4)
+    });
+    let mut took: Vec<Duration> = (0..40)
+        .map(|round| {
+            let before = ben.session.lock().revision();
+            let began = Instant::now();
+            ada.session.lock().edit(|song| song.set_tempo(100.0 + f64::from(round))).unwrap();
+            while ben.session.lock().revision() == before {
+                assert!(began.elapsed() < WAIT, "an edit never arrived");
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            let took = began.elapsed();
+            std::thread::sleep(Duration::from_millis(7 + (round as u64 * 13) % 31));
+            took
+        })
+        .collect();
+    took.sort();
+    let ms = |at: usize| took[at].as_secs_f64() * 1e3;
+    println!("an edit, to the other's graph: {:.0} ms in the middle, {:.0} ms for nine in ten", ms(20), ms(36));
+
+    // The meeting point is stopped, as when its keeper restarts the
+    // server. Neither of them left: each goes on, and says what is away.
+    point.stop();
+    eventually("each knows", || {
+        ben.together().away.len() == 1 && matches!(ada.together().meeting, Some((_, Meeting::Away(_))))
+    });
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(74, 5.0)])).unwrap();
+    ben.session.lock().edit(|song| song.set_tempo(98.0)).unwrap();
+    assert!(!same(&ada, &ben));
+    // Started again where it was, with the keys it had: nobody does
+    // anything, and both sets of work are in the song.
+    let began = Instant::now();
+    let point = start("again");
+    point.line_with("a meeting point on");
+    eventually("they are in the song together again", || {
+        same(&ada, &ben) && ben.together().people.len() == 1 && ben.together().away.is_empty()
+    });
+    println!("both were in the song again {:.1} s after it was started again", began.elapsed().as_secs_f64());
+    let song = ada.session.lock().project().clone();
+    assert_eq!((song.clip(verse).unwrap().notes().len(), song.tempo), (5, 98.0));
+    assert_eq!(ada.together().invitation.as_deref(), Some(invitation.as_str()));
+
+    // What the meeting point wrote: who held a meeting, and nothing of
+    // the key or of the invitation's secret.
+    point.line_with("Ada holds a meeting");
+    let log = point.said();
+    println!("its log since it was started again:\n{log}");
+    let secret = invitation.rsplit(':').next().unwrap();
+    assert!(!log.contains(&key[10..]) && !log.contains(secret), "{log}");
+    drop((ada, ben));
+    point.stop();
+    let _ = start("end").wsl.wait();
 }

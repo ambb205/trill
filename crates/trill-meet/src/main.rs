@@ -35,8 +35,8 @@ whoever has an invitation can join one.
 
   trill-meet forget NAME|KEY-ID [--keys FILE]
       Takes a key away. A meeting point that is running reads the file
-      again by itself, and ends what was held with that key within half a
-      minute.
+      again by itself, and ends what was held with that key within a few
+      seconds: its meetings, and the people in them.
 
 The keys are in trill-meet.keys in the folder it is started in, unless
 --keys says another file.
@@ -160,7 +160,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 true => Err(format!("no key in {} is {who}'s: trill-meet keys lists them", path.display())),
                 false => {
                     println!("Taken away: the key of {}.", gone.join(", "));
-                    println!("A meeting point that is running ends what it held within half a minute.");
+                    println!("A meeting point that is running ends what it held within a few seconds.");
                     Ok(())
                 }
             }
