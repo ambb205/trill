@@ -2944,7 +2944,8 @@ async fn the_assistants_door_neither_shares_a_song_nor_sets_or_learns_a_meeting_
     let schema = serde_json::to_value(&shared_song.input_schema).unwrap();
     let mut takes: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
     takes.sort_unstable();
-    assert_eq!(takes, ["action", "invitation", "name", "notice", "port", "reach", "replace_unsaved"]);
+    // (`person` is whom to let go, by the name they go by.)
+    assert_eq!(takes, ["action", "invitation", "name", "notice", "person", "port", "reach", "replace_unsaved"]);
     for tool in &tools {
         let schema = serde_json::to_value(&tool.input_schema).unwrap();
         for property in schema["properties"].as_object().into_iter().flat_map(|properties| properties.keys()) {
