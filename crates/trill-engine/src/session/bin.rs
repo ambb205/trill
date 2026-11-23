@@ -113,9 +113,25 @@ fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Asks the system to take `paths` into its Recycle Bin, and returns how
 /// many it says it took. What it did not take is where it was.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn recycle(_paths: &[PathBuf]) -> usize {
     0
+}
+
+#[cfg(target_os = "linux")]
+#[path = "bin/trash.rs"]
+mod trash;
+
+#[cfg(target_os = "linux")]
+fn recycle(paths: &[PathBuf]) -> usize {
+    let mut taken = 0;
+    for path in paths {
+        match trash::trash(path) {
+            Ok(_) => taken += 1,
+            Err(error) => log::warn!("the trash did not take '{}': {error}", path.display()),
+        }
+    }
+    taken
 }
 
 #[cfg(windows)]

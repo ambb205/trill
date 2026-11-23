@@ -5032,6 +5032,7 @@ dependencies = [
  "trill-media",
  "windows",
  "windows-core",
+ "zbus",
 ]
 
 [[package]]

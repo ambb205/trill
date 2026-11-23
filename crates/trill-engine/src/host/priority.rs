@@ -125,3 +125,8 @@ impl Drop for AudioPriority {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "priority/linux.rs"]
+#[allow(dead_code)]
+mod linux;

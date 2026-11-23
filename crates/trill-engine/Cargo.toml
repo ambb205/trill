@@ -66,6 +66,13 @@ windows = { version = "0.62", features = [
 # tree already, through other crates.
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# RealtimeKit, the desktop's service that gives a program's audio threads
+# real-time scheduling where the user may not ask the kernel for it, is
+# asked over the system's D-Bus. In the tree already, through the window's
+# accessibility.
+zbus = "5"
+
 [dev-dependencies]
 # Fixtures for the audio tests: temporary folders and files.
 tempfile = "3"
