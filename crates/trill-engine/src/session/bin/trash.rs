@@ -44,17 +44,15 @@ pub(super) fn trash_with(path: &Path, home: &Path, uid: u32) -> io::Result<PathB
     let disk = fs::symlink_metadata(&path)?.dev();
     // The home trash where it is on the same disk (made if it is not
     // there yet: its parent is the user's own).
-    if let Some(home_disk) = disk_of(home) {
-        if home_disk == disk {
-            let trash = Trash::made(home.to_path_buf())?;
-            return trash.take(&path, &path);
-        }
+    if disk_of(home) == Some(disk) {
+        let trash = Trash::made(home.to_path_buf())?;
+        return trash.take(&path, &path);
     }
     // The disk's own: from the top of the disk the file is on.
     let top = top_of(&path, disk)?;
     let shared = top.join(".Trash");
     let usable = fs::symlink_metadata(&shared)
-        .is_ok_and(|found| found.file_type().is_dir() && found.mode() & libc::S_ISVTX as u32 != 0);
+        .is_ok_and(|found| found.file_type().is_dir() && found.mode() & libc::S_ISVTX != 0);
     let mut tried = Vec::new();
     if usable {
         match Trash::made(shared.join(uid.to_string())) {
