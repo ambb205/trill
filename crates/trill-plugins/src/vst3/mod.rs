@@ -40,7 +40,7 @@ pub(crate) mod class_id;
 mod com;
 mod controller;
 mod editor;
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod editor_tests;
 mod events;
 mod factory;

@@ -17,21 +17,28 @@
 //! * [`EditorStatus`]: what a device's controller knows about its editor
 //!   without asking the plugin thread, because views ask on every frame.
 //!
-//! Editors are hosted on Windows. Elsewhere [`Window`] cannot be created
-//! and opening an editor reports that it is not supported yet.
+//! Editors are hosted on Windows (`window.rs`) and on Linux, in an X11
+//! window (`x11.rs`). Elsewhere [`Window`] cannot be created and opening an
+//! editor reports that it is not supported yet.
 
 #[cfg(windows)]
 #[path = "window.rs"]
 mod window;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "x11.rs"]
+mod window;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 #[path = "unsupported.rs"]
 mod window;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::device::{EditorImage, EditorOptions};
-#[cfg(all(test, windows))]
+#[cfg(target_os = "linux")]
+pub(crate) use window::keep_out_of_sight;
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(crate) use window::simulate;
 pub(crate) use window::{SUPPORTED, Window};
 

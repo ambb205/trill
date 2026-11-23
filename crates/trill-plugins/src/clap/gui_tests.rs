@@ -9,7 +9,7 @@
 use super::ClapFactory;
 use super::scripted::{self, Action, kind};
 use crate::editor::{Size, simulate};
-use crate::test_support::{eventually, unique_title, within};
+use crate::test_support::{eventually, needs_windows, unique_title, within};
 use std::time::Duration;
 use trill_core::device::{
     DeviceFactory, DeviceInstance, EditorError, EditorOptions, ParamEdit, ParamEditKind, ProcessInfo,
@@ -102,6 +102,7 @@ fn block(instance: &mut DeviceInstance, fill: f32) -> Vec<f32> {
 
 #[test]
 fn an_editor_opens_in_a_window_of_the_plugins_size_and_closes_again() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -133,6 +134,7 @@ fn an_editor_opens_in_a_window_of_the_plugins_size_and_closes_again() {
 
 #[test]
 fn opening_an_open_editor_keeps_the_one_window() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -149,6 +151,7 @@ fn opening_an_open_editor_keeps_the_one_window() {
 
 #[test]
 fn the_user_closing_the_window_detaches_the_view_and_the_window_remembers_its_place() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -174,6 +177,7 @@ fn the_user_closing_the_window_detaches_the_view_and_the_window_remembers_its_pl
 
 #[test]
 fn an_editor_goes_with_its_controller_and_with_its_device() {
+    needs_windows!();
     let factory = factory();
 
     // The session lets go of the controller when the device leaves the
@@ -205,6 +209,7 @@ fn an_editor_goes_with_its_controller_and_with_its_device() {
 
 #[test]
 fn several_editors_are_open_at_once_and_none_outlives_the_factory() {
+    needs_windows!();
     within(Duration::from_secs(60), || {
         let factory = factory();
         let mut instances: Vec<DeviceInstance> = (0..3).map(|_| create(&factory, kind::EDITOR)).collect();
@@ -226,6 +231,7 @@ fn several_editors_are_open_at_once_and_none_outlives_the_factory() {
 
 #[test]
 fn a_plugin_that_cannot_create_or_attach_its_editor_is_an_error_and_leaves_no_window() {
+    needs_windows!();
     let factory = factory_of(&[kind::FAILS_EDITOR_CREATE, kind::FAILS_EDITOR_ATTACH]);
 
     let mut failing = create(&factory, kind::FAILS_EDITOR_CREATE);
@@ -250,6 +256,7 @@ fn a_plugin_that_cannot_create_or_attach_its_editor_is_an_error_and_leaves_no_wi
 
 #[test]
 fn a_plugin_without_an_editor_to_embed_has_none() {
+    needs_windows!();
     let factory = factory_of(&[kind::MONO_GAIN, kind::FLOATING_EDITOR]);
     // One has no editor at all; the other only a window of its own, which
     // this host does not manage.
@@ -268,16 +275,25 @@ fn a_plugin_without_an_editor_to_embed_has_none() {
 
 #[test]
 fn the_user_resizes_an_editor_only_to_sizes_its_plugin_accepts() {
+    needs_windows!();
     let factory = factory_of(&[kind::EDITOR, kind::FIXED_EDITOR]);
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
     let window = open(&mut instance, &options("resizable"));
     assert!(simulate::is_resizable(window));
 
-    // While an edge is dragged, the plugin is asked about every size.
-    assert_eq!(simulate::drag_to(window, Size::new(703, 517)), Size::new(700, 510));
-    assert_eq!(simulate::drag_to(window, Size::new(50, 50)), Size::new(200, 150), "no smaller than the plugin allows");
-    assert_eq!(simulate::client_size(window), scaled_size(&mut instance), "dragging alone resizes nothing");
+    // While an edge is dragged, Windows asks the plugin about every size (`WM_SIZING`); an X window
+    // manager resizes by the size hints and tells the program afterwards, so there is nothing to ask then.
+    #[cfg(windows)]
+    {
+        assert_eq!(simulate::drag_to(window, Size::new(703, 517)), Size::new(700, 510));
+        assert_eq!(
+            simulate::drag_to(window, Size::new(50, 50)),
+            Size::new(200, 150),
+            "no smaller than the plugin allows"
+        );
+        assert_eq!(simulate::client_size(window), scaled_size(&mut instance), "dragging alone resizes nothing");
+    }
 
     // When the mouse is released, the plugin is given the size, and the
     // window follows what the plugin makes of it.
@@ -304,6 +320,7 @@ fn the_user_resizes_an_editor_only_to_sizes_its_plugin_accepts() {
 
 #[test]
 fn the_plugin_resizes_its_own_editor_and_changes_its_mind_about_resizing() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -323,6 +340,7 @@ fn the_plugin_resizes_its_own_editor_and_changes_its_mind_about_resizing() {
 
 #[test]
 fn a_plugin_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -341,8 +359,12 @@ fn a_plugin_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
     assert_eq!(value(&mut instance, scripted::EDITOR_HEIGHT), f64::from(given.height));
 }
 
+// Windows tells a window that it moved to a monitor of another resolution (`WM_DPICHANGED`). On X
+// an editor is told a scale of 1, and a plugin reads the display's resolution itself (`editor/x11.rs`).
+#[cfg(windows)]
 #[test]
 fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let window = open(&mut instance, &options("changes monitor"));
@@ -357,6 +379,7 @@ fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
 
 #[test]
 fn a_plugin_that_reports_its_editor_gone_has_it_closed() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -371,6 +394,7 @@ fn a_plugin_that_reports_its_editor_gone_has_it_closed() {
 
 #[test]
 fn a_plugins_timer_ticks_for_as_long_as_it_is_registered() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     std::thread::sleep(Duration::from_millis(60));
@@ -389,6 +413,7 @@ fn a_plugins_timer_ticks_for_as_long_as_it_is_registered() {
 
 #[test]
 fn an_edit_made_in_the_editor_is_heard_and_reported_with_its_gesture() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -413,6 +438,7 @@ fn an_edit_made_in_the_editor_is_heard_and_reported_with_its_gesture() {
 
 #[test]
 fn a_plugin_that_is_being_processed_is_not_flushed_from_the_main_thread() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -436,6 +462,7 @@ fn a_plugin_that_is_being_processed_is_not_flushed_from_the_main_thread() {
 
 #[test]
 fn an_edit_is_flushed_out_of_a_plugin_nobody_is_processing() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
