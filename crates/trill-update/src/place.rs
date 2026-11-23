@@ -135,12 +135,25 @@ const PROGRAMS_OF_A_BUNDLE: &str = "Contents/MacOS/";
 
 /// Whether the file at `path` (below the folder Trill is in) is one of its
 /// programs: on Windows by its name; on macOS also by where it lies in a
-/// bundle.
+/// bundle. (Linux's arm is below.)
+#[cfg(not(target_os = "linux"))]
 fn is_a_program(path: &str) -> bool {
     #[cfg(target_os = "macos")]
     return path.ends_with(".exe") || path.starts_with(PROGRAMS_OF_A_BUNDLE);
     #[cfg(not(target_os = "macos"))]
     path.ends_with(".exe")
+}
+
+/// Trill's programs on Linux, which have neither a mark in their names nor
+/// a bundle to lie in: named here, and nowhere else.
+#[cfg(target_os = "linux")]
+const PROGRAMS: &[&str] = &["trill", "trill-mcp"];
+
+/// On Linux by being one of [`PROGRAMS`], in the folder Trill is in: never
+/// by anything the archive says of a file.
+#[cfg(target_os = "linux")]
+fn is_a_program(path: &str) -> bool {
+    PROGRAMS.contains(&path)
 }
 
 /// The files of an update in the order they go in: programs last, so that
@@ -570,22 +583,38 @@ mod tests {
         checksum(&path, &AtomicBool::new(false)).unwrap()
     }
 
+    /// The window's program and the server's, as a Windows build names them.
+    const WINDOWS: [&str; 2] = ["trill.exe", "trill-mcp.exe"];
+
     /// A folder with a Trill of `version` in it: two programs and a licence.
     fn installed(folder: &Path, version: &str) {
+        installed_as(folder, version, WINDOWS);
+    }
+
+    fn installed_as(folder: &Path, version: &str, [window, server]: [&str; 2]) {
         std::fs::create_dir_all(folder.join("licences")).unwrap();
-        std::fs::write(folder.join("trill.exe"), format!("window {version}")).unwrap();
-        std::fs::write(folder.join("trill-mcp.exe"), format!("server {version}")).unwrap();
+        std::fs::write(folder.join(window), format!("window {version}")).unwrap();
+        std::fs::write(folder.join(server), format!("server {version}")).unwrap();
         std::fs::write(folder.join("licences").join("Trill.txt"), format!("licence {version}")).unwrap();
     }
 
     /// An archive of a Trill of `version`, and the build that announces it.
     fn built(folder: &Path, version: &str) -> (PathBuf, Build) {
+        built_as(folder, version, WINDOWS)
+    }
+
+    fn built_as(folder: &Path, version: &str, [window, server]: [&str; 2]) -> (PathBuf, Build) {
         let files: Vec<(String, Vec<u8>)> = vec![
-            ("trill.exe".into(), format!("window {version}").into_bytes()),
-            ("trill-mcp.exe".into(), format!("server {version}").into_bytes()),
+            (window.into(), format!("window {version}").into_bytes()),
+            (server.into(), format!("server {version}").into_bytes()),
             ("licences/Trill.txt".into(), format!("licence {version}").into_bytes()),
             ("licences/New in this one.txt".into(), b"more".to_vec()),
         ];
+        archived(folder, version, &files)
+    }
+
+    /// An archive of `files`, and the build that announces each of them.
+    fn archived(folder: &Path, version: &str, files: &[(String, Vec<u8>)]) -> (PathBuf, Build) {
         let members: Vec<(&str, &[u8], bool)> =
             files.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice(), true)).collect();
         let archive = folder.join(format!("trill-{version}.zip"));
@@ -927,6 +956,119 @@ mod tests {
         // One that is not there.
         let Trial::Failed(why) =
             place.try_out(place.alone().unwrap(), &home.path().join("no-such.exe"), &[], from).ended
+        else {
+            panic!()
+        };
+        assert!(why.contains("could not be started"), "{why}");
+    }
+
+    /// Trill's two programs as a Linux build names them.
+    #[cfg(target_os = "linux")]
+    const LINUX: [&str; 2] = ["trill", "trill-mcp"];
+
+    #[cfg(target_os = "linux")]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_only_the_programs_an_update_names_are_made_programs() {
+        let (home, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        installed_as(home.path(), "0.2.0", LINUX);
+        let place = Place::at(home.path());
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("trill".into(), b"#!/bin/sh\nexit 0\n".to_vec()),
+            ("trill-mcp".into(), b"server 0.3.0".to_vec()),
+            ("licences/Trill.txt".into(), b"licence 0.3.0".to_vec()),
+            // Named as a program is, but not where Trill's programs lie, and a script beside them.
+            ("licences/trill".into(), b"#!/bin/sh\nexit 0\n".to_vec()),
+            ("helper.sh".into(), b"#!/bin/sh\nexit 0\n".to_vec()),
+        ];
+        let (archive, build) = archived(shelf.path(), "0.3.0", &files);
+        place.stage("0.3.0".parse().unwrap(), &build, &archive, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let staged = home.path().join(WORK).join("0.3.0");
+        assert_eq!(mode(&staged.join("trill")), 0o755);
+        assert_eq!(mode(&staged.join("trill-mcp")), 0o755);
+        for plain in ["licences/Trill.txt", "licences/trill", "helper.sh"] {
+            assert_eq!(mode(&staged.join(plain)) & 0o111, 0, "{plain} is no program");
+        }
+        let alone = place.alone().unwrap();
+        place.apply(&place.staged().unwrap(), &alone).unwrap();
+        // What went in is a program that runs.
+        assert_eq!(mode(&home.path().join("trill")), 0o755);
+        assert!(std::process::Command::new(home.path().join("trill")).status().unwrap().success());
+        assert_eq!(mode(&home.path().join("helper.sh")) & 0o111, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_the_programs_go_in_last() {
+        let (_, build) = built_as(tempfile::tempdir().unwrap().path(), "0.3.0", LINUX);
+        let order: Vec<&str> = in_order(&build.files).iter().map(|piece| piece.path.as_str()).collect();
+        assert_eq!(order, ["licences/Trill.txt", "licences/New in this one.txt", "trill", "trill-mcp"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_update_that_cannot_go_in_whole_leaves_trill_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let (home, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        installed_as(home.path(), "0.2.0", LINUX);
+        let place = Place::at(home.path());
+        let (archive, build) = built_as(shelf.path(), "0.3.0", LINUX);
+        let staged =
+            place.stage("0.3.0".parse().unwrap(), &build, &archive, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let alone = place.alone().unwrap();
+        // The folder the programs lie in cannot be written any more (its licences' folder and the
+        // update's still can): the licences go in, and the first program to go in cannot be moved.
+        let set = |mode: u32| std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+        set(0o555);
+        if std::fs::write(home.path().join("probe"), b"").is_ok() {
+            set(0o755);
+            eprintln!("skipping: this user writes where nobody may (the administrator's), so nothing can be held");
+            return;
+        }
+        let why = place.apply(&staged, &alone);
+        set(0o755);
+        let why = why.unwrap_err();
+        assert!(why.contains("trill could not be put in place") && why.contains("Trill is as it was"), "{why}");
+        // The files that had gone in before it are the old ones again, and what was new is gone.
+        assert_eq!(read(home.path(), "trill"), "window 0.2.0");
+        assert_eq!(read(home.path(), "trill-mcp"), "server 0.2.0");
+        assert_eq!(read(home.path(), "licences/Trill.txt"), "licence 0.2.0");
+        assert_eq!(read(home.path(), "licences/New in this one.txt"), "(not there)");
+        assert!(!home.path().join(WORK).join(APPLYING).exists());
+        assert_eq!(place.staged(), None, "what was half used is fetched again");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_new_version_that_comes_up_is_kept_and_one_that_ends_at_once_is_said() {
+        let home = tempfile::tempdir().unwrap();
+        let place = Place::at(home.path());
+        let shell = PathBuf::from("/bin/sh");
+        let from = Version::new(0, 2, 0);
+        // One that says it is up, as a program does once its window is there, and stays a while. It
+        // ends with a fault afterwards: that it came up is known by what it said, not by how it ended.
+        let up = home.path().join("comes-up.sh");
+        std::fs::write(&up, format!("echo up > \"${TRIAL}\"\nsleep 2\nexit 9\n")).unwrap();
+        assert_eq!(place.try_out(place.alone().unwrap(), &shell, &[up.into()], from).ended, Trial::CameUp);
+        // One that ends at once with a fault.
+        let Trial::Failed(why) =
+            place.try_out(place.alone().unwrap(), &shell, &["-c".into(), "exit 3".into()], from).ended
+        else {
+            panic!("a program that ends with a fault did not come up")
+        };
+        assert!(why.contains("ended before it was up"), "{why}");
+        // One that was asked for something short and did it.
+        assert_eq!(
+            place.try_out(place.alone().unwrap(), &shell, &["-c".into(), "exit 0".into()], from).ended,
+            Trial::CameUp
+        );
+        // One that is not there.
+        let Trial::Failed(why) = place.try_out(place.alone().unwrap(), &home.path().join("no-such"), &[], from).ended
         else {
             panic!()
         };
