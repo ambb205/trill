@@ -17,6 +17,13 @@ fn main() -> anyhow::Result<()> {
     // and songs with plugins are rendered, measured and probed in one.
     trill_plugins::scan::run_as_scanner_if_requested();
     trill_runtime::jobs::run_as_job_if_requested();
+    // On macOS plugins take the first thread for theirs, and the window's
+    // loop runs there: they are served from it, a step a turn, and a wait
+    // for the session on this thread serves them meanwhile.
+    #[cfg(target_os = "macos")]
+    if trill_plugins::first_thread::serve_here() {
+        trill_engine::SessionLock::serve_while_waiting(trill_plugins::first_thread::serve_while_waiting);
+    }
 
     let cli = match cli::parse(std::env::args().skip(1))? {
         cli::Parsed::Run(cli) => cli,
@@ -64,6 +71,20 @@ fn main() -> anyhow::Result<()> {
         scene.stage(&runtime);
     }
     let session = runtime.session.clone();
+    if let Some(after) = cli.hang_plugins {
+        // What a plugin that never comes back from a call does to the thread
+        // it is driven from.
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            log::warn!("the thread plugins are driven from is given a job that never ends, as asked");
+            let _ = trill_plugins::first_thread::on_the_plugin_thread(
+                std::time::Duration::from_secs(u64::from(u32::MAX)),
+                || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                },
+            );
+        });
+    }
 
     // services
     let mut options = cli.ui_options();

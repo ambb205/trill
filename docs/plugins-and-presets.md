@@ -15,6 +15,15 @@ from the first thread, each sounds. A song's other plugins render to the same sa
 `cargo run -p trill-plugins --example plugin_threads -- "vst3:Serum 2"` says, for an installed plugin, which thread
 its own work runs on and whether it sounds.
 
+The window on macOS draws on its first thread too, so there it drives its plugins between frames: a plugin is made a
+step at a time (its instance, its state, setting up, its parameters, activating), with a frame drawn between two
+steps, and its file is loaded beforehand on another thread. While a step runs the window stands still: on a song of
+eight plugins, 0.6 s at the most (Hammond B-3X activating), and the line that says which device is coming next is on
+screen before it. **A plugin that hangs on macOS freezes the window**, which cannot be drawn or closed until the
+program is ended (Force Quit). The song is not lost: the safety copy of unsaved work goes on being written by
+another thread every twenty seconds, with each plugin's state as it last was, and the next start offers it back. On
+Windows a plugin that hangs costs a sentence and the window goes on.
+
 A plugin's presets are listed, searched and loaded like a built-in device's. They are found the way each format
 provides: a CLAP plugin's through its preset-discovery providers, a VST3 plugin's as the `.vstpreset` files in the
 standard preset folders and the programs of its program lists. A big synth has thousands, so they are read in the

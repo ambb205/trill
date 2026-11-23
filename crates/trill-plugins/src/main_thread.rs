@@ -59,7 +59,7 @@ mod os_events;
 mod cf;
 
 #[cfg(target_os = "macos")]
-pub(crate) use os_events::{first_is_lent, lend, serve_here};
+pub(crate) use os_events::{first_is_lent, frame_drawn, lend, serve_here, steps_a_turn};
 
 /// How often an idling thread services plugin callbacks.
 const IDLE_INTERVAL: Duration = Duration::from_millis(15);
@@ -180,6 +180,18 @@ impl Drop for SignalOnDrop {
     }
 }
 
+/// How long a job may keep the thread before the thread counts as hung,
+/// and nobody waits for it again until it is free (macOS, where the thread
+/// may be a window's): far more than any step of a plugin's making was
+/// measured to take (a second).
+const HUNG_AFTER: Duration = Duration::from_secs(10);
+
+/// Nanoseconds since the first time this was asked: a clock for atomics.
+fn since_start() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
 /// How long the thread must have had work without a break to count as
 /// behind: longer than anything a plugin is asked for in passing.
 const BEHIND_AFTER: Duration = Duration::from_millis(250);
@@ -222,6 +234,9 @@ impl Drop for Finished {
 struct Inner<S> {
     /// What the thread has yet to do.
     backlog: Arc<Backlog>,
+    /// When the job the thread is doing now began, in nanoseconds of
+    /// [`since_start`]; 0 while it does none.
+    running: Arc<std::sync::atomic::AtomicU64>,
     sender: Sender<Message<S>>,
     /// Ends the thread's wait for OS events when a message was sent.
     waker: os_events::Waker,
@@ -289,7 +304,8 @@ impl<S: ThreadState> MainThread<S> {
         #[cfg(not(target_os = "macos"))]
         let (waker, thread_id, thread) = Self::spawn_own(name, receiver, signal, first)?;
         let backlog = Arc::new(Backlog::default());
-        let inner = Inner { backlog, sender, waker, thread_id, thread, exit };
+        let running = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let inner = Inner { backlog, running, sender, waker, thread_id, thread, exit };
         Ok(Self { inner: Arc::new(inner) })
     }
 
@@ -321,6 +337,14 @@ impl<S: ThreadState> MainThread<S> {
         Ok((waker, thread.thread().id(), Some(thread)))
     }
 
+    /// Whether the thread has been in one job for longer than any plugin is
+    /// given for a step ([`HUNG_AFTER`]): a plugin that hangs.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn hung(&self) -> bool {
+        let began = self.inner.running.load(std::sync::atomic::Ordering::Relaxed);
+        began != 0 && since_start().saturating_sub(began) > HUNG_AFTER.as_nanos() as u64
+    }
+
     /// Whether the thread is behind: it has had work to do for a while
     /// without a break. A plugin that takes long to be made or let go of
     /// keeps every other plugin waiting for its turn, and one of them may
@@ -333,10 +357,13 @@ impl<S: ThreadState> MainThread<S> {
     fn send(&self, at_rest: bool, job: impl FnOnce(&mut S) + Send + 'static) -> Result<(), CallError> {
         self.inner.backlog.began();
         let finished = Finished(self.inner.backlog.clone());
+        let running = self.inner.running.clone();
         let job = move |state: &mut S| {
             // Let go of when the job has run, and if it never does.
             let _finished = finished;
+            running.store(since_start().max(1), std::sync::atomic::Ordering::Relaxed);
             job(state);
+            running.store(0, std::sync::atomic::Ordering::Relaxed);
         };
         self.inner.sender.send(Message::Run { job: Box::new(job), at_rest }).map_err(|_| CallError::Failed)?;
         self.inner.waker.wake();
@@ -377,7 +404,19 @@ impl<S: ThreadState> MainThread<S> {
         job: impl FnOnce(&mut S) -> R + Send + 'static,
     ) -> Result<R, CallError> {
         if thread::current().id() == self.inner.thread_id {
+            // On macOS's window the thread that asks may be the plugin
+            // thread itself, between two of its jobs: answered there.
+            #[cfg(target_os = "macos")]
+            if let Some(value) = run_here::<S, R>(job) {
+                return Ok(value);
+            }
             return Err(CallError::Reentrant);
+        }
+        // On macOS the thread plugins are driven from may be a window's:
+        // one that has been in one job for long is not waited for again.
+        #[cfg(target_os = "macos")]
+        if self.hung() {
+            return Err(CallError::TimedOut);
         }
         let (reply, result) = mpsc::sync_channel(1);
         let arrival = os_events::Arrival::new();
@@ -409,6 +448,12 @@ impl<S: ThreadState> MainThread<S> {
         unclaimed: impl FnOnce(&mut S, R) + Send + 'static,
     ) -> Result<R, CallError> {
         if thread::current().id() == self.inner.thread_id {
+            // On macOS's window the thread that asks may be the plugin
+            // thread itself, between two of its jobs: answered there.
+            #[cfg(target_os = "macos")]
+            if let Some(value) = run_here::<S, R>(job) {
+                return Ok(value);
+            }
             return Err(CallError::Reentrant);
         }
         // A rendezvous: sending succeeds only into the hands of a caller
@@ -681,6 +726,54 @@ pub(crate) fn with_current<S: ThreadState, R>(body: impl FnOnce(&mut S) -> R) ->
     let home = unsafe { &*registration.home.cast::<Home<S>>() };
     let mut state = home.state.try_borrow_mut().ok()?;
     Some(body(&mut state))
+}
+
+/// Runs `job` with the state of the calling thread's home, after every job
+/// that was sent before it, where the caller is not inside a job itself:
+/// for the thread that a window draws on and plugins are served from
+/// (macOS), which asks them something between two of their jobs and cannot
+/// wait for itself. `None` where nothing of the kind can be done here.
+#[cfg(target_os = "macos")]
+fn run_here<S: ThreadState, R>(job: impl FnOnce(&mut S) -> R) -> Option<R> {
+    if !os_events::steps_a_turn() {
+        return None;
+    }
+    let registration = HOME.get().filter(|registration| registration.state == TypeId::of::<S>())?;
+    // SAFETY: as in `with_current`; the state's type was just checked.
+    let home = unsafe { &*registration.home.cast::<Home<S>>() };
+    // What was sent before goes first, as it would have.
+    home.service(os_events::nested());
+    if home.shutdown.get() {
+        // Its loop ends it at the next turn.
+        os_events::wake_current();
+        return None;
+    }
+    let mut state = home.state.try_borrow_mut().ok()?;
+    Some(job(&mut state))
+}
+
+/// For a thread that waits for something another thread holds while
+/// that thread may wait for a plugin (the session): one plugin job, where
+/// the calling thread is the one plugins are served on beside a window
+/// (macOS), and whether it is.
+#[cfg(target_os = "macos")]
+pub(crate) fn serve_one<S: ThreadState>() -> bool {
+    if !os_events::steps_a_turn() || !os_events::is_first_thread() {
+        return false;
+    }
+    // What was posted to the first thread first: the plugins' home is set up
+    // that way when it is started.
+    os_events::run_posted();
+    let Some(registration) = HOME.get().filter(|registration| registration.state == TypeId::of::<S>()) else {
+        return true;
+    };
+    // SAFETY: as in `with_current`; the state's type was just checked.
+    let home = unsafe { &*registration.home.cast::<Home<S>>() };
+    home.service_some(os_events::nested(), 1);
+    if home.shutdown.get() {
+        os_events::end_current();
+    }
+    true
 }
 
 /// Asks for [`ThreadState::idle`] to run as soon as the plugin thread is

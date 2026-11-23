@@ -59,4 +59,54 @@ pub use session::{
 pub use sources::AudioSources;
 
 /// A session shared between front ends.
-pub type SharedSession = std::sync::Arc<parking_lot::Mutex<Session>>;
+pub type SharedSession = std::sync::Arc<SessionLock>;
+
+/// The lock a shared session is held under: a mutex, whose waiters may
+/// have something else to do meanwhile.
+///
+/// On macOS the thread a window draws on is the thread plugins are served
+/// on, and another thread may hold the session while it waits for a plugin's
+/// answer: a waiter on that thread who only waited would wait for itself.
+/// So where a program says what a waiting thread is to do
+/// ([`SessionLock::serve_while_waiting`]), [`SessionLock::lock`] does that
+/// between short waits. Nowhere else does it differ from the mutex.
+pub struct SessionLock(parking_lot::Mutex<Session>);
+
+/// What a thread that waits for the session does meanwhile: one piece of
+/// work, and whether it is a thread that has such work (when it is not, it
+/// waits as anyone does).
+static WHILE_WAITING: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+
+impl SessionLock {
+    pub fn new(session: Session) -> Self {
+        Self(parking_lot::Mutex::new(session))
+    }
+
+    /// Has a thread that waits for a session do `serve` between short
+    /// waits, for as long as `serve` says that the thread is one that has
+    /// work of that kind. Set once, by a program, before anything waits.
+    pub fn serve_while_waiting(serve: fn() -> bool) {
+        let _ = WHILE_WAITING.set(serve);
+    }
+
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, Session> {
+        if let Some(guard) = self.0.try_lock() {
+            return guard;
+        }
+        if let Some(serve) = WHILE_WAITING.get() {
+            loop {
+                if let Some(guard) = self.0.try_lock_for(std::time::Duration::from_millis(2)) {
+                    return guard;
+                }
+                if !serve() {
+                    break;
+                }
+            }
+        }
+        self.0.lock()
+    }
+
+    pub fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, Session>> {
+        self.0.try_lock()
+    }
+}

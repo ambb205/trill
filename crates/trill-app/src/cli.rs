@@ -93,6 +93,8 @@ Options:
                           opens, whatever is still on its way then: a song in the middle of
                           being opened
   --exit-after <SECONDS>  Close the window by itself after this long
+  --hang-plugins <S>      After this many seconds, give the thread plugins are driven from a job that never
+                          ends, as a plugin that hangs would: for finding out what that costs
   -V, --version           Say which Trill this is: its version, and for a release its build
   -h, --help              Show this help
 ";
@@ -196,6 +198,9 @@ pub struct Cli {
     /// window has settled.
     pub screenshot_after: Option<Duration>,
     pub exit_after: Option<Duration>,
+    /// When the thread plugins are driven from is to be hung, to measure
+    /// what a plugin that hangs costs.
+    pub hang_plugins: Option<Duration>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -416,6 +421,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                     bail!("--exit-after must be zero or more seconds");
                 }
                 cli.exit_after = Some(Duration::from_secs_f64(seconds));
+            }
+            "--hang-plugins" => {
+                let text = value("a number of seconds")?;
+                let seconds: f64 = text.parse().with_context(|| format!("'{text}' is not a number of seconds"))?;
+                if !seconds.is_finite() || seconds < 0.0 {
+                    bail!("--hang-plugins must be zero or more seconds");
+                }
+                cli.hang_plugins = Some(Duration::from_secs_f64(seconds));
             }
             option if option.starts_with('-') => bail!("unknown option '{option}'\n\n{USAGE}"),
             _ if cli.project.is_some() => bail!("only one project file can be opened"),

@@ -459,6 +459,19 @@ fn instantiate(main: &MainThread<PluginThread>, request: CreateRequest, timeout:
     // being made or taken down ahead of this one) is said with what the
     // making itself took: see `crate::making`.
     let asked = std::time::Instant::now();
+    if plugin_thread::a_step_a_turn() {
+        let path = request.path.clone();
+        return plugin_thread::make_in_steps(
+            main,
+            timeout,
+            &path,
+            move |_| super::instance::Making::new(request, asked.elapsed()),
+            |thread, token, making| thread.vst3.park(token, making),
+            |thread, token| thread.vst3.unpark(token),
+            |thread, making| thread.vst3.advance(making),
+            |thread, created: Created| thread.vst3.destroy(created.id, Some(created.audio), true),
+        );
+    }
     plugin_thread::instantiate(
         main,
         timeout,

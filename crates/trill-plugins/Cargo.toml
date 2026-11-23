@@ -79,3 +79,9 @@ png = "0.18"
 [[test]]
 name = "first_thread"
 harness = false
+
+# Owns its first thread and runs a loop there, as a window does, with the
+# plugins served from it (macOS).
+[[test]]
+name = "first_thread_window"
+harness = false

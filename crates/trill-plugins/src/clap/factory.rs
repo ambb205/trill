@@ -375,6 +375,19 @@ impl DeviceFactory for ClapFactory {
 /// Creates an instance on the plugin main thread, giving up after
 /// `timeout`. An instance that arrives after that is destroyed.
 fn instantiate(main: &MainThread<PluginThread>, request: CreateRequest, timeout: Duration) -> Result<Created, String> {
+    if plugin_thread::a_step_a_turn() {
+        let path = request.path.clone();
+        return plugin_thread::make_in_steps(
+            main,
+            timeout,
+            &path,
+            move |_| super::instance::Making::new(request),
+            |thread, token, making| thread.clap.park(token, making),
+            |thread, token| thread.clap.unpark(token),
+            |thread, making| thread.clap.advance(making),
+            |thread, created: Created| thread.clap.destroy(created.id),
+        );
+    }
     plugin_thread::instantiate(
         main,
         timeout,

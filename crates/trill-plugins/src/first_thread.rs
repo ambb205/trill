@@ -42,6 +42,25 @@ pub fn serve_here() -> bool {
     crate::main_thread::serve_here()
 }
 
+/// Says that the window which shares the first thread with the plugins has
+/// drawn a frame: plugin work goes on a step a frame, so that the window
+/// is drawn between two steps (or a step every 50 ms where it draws
+/// nothing). Called on the first thread, at the end of every frame.
+#[cfg(target_os = "macos")]
+pub fn frame_drawn() {
+    crate::main_thread::frame_drawn()
+}
+
+/// What a thread that waits for something does meanwhile, where the thing
+/// waited for may be held by a thread that waits for a plugin: on the
+/// first thread of a window that serves its plugins, one plugin job, and
+/// `true`; anywhere else nothing, and `false` (it waits as anyone does).
+/// For the session's lock (`trill_engine::SessionLock::serve_while_waiting`).
+#[cfg(target_os = "macos")]
+pub fn serve_while_waiting() -> bool {
+    crate::main_thread::serve_one::<crate::plugin_thread::PluginThread>()
+}
+
 /// Whether this process's plugins are driven from its first thread.
 pub fn is_first() -> bool {
     #[cfg(target_os = "macos")]

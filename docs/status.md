@@ -172,6 +172,10 @@ and the engine; what it has not got yet is [below](#macos). Linux has not been r
 
 What Windows has and macOS has not, yet. Each is said where it would be used, never a crash.
 
+- A window that goes on when a plugin hangs. On macOS the window draws on the thread plugins are driven from, so a
+  plugin that never comes back from a call freezes it until the program is ended; the safety copy of unsaved work
+  is still written and offered back at the next start. A step of a plugin's making stands the window still for as
+  long as it takes (0.6 s at the most on a song of eight plugins).
 - Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
   `~/Library/Audio/Plug-Ins` and `/Library/Audio/Plug-Ins` are found, scanned and played.
 - Joining a device's audio workgroup. The threads that make a song's sound have the class macOS keeps for audio,

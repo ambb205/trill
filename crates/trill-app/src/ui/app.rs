@@ -114,6 +114,11 @@ pub struct TrillApp {
     capture: Capture,
     started: Instant,
     frames: u32,
+    /// When the last frame was drawn, and the longest time between two
+    /// frames with when it ended: what a smoke test says of the window's
+    /// standing still.
+    last_frame: Option<Instant>,
+    longest_gap: (Duration, Duration),
     last_meter_update: Instant,
     /// The selection the session was last told of; `None` before the first
     /// time. Saves asking for the session when nothing moved.
@@ -289,6 +294,8 @@ impl TrillApp {
             capture: Capture::NotRequested,
             started: now,
             frames: 0,
+            last_frame: None,
+            longest_gap: (Duration::ZERO, Duration::ZERO),
             last_meter_update: now,
             told_selection: None,
             take_generation: 0,
@@ -777,9 +784,11 @@ impl TrillApp {
                 // How the window kept up: frames since it opened, and what
                 // the stage's part of them cost while it was shown.
                 eprintln!(
-                    "trill: {} frames, {:.1} a second",
+                    "trill: {} frames, {:.1} a second; the longest time between two was {:.0} ms, until {:.2} s",
                     self.frames,
-                    self.frames as f32 / elapsed.as_secs_f32().max(1e-3)
+                    self.frames as f32 / elapsed.as_secs_f32().max(1e-3),
+                    self.longest_gap.0.as_secs_f64() * 1000.0,
+                    self.longest_gap.1.as_secs_f64()
                 );
                 if let Some(report) = self.stage.report() {
                     eprintln!("trill: {report}");
@@ -964,6 +973,13 @@ impl TrillApp {
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.frames += 1;
+        let now = Instant::now();
+        if let Some(last) = self.last_frame.replace(now) {
+            let gap = now.duration_since(last);
+            if gap > self.longest_gap.0 {
+                self.longest_gap = (gap, now.duration_since(self.started));
+            }
+        }
         if self.frames == 1 {
             // The window is up: said to a Trill that put this one in its
             // place and waits to see that it starts.
@@ -1442,6 +1458,10 @@ impl eframe::App for TrillApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
+        // Plugins that share this thread take their next step now that the
+        // window has been drawn.
+        #[cfg(target_os = "macos")]
+        trill_plugins::first_thread::frame_drawn();
     }
 
     /// What the browser shows is written down on the way out, if it

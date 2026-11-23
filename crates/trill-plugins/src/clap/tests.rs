@@ -709,3 +709,21 @@ fn song_on_two_channels(instrument: String) -> Project {
     clip.set_controller_on(second, ControllerKind::SUSTAIN, pedal).unwrap();
     project
 }
+
+#[test]
+fn a_plugin_made_a_step_a_job_is_the_plugin_made_at_once_and_a_making_that_fails_leaves_nothing() {
+    use crate::plugin_thread::{STEPS_IN_THIS_TEST, plugin_thread};
+    let factory = factory();
+    let mut at_once = create(&factory, &device(kind::IMPULSE));
+    STEPS_IN_THIS_TEST.set(true);
+    let mut stepped = create(&factory, &device(kind::IMPULSE));
+    let names = |instance: &DeviceInstance| instance.params.iter().map(|param| param.id.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&stepped), names(&at_once));
+    assert_eq!(block(&mut stepped, BLOCK, &[on(3, 1.0)], 0.0), block(&mut at_once, BLOCK, &[on(3, 1.0)], 0.0));
+    // One that fails as it is activated, its last step: an error, and
+    // nothing of it kept on the plugin thread.
+    assert!(factory.create(&device(kind::FAILS_ACTIVATE), SR, BLOCK).is_err());
+    STEPS_IN_THIS_TEST.set(false);
+    let kept = plugin_thread().unwrap().call(Duration::from_secs(10), |thread| thread.clap.makings_kept()).unwrap();
+    assert_eq!(kept, 0);
+}

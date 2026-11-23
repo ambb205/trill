@@ -24,6 +24,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle, ThreadId};
@@ -88,6 +89,32 @@ thread_local! {
     static DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Whether this thread has its observer of loops.
     static OBSERVED: Cell<bool> = const { Cell::new(false) };
+    /// What ends the home served on this thread, with what it is given.
+    static OWN_END: Cell<Option<Ender>> = const { Cell::new(None) };
+}
+
+/// A home's `Driven`, and the function that ends it.
+type Ender = (*mut c_void, fn(*mut c_void));
+
+/// Ends the home served on the calling thread, which was told to end, where
+/// its loop's turn will not come first (a thread that waits for the
+/// session serves it meanwhile).
+pub(super) fn end_current() {
+    if let Some((info, end)) = OWN_END.take() {
+        end(info);
+    }
+}
+
+/// Whether the calling thread is the process's first.
+pub(super) fn is_first_thread() -> bool {
+    // SAFETY: asks of the calling thread only.
+    unsafe { pthread_main_np() == 1 }
+}
+
+/// Whether the calling thread is inside a loop that was entered from
+/// inside another (a menu, a plugin's dialog).
+pub(super) fn nested() -> bool {
+    DEPTH.get() > 1
 }
 
 /// Ends the calling thread's own next wait: its home is served at the
@@ -167,6 +194,10 @@ struct Driven<S> {
     away: Cell<Option<Duration>>,
     /// Whether the home has been let go of.
     ended: std::rc::Rc<Cell<bool>>,
+    /// The frame the window had drawn when the last job was taken, and
+    /// when that was: where plugins share the thread with a window, a job
+    /// waits for the next frame (see [`frame_drawn`]).
+    paced: Cell<(u64, Instant)>,
     _exit: SignalOnDrop,
 }
 
@@ -184,6 +215,7 @@ impl<S: ThreadState> Driven<S> {
             timer: std::ptr::null_mut(),
             away: Cell::new(None),
             ended: ended.clone(),
+            paced: Cell::new((0, Instant::now())),
             _exit: exit,
         });
         let raw = Box::into_raw(driven);
@@ -216,6 +248,7 @@ impl<S: ThreadState> Driven<S> {
             CFRunLoopAddTimer(driven.run_loop, driven.timer, kCFRunLoopCommonModes);
             driven.home.register();
             OWN_SOURCE.set(Some((driven.run_loop as usize, driven.source as usize)));
+            OWN_END.set(Some((raw.cast(), end::<S>)));
             let waker = Waker::new(driven.run_loop, driven.source);
             // Its first turn: whatever was sent before it existed.
             waker.wake();
@@ -239,12 +272,19 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
     if driven.ended.get() {
         return;
     }
-    let nested = DEPTH.get() > 1;
+    let nested = nested();
     if !nested && let Some(away) = driven.away.take() {
         driven.home.served(away);
     }
     let began = Instant::now();
-    let ran = driven.home.service_some(nested, 1);
+    // Where a window draws on this thread, a frame between two jobs.
+    let (frame, last) = driven.paced.get();
+    let now_frame = FRAMES.load(Ordering::Relaxed);
+    let waits = steps_a_turn() && now_frame == frame && last.elapsed() < FRAME_OR_AFTER;
+    let ran = if waits { 0 } else { driven.home.service_some(nested, 1) };
+    if ran > 0 {
+        driven.paced.set((FRAMES.load(Ordering::Relaxed), Instant::now()));
+    }
     if driven.home.shutdown.get() {
         end::<S>(info);
         return;
@@ -259,7 +299,11 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
             CFRunLoopWakeUp(driven.run_loop);
         }
     }
-    let next = match driven.home.until_idle() {
+    let wait = match (driven.home.until_idle(), waits) {
+        (idle, true) => Some(idle.unwrap_or(FRAME_OR_AFTER).min(FRAME_OR_AFTER.saturating_sub(last.elapsed()))),
+        (idle, false) => idle,
+    };
+    let next = match wait {
         // SAFETY: a plain clock.
         Some(wait) => (unsafe { CFAbsoluteTimeGetCurrent() }) + wait.as_secs_f64(),
         None => f64::MAX / 2.0,
@@ -280,6 +324,7 @@ fn end<S: ThreadState>(info: *mut c_void) {
         CFRelease(driven.source.cast_const());
         CFRelease(driven.timer.cast_const());
         OWN_SOURCE.set(None);
+        OWN_END.set(None);
         super::unregister();
         drop(Box::from_raw(info.cast::<Driven<S>>()));
     }
@@ -302,6 +347,15 @@ pub(super) fn start<S: ThreadState>(
         ended
     };
     if first && let Some(host) = HOST.get() {
+        // SAFETY: asks of the calling thread only.
+        if unsafe { pthread_main_np() } == 1 {
+            // Asked on the first thread itself (a window that starts before
+            // its loop runs): the home is set up here, and served once the
+            // loop runs.
+            drop(begin());
+            let (waker, id) = started.recv().map_err(|_| io::Error::other("the plugins' home was not set up"))?;
+            return Ok((waker, id, None));
+        }
         host.post(Box::new(move || drop(begin())));
         let (waker, id) = started.recv().map_err(|_| io::Error::other("the first thread did not take the plugins"))?;
         return Ok((waker, id, None));
@@ -341,6 +395,11 @@ impl Host {
 }
 
 extern "C" fn host_perform(_info: *mut c_void) {
+    run_posted();
+}
+
+/// Runs what was posted to the first thread. Called on it.
+pub(super) fn run_posted() {
     let Some(host) = HOST.get() else { return };
     loop {
         let work = host.queue.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
@@ -386,9 +445,33 @@ fn install_host() -> bool {
     true
 }
 
+/// How many frames the window that shares the first thread has drawn.
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+/// How long a job waits for the window's next frame at the most: a window
+/// that is hidden or covered draws nothing, and plugin work goes on.
+const FRAME_OR_AFTER: Duration = Duration::from_millis(50);
+
+/// The window that shares the first thread has drawn a frame: the next
+/// plugin job may be taken. Called on that thread.
+pub(crate) fn frame_drawn() {
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+    wake_current();
+}
+
+/// Whether the first thread runs a loop of the program's own (a window's)
+/// that plugins are served from, a step a turn.
+static STEPS_A_TURN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// See [`crate::first_thread::serve_here`].
 pub(crate) fn serve_here() -> bool {
-    install_host()
+    let served = install_host();
+    STEPS_A_TURN.store(served, std::sync::atomic::Ordering::Relaxed);
+    served
+}
+
+/// Whether plugins are made a step a job: see [`STEPS_A_TURN`].
+pub(crate) fn steps_a_turn() -> bool {
+    STEPS_A_TURN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// See [`crate::first_thread::lend`].

@@ -83,6 +83,49 @@ pub(crate) fn process_mode(offline: bool) -> int32 {
     if offline { kOffline as int32 } else { kRealtime as int32 }
 }
 
+/// A plugin being made: what its making has come to between two steps
+/// ([`Vst3Thread::advance`]). It lives on the plugin thread.
+pub(crate) struct Making {
+    request: CreateRequest,
+    steps: crate::making::Steps,
+    /// What the next step is, once there is an instance.
+    stage: Stage,
+    instance: Option<Instance>,
+    buses: Option<BusLayout>,
+    takes_notes: bool,
+    channels: usize,
+    table: Option<params::ParamTable>,
+    silencing: Option<Vec<(u8, ParamID)>>,
+    midi: Option<params::MidiParams>,
+}
+
+/// The step of a making that comes after the instance is made.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Stage {
+    State,
+    SetUp,
+    Params,
+    Activate,
+}
+
+impl Making {
+    /// A making that begins now, having waited `waited` for its turn.
+    pub(crate) fn new(request: CreateRequest, waited: std::time::Duration) -> Self {
+        Self {
+            request,
+            steps: crate::making::Steps::begun(waited),
+            stage: Stage::State,
+            instance: None,
+            buses: None,
+            takes_notes: false,
+            channels: 0,
+            table: None,
+            silencing: None,
+            midi: None,
+        }
+    }
+}
+
 /// A freshly created, activated instance, ready for the audio thread.
 pub(crate) struct Created {
     pub id: InstanceId,
@@ -528,6 +571,9 @@ pub(crate) struct Vst3Thread {
     /// The context every plugin object is initialized with.
     host: ComWrapper<HostApplication>,
     next_id: u64,
+    /// Plugins being made a step at a time, between two of their steps.
+    /// Declared last: what is half made goes before the modules.
+    makings: HashMap<u64, Making>,
 }
 
 impl ThreadState for Vst3Thread {
@@ -538,6 +584,7 @@ impl ThreadState for Vst3Thread {
             modules: HashMap::new(),
             host: HostApplication::new(),
             next_id: 1,
+            makings: HashMap::new(),
         }
     }
 
@@ -631,41 +678,91 @@ impl Vst3Thread {
 
     /// Loads, instantiates and activates a plugin, restoring `state`. The
     /// model's parameter values are resolved but not applied: they reach
-    /// the plugin through its processor.
+    /// the plugin through its processor. All of [`Self::advance`]'s steps,
+    /// one after another.
     pub(crate) fn create(&mut self, request: CreateRequest, waited: std::time::Duration) -> Result<Created, String> {
-        // What each step takes is said when all are done: which of the
-        // time is the plugin's own, and which went before it began.
-        let mut steps = crate::making::Steps::begun(waited);
-        let module = module(&mut self.modules, &self.host, &request.path)?;
-        steps.done("its file");
-        let mut instance = Instance::new(module, &self.host, request.class, &request.name)?;
-        instance.offline = request.offline;
-        instance.attach_controller(module, &self.host);
-        steps.done("the instance");
-        instance.restore(request.state.as_deref())?;
-        steps.done("its state");
+        let mut making = Making::new(request, waited);
+        loop {
+            if let Some(created) = self.advance(&mut making)? {
+                return Ok(created);
+            }
+        }
+    }
 
-        let buses = instance.negotiate_buses(request.key_bus);
-        let takes_notes = instance.enable_notes();
-        instance.setup(request.sample_rate, request.max_block)?;
-        steps.done("setting up");
+    /// Takes `making` one step further: its file and the instance, its
+    /// state, setting up, its parameters, activating. The made plugin
+    /// comes with the last step. Between two steps the thread may do
+    /// anything else (a window draws), and `making` waits as it is.
+    pub(crate) fn advance(&mut self, making: &mut Making) -> Result<Option<Created>, String> {
+        making.steps.resume();
+        match making.instance.take() {
+            None => {
+                let module = module(&mut self.modules, &self.host, &making.request.path)?;
+                making.steps.done("its file");
+                let mut instance = Instance::new(module, &self.host, making.request.class, &making.request.name)?;
+                instance.offline = making.request.offline;
+                instance.attach_controller(module, &self.host);
+                making.steps.done("the instance");
+                making.instance = Some(instance);
+                Ok(None)
+            }
+            Some(mut instance) => {
+                let request = &making.request;
+                match making.stage {
+                    Stage::State => {
+                        instance.restore(request.state.as_deref())?;
+                        making.steps.done("its state");
+                        making.stage = Stage::SetUp;
+                    }
+                    Stage::SetUp => {
+                        making.buses = Some(instance.negotiate_buses(request.key_bus));
+                        making.takes_notes = instance.enable_notes();
+                        instance.setup(request.sample_rate, request.max_block)?;
+                        making.steps.done("setting up");
+                        making.stage = Stage::Params;
+                    }
+                    Stage::Params => {
+                        let table = instance
+                            .controller
+                            .as_ref()
+                            .map(|controller| params::read(&controller.edit, &request.name));
+                        let table = table.unwrap_or_default();
+                        let channels = instance.note_channels();
+                        making.silencing = instance
+                            .controller
+                            .as_ref()
+                            .map(|controller| params::silencing_params(&controller.edit, channels));
+                        making.midi = instance
+                            .controller
+                            .as_ref()
+                            .map(|controller| params::midi_params(&controller.edit, channels));
+                        making.channels = channels;
+                        making.table = Some(table);
+                        making.steps.done("its parameters");
+                        making.stage = Stage::Activate;
+                    }
+                    Stage::Activate => return self.activate(making, instance).map(Some),
+                }
+                making.instance = Some(instance);
+                Ok(None)
+            }
+        }
+    }
 
-        let table = instance.controller.as_ref().map(|controller| params::read(&controller.edit, &request.name));
-        let table = table.unwrap_or_default();
+    /// The last step of a making: the plugin activated, and what the host
+    /// keeps of it.
+    fn activate(&mut self, making: &mut Making, mut instance: Instance) -> Result<Created, String> {
+        let request = &making.request;
+        let table = making.table.take().unwrap_or_default();
         let mut listed = table.listed;
-        let channels = instance.note_channels();
-        let silencing =
-            instance.controller.as_ref().map(|controller| params::silencing_params(&controller.edit, channels));
-        let midi = instance.controller.as_ref().map(|controller| params::midi_params(&controller.edit, channels));
-        steps.done("its parameters");
         let latency = instance.activate()?;
         if let Some(controller) = &instance.controller {
             // Only now are the values settled: some plugins fill in their
             // parameters while activating.
             params::read_baseline(&controller.edit, &mut listed);
         }
-        steps.done("activating");
-        steps.say(&request.name);
+        making.steps.done("activating");
+        making.steps.say(&request.name);
 
         let links = Arc::new(ParamLinks::new(table.ids));
         instance.handler.connect(links.clone());
@@ -674,22 +771,39 @@ impl Vst3Thread {
 
         let id = InstanceId(self.next_id);
         self.next_id += 1;
+        let channels = making.channels;
         let created = Created {
             id,
             audio: instance.processor.clone(),
             latency,
             initial_values: params::resolve_values(&listed, &request.values),
             params: listed,
-            buses,
-            takes_notes,
-            silencing: silencing.unwrap_or_default(),
-            midi: midi.unwrap_or_else(|| params::MidiParams::plain(channels)),
+            buses: making.buses.take().unwrap_or_default(),
+            takes_notes: making.takes_notes,
+            silencing: making.silencing.take().unwrap_or_default(),
+            midi: making.midi.take().unwrap_or_else(|| params::MidiParams::plain(channels)),
             links,
             editor: instance.editor_status.clone(),
             offline: request.offline,
         };
         self.instances.insert(id, instance);
         Ok(created)
+    }
+
+    /// Keeps a making between two of its steps.
+    pub(crate) fn park(&mut self, token: u64, making: Making) {
+        self.makings.insert(token, making);
+    }
+
+    /// A making that was kept, or `None` if there is none of that token.
+    pub(crate) fn unpark(&mut self, token: u64) -> Option<Making> {
+        self.makings.remove(&token)
+    }
+
+    /// How many makings are kept between two of their steps.
+    #[cfg(test)]
+    pub(crate) fn makings_kept(&self) -> usize {
+        self.makings.len()
     }
 
     /// Deactivates and destroys an instance. `audio` is the processing
