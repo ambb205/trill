@@ -196,8 +196,13 @@ impl Release {
         let mut kinds = std::collections::HashSet::new();
         for build in &self.builds {
             let of = &build.runs_on;
+            if of.is_empty() {
+                return Err(format!(
+                    "the announcement of {version} has a build that does not say which kind of machine it is for"
+                ));
+            }
             // One build a kind of machine: a program takes the first that is for it.
-            if of.is_empty() || !kinds.insert(of.as_str()) {
+            if !kinds.insert(of.as_str()) {
                 return Err(format!("the announcement of {version} has two builds for one kind of machine ('{of}')"));
             }
             // (A build made for a trial of the updater takes one from this machine itself, too: what
@@ -472,6 +477,11 @@ pub(crate) mod tests {
         twice.builds[2].runs_on = "macos-aarch64".to_owned();
         assert!(twice.check().unwrap_err().contains("two builds for one kind of machine"));
         assert!(announce(&twice, &key).is_err());
+        // Nor is one that does not say what it is for, and it is said as that.
+        let mut unsaid = three.clone();
+        unsaid.builds[1].runs_on = String::new();
+        assert!(unsaid.check().unwrap_err().contains("does not say which kind of machine"));
+        assert!(announce(&unsaid, &key).is_err());
     }
 
     #[test]

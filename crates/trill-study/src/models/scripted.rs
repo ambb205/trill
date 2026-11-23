@@ -56,8 +56,8 @@ impl ScriptedModels {
             return Err("the scripted model was told to fail here".to_owned());
         }
         if self.script.crash_at == Some(stage) {
-            #[cfg(target_os = "macos")]
-            unreported();
+            // No system writes a report of this one (a test makes it on purpose).
+            trill_fetch::end_unreported_on_a_fault();
             std::process::abort();
         }
         if self.script.hog_at == Some(stage) {
@@ -181,23 +181,5 @@ impl Models for ScriptedModels {
             }
         }
         Ok(true)
-    }
-}
-
-/// Has a fatal signal end this process by SIGKILL, of which macOS writes no
-/// crash report: for a process a test takes down on purpose, so that a test
-/// leaves nothing in the user's reports. The fault that follows is real,
-/// and whoever started the process sees it ended by a signal. Nothing that
-/// really crashes comes here.
-#[cfg(target_os = "macos")]
-fn unreported() {
-    extern "C" fn end(_signal: libc::c_int) {
-        // SAFETY: ends this process, which may be called from a handler.
-        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
-    }
-    for signal in [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT, libc::SIGFPE, libc::SIGBUS, libc::SIGSEGV, libc::SIGSYS]
-    {
-        // SAFETY: a handler that only ends the process.
-        unsafe { libc::signal(signal, end as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
 }

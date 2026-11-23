@@ -348,7 +348,9 @@ impl Vitals {
         }
         #[cfg(target_os = "macos")]
         return macos_vitals();
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(target_os = "linux")]
+        return linux::vitals();
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         None
     }
 }
@@ -428,6 +430,10 @@ fn macos_vitals() -> Option<Vitals> {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[path = "ready/linux.rs"]
+mod linux;
+
 /// Watches the program for the sign that loading samples makes: its
 /// memory rises past the most it has held, and goes on rising. Memory
 /// that is taken and given back, as any busy program does, does not
@@ -481,7 +487,7 @@ impl Signs {
 /// Whether something in the program seems to be loading right now: over
 /// the tenth of a second this takes, its memory grew as it does while a
 /// plugin reads its samples. It is the program that is
-/// asked, not one device, and only Windows and macOS can be asked:
+/// asked, not one device, and only Windows, macOS and Linux can be asked:
 /// elsewhere the answer is `false`. A sampler pauses between two drums, so `false` is
 /// not "done": [`LoadWatch`] keeps looking.
 pub fn is_loading() -> bool {
@@ -1860,8 +1866,8 @@ mod tests {
         watch.began(DeviceId(7));
         assert_eq!(watch.loading(), [DeviceId(7)]);
         // While the program grows as it does when samples are read, it
-        // goes on being said. (Only Windows and macOS can be asked.)
-        #[cfg(any(windows, target_os = "macos"))]
+        // goes on being said. (Only Windows, macOS and Linux can be asked.)
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         {
             let mut held = Vec::new();
             let begun = Instant::now();
@@ -1877,7 +1883,7 @@ mod tests {
             assert!(stopped.elapsed() < Duration::from_secs(20), "it never came to an end");
             std::thread::sleep(Duration::from_millis(50));
         }
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         assert!(stopped.elapsed() >= Duration::from_millis(200), "{:?}", stopped.elapsed());
         // One that began and is gone again is not loading.
         watch.began(DeviceId(8));

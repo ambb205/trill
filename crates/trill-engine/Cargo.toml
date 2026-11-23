@@ -61,11 +61,23 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
 ] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# The class macOS keeps for audio (a thread's time-constraint policy), and
-# how much memory the machine has free. In the tree already, through other
-# crates.
+[target.'cfg(unix)'.dependencies]
+# What every Unix says of a thread, of memory and of the machine (on macOS
+# the class it keeps for audio, a thread's time-constraint policy). In the
+# tree already, through other crates.
 libc = "0.2"
+# The machine's free memory, and a fault a test makes on purpose, which
+# `trill-study` asks of it too.
+trill-fetch.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# RealtimeKit, the desktop's service that gives a program's audio threads
+# real-time scheduling where the user may not ask the kernel for it, is
+# asked over the system's D-Bus. In the tree already, through the window's
+# accessibility.
+zbus = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 # The Trash: a recording Trill removes goes there. In the tree already,
 # through the audio and window libraries.
 objc2-foundation = { version = "0.3", default-features = false, features = [

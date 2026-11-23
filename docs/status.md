@@ -196,18 +196,15 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
 What Windows has and Linux has not, yet. Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64; what runs
 there and how it was checked is in [Building and testing](development.md#on-linux).
 
-- The audio threads in the class Linux keeps for audio. They run at an ordinary thread's priority (a built-in song
-  of 14 tracks, 30 seconds handed to the system's output as silence: no buffer late), so a song that keeps up on an
-  idle machine may fall short on a busy one; `keeps_up` says the class was refused.
-- Plugins installed on Linux tried: CLAP and VST3 are looked for in their usual Linux folders, and none has been
-  loaded. Plugin editors: opening one says that they are not supported on this system yet.
+- Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
+  `~/.clap`, `/usr/lib/clap`, `~/.vst3` and `/usr/lib/vst3` are found, scanned, played, rendered and given their
+  presets (tried on Surge XT in both formats).
+- Real-time scheduling where neither the user's limit nor RealtimeKit gives it. The threads then run at an
+  ordinary priority, and a song that falls short says so with what the user can do.
 - Taking an output for Trill alone (exclusive mode). Asked for, it says the device cannot be taken exclusively on
   this system, and the device is shared.
-- The trash. A recording that is removed goes to the `removed` folder beside the takes.
-- How much memory the machine has free for a render or a probe in a process of its own, and what a thread ran. A
-  study asks the machine, and measures and ends its own process.
-- The assistant's processes ending with Trill when Trill itself is killed. They are one group, stopped together
-  when a turn is stopped or Trill closes, as on Windows; a Windows job also ends them when Trill is killed.
+- A recording removed from a disk whose trash the desktop does not show (one kept in memory, such as `/tmp`). It
+  goes to that disk's trash, as the trash's specification has it, where the file manager does not list it.
 - A study. The models' runtime is published for Windows alone so far: a study says that the part `runtime` is not
   published for this system yet.
 - An installer, a release and updates.

@@ -142,7 +142,40 @@ given one as it starts, its period the buffer's length, its computation half of 
 On a MacBook Pro with every core kept busy by other work, the built-in song spread over eight threads from its
 first block had its worst buffer at 32 % of its time without it and 5 % with it (47 % and 7 % at 128 frames),
 and a thread of the team at work 1.5 ms after it was called at the latest without it and 78 µs with it; joining
-the device's audio workgroup as well was not needed for that. A device that fails costs the buffer it failed
+the device's audio workgroup as well was not needed for that. On Linux the class is real-time scheduling (`SCHED_FIFO`, or
+`SCHED_RR` as RealtimeKit gives it). A thread asks the kernel itself where the user may (a real-time limit above
+0, as a system set up for audio gives its `audio` group), and otherwise RealtimeKit, the desktop's service that
+PipeWire asks too, gives it on the program's behalf: an audio thread only leaves its id for a thread of
+Trill's own, started before the stream's first buffer, which asks the service over the system's bus, so that no
+audio thread allocates or waits for it. On a laptop of 32 processors running Ubuntu 26.04, where the user may not
+ask the kernel and RealtimeKit gives priority 20, with every processor kept busy by ordinary busy loops, the
+built-in song spread over eight threads from its first block (`keeps_up -- built-in --always`, 30 seconds) had:
+
+| The device asks for | Without the class | With it |
+|---|---|---|
+| 480 frames (the stand-in) | 401 % at the worst, 370 of 2,950 late, 40.1 ms between two buffers at the longest, a team thread at work 11.9 ms after it was called at the latest | 34 %, none of 3,000 late, 10.0 ms, 101 µs |
+| 128 frames (the stand-in) | 2,426 %, 1,043 of 11,217 late, 64.7 ms, 60.1 ms | 30 %, none of 11,251 late, 2.8 ms, 45 µs |
+| 512 frames (`--device`: the system's output through PipeWire, handed silence) | 636 %, 816 of 2,195 late, 69.1 ms, 58.0 ms | 28 %, none of 2,813 late, 10.7 ms, 130 µs |
+
+The device's own thread is in the class too (priority 20, from 0). Where neither way is open, a song that falls
+short says so in its sentence, with what the user can do (install RealtimeKit, or give the user a real-time
+limit).
+
+The kernel ends a program with SIGKILL, without a word, when a real-time thread of it runs past a limit without
+sleeping (`RLIMIT_RTTIME`; RealtimeKit asks for 200 ms). On this machine a thread given the class and kept busy
+was killed 217 ms after it began. A song that takes more than its buffers' time never lets the device's thread
+sleep, and one block of a plugin that takes long does the same, so Trill keeps the limit's soft half at 100 ms:
+there the kernel says SIGXCPU first, and Trill takes every thread it raised out of real time and says so (the
+threads run at an ordinary priority until the device is opened again). The same thread, measured again, was taken
+out of real time 101 ms into its work, went on for its 400 ms, and the program lived. The busy table above came out
+the same with this in place.
+
+RealtimeKit's bounds are this user's, shared by all of their programs (by default 25 threads at once and 25
+requests in 20 seconds), so it is asked only for a real device's stream or by a program that measures as one
+(`keeps_up`), never by a test or for a stand-in, and the device's and the input's threads are asked for before
+the team's. A song alone gets all it asks for here (eight threads, beside eight that other programs of the user
+held); four `keeps_up` at once, 32 threads, were each given the device's thread first and then what was left, the
+rest running at an ordinary priority, and each said how many of each it had. A device that fails costs the buffer it failed
 in, on whichever thread, and what was played by hand in that buffer is let go of, so that the key it failed on
 is not played to it again with every buffer after.
 
@@ -173,7 +206,7 @@ frames every time, never more than 11.2 ms after it had last asked, and what it 
 
 *The buffers that still come late* are single blocks of one track that take many times what they usually do,
 and there are two kinds of them. `--whose-time` holds the clock's time for a block against the cycles its thread
-ran in it:
+ran in it (on Unix the processor time the system gave the thread):
 
 - *A plugin working.* A synthesizer's longest block took 3.3 to 3.8 ms of its thread's own running, and an
   amplifier's and a drum kit's about 3 ms, at any buffer size. In a buffer of 10 ms that fits. One of 2.7 ms or

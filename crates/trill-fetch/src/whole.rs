@@ -140,6 +140,61 @@ pub fn ended_by_signal(status: &std::process::ExitStatus) -> Option<String> {
     }
 }
 
+/// What the machine says of its memory, in bytes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// The memory it has.
+    pub total: u64,
+    /// What can be had at once: on Linux what the kernel reckons can be had
+    /// without swapping (`MemAvailable`).
+    pub free: u64,
+    /// The room left in its swap.
+    pub swap_free: u64,
+}
+
+/// What the machine says of its memory now. `None` where it is not asked
+/// here (on Windows and macOS each crate asks its own way, for now).
+pub fn memory() -> Option<Memory> {
+    #[cfg(target_os = "linux")]
+    {
+        let said = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let field = |name: &str| -> Option<u64> {
+            let line = said.lines().find(|line| line.starts_with(name))?;
+            let kilobytes: u64 = line[name.len()..].trim().strip_suffix("kB")?.trim().parse().ok()?;
+            Some(kilobytes * 1024)
+        };
+        Some(Memory {
+            total: field("MemTotal:")?,
+            free: field("MemAvailable:")?,
+            swap_free: field("SwapFree:").unwrap_or(0),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// Has a fault end this process by SIGKILL, of which no system writes a
+/// core or a crash report: for a process a test takes down on purpose, so
+/// that a test leaves nothing on the machine. The fault that follows is
+/// real, and whoever started the process sees it ended by a signal.
+/// Nothing that really crashes comes here. Nothing on a system without
+/// signals.
+pub fn end_unreported_on_a_fault() {
+    #[cfg(unix)]
+    {
+        extern "C" fn end(_signal: libc::c_int) {
+            // SAFETY: ends this process, which may be called from a handler.
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        }
+        for signal in
+            [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT, libc::SIGFPE, libc::SIGBUS, libc::SIGSEGV, libc::SIGSYS]
+        {
+            // SAFETY: a handler that only ends the process.
+            unsafe { libc::signal(signal, end as extern "C" fn(libc::c_int) as libc::sighandler_t) };
+        }
+    }
+}
+
 /// The last line a program wrote to its standard error, which is where
 /// they say what went wrong.
 pub fn last_line(stderr: &[u8]) -> String {
@@ -182,16 +237,45 @@ mod tests {
     #[test]
     fn a_program_ended_by_a_signal_says_which_and_one_that_ended_by_itself_says_none() {
         let ended = |script: &str| Command::new("sh").args(["-c", script]).status().unwrap();
-        // A signal it names. (On macOS not an abort, of which the system
-        // keeps a crash report, and a test leaves nothing behind.)
-        let (word, signal, name) = if cfg!(target_os = "macos") {
-            ("TERM", libc::SIGTERM, "SIGTERM")
-        } else {
-            ("ABRT", libc::SIGABRT, "SIGABRT")
-        };
-        assert_eq!(ended_by_signal(&ended(&format!("kill -{word} $$"))), Some(format!("signal {signal}, {name}")));
+        // Signals that end a program without a core: one that makes a core has the system write a crash report
+        // of `sh`, which a test does not leave behind.
+        assert_eq!(ended_by_signal(&ended("kill -TERM $$")), Some(format!("signal {}, SIGTERM", libc::SIGTERM)));
         assert_eq!(ended_by_signal(&ended("kill -USR1 $$")), Some(format!("signal {}", libc::SIGUSR1)));
         assert_eq!(ended_by_signal(&ended("exit 3")), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_machine_says_how_much_memory_it_has_free() {
+        let memory = memory().expect("Linux says");
+        assert!(memory.total >= 1 << 30 && memory.free > 0 && memory.free <= memory.total, "{memory:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fault_made_on_purpose_ends_the_process_by_sigkill() {
+        use std::os::unix::process::ExitStatusExt;
+        // A process of its own: this test program started again for the one test below.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "whole::tests::faults_on_purpose", "--ignored", "--nocapture"])
+            .env("TRILL_FAULT_ON_PURPOSE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+        assert_eq!(ended_by_signal(&status), Some(format!("signal {}, SIGKILL", libc::SIGKILL)));
+    }
+
+    /// Run only by the test above, in a process of its own.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "takes its process down: run by a_fault_made_on_purpose_ends_the_process_by_sigkill"]
+    fn faults_on_purpose() {
+        if std::env::var_os("TRILL_FAULT_ON_PURPOSE").is_some() {
+            end_unreported_on_a_fault();
+            std::process::abort();
+        }
     }
 
     #[cfg(any(windows, unix))]

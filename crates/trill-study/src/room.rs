@@ -54,11 +54,9 @@ pub fn free() -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     return macos_memory().map(|(_, free)| free);
+    // What the system reckons can be had without swapping.
     #[cfg(target_os = "linux")]
-    {
-        // What the system reckons can be had without swapping.
-        linux::kilobytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemAvailable:")
-    }
+    return trill_fetch::memory().map(|memory| memory.free);
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     None
 }

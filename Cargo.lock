@@ -5031,9 +5031,11 @@ dependencies = [
  "thiserror 2.0.21",
  "trill-core",
  "trill-dsp",
+ "trill-fetch",
  "trill-media",
  "windows",
  "windows-core",
+ "zbus",
 ]
 
 [[package]]

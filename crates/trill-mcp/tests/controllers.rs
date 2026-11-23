@@ -535,7 +535,9 @@ async fn a_saxophone_that_waits_for_expression_plays_a_clips_curve() {
     let clip = ok(client, "create_clip", json!({ "track": track, "start": 0, "length": 16, "notes": notes })).await;
     let clip = clip["clip_id"].as_u64().unwrap();
     {
-        let session = fixture.session.lock();
+        let mut session = fixture.session.lock();
+        // The plugin comes after the song has it: what it answers to is asked of it once it is there.
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(60)), "Surge XT arrives");
         let support = session.controller_support(trill_core::TrackId(track));
         eprintln!("\nwhat the plugin says it responds to: {support:?}");
         assert_eq!(support.responds_to(trill_core::ControllerKind::EXPRESSION), Some(true), "{support:?}");
@@ -644,7 +646,9 @@ async fn the_pitch_wheel_in_a_clip_bends_a_clap_synth() {
     let track = ok(client, "create_track", json!({ "name": "Surge", "instrument": SURGE })).await;
     let track = track["track_id"].as_u64().unwrap();
     {
-        let session = fixture.session.lock();
+        let mut session = fixture.session.lock();
+        // The plugin comes after the song has it: what it answers to is asked of it once it is there.
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(60)), "Surge XT arrives");
         let support = session.controller_support(trill_core::TrackId(track));
         eprintln!("\nwhat the plugin says it responds to: {support:?}");
         assert_eq!(support, trill_core::device::ControllerSupport::Any);

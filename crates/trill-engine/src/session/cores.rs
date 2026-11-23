@@ -108,6 +108,10 @@ pub struct Shortfall {
     /// How many threads the song is made on, and how many it may have.
     pub threads: usize,
     pub allowed: usize,
+    /// Why the threads that make sound are not in the class the system
+    /// keeps for audio, and what the user can do about it, where they are
+    /// not ([`crate::host::priority::refused_because`]).
+    pub unprioritized: Option<String>,
 }
 
 impl Shortfall {
@@ -130,6 +134,10 @@ impl Shortfall {
                  not, because its devices go on running.",
                 named.join(", ")
             ));
+        }
+        if let Some(why) = &self.unprioritized {
+            words.push(' ');
+            words.push_str(why);
         }
         words
     }
@@ -372,7 +380,9 @@ impl Verdict {
                 }
                 let (late, buffers) = of_late;
                 let episode = self.episodes;
-                self.short = Some(Shortfall { episode, late, buffers, costliest: costliest(), threads, allowed });
+                let unprioritized = crate::host::priority::refused_because();
+                let costliest = costliest();
+                self.short = Some(Shortfall { episode, late, buffers, costliest, threads, allowed, unprioritized });
             }
             None => {}
         }
@@ -447,6 +457,7 @@ mod tests {
             costliest: vec![("Pad".into(), 0.259), ("Clean Chords".into(), 0.16)],
             threads: 8,
             allowed: 8,
+            unprioritized: None,
         };
         let sentence = short.sentence();
         assert!(
@@ -458,6 +469,10 @@ mod tests {
         // With nothing known of the tracks, nothing is said of them.
         let bare = Shortfall { costliest: Vec::new(), ..short }.sentence();
         assert!(bare.ends_with("An export is not affected."), "{bare}");
+        // Where the audio threads were not given their class, it says why and what to do.
+        let why = "The audio threads run at an ordinary priority.";
+        let unprioritized = Shortfall { unprioritized: Some(why.into()), ..short }.sentence();
+        assert!(unprioritized.ends_with(&format!("muting a track does not, because its devices go on running. {why}")));
         assert_eq!((grouped(7), grouped(1_000), grouped(1_234_567)), ("7".into(), "1,000".into(), "1,234,567".into()));
     }
 }

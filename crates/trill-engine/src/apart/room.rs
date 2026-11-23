@@ -15,8 +15,8 @@ pub struct Room {
 }
 
 impl Room {
-    /// What the machine says now. `None` where it cannot be asked (Windows
-    /// and macOS can), and then no job is refused for want of memory.
+    /// What the machine says now. `None` where it cannot be asked (Windows,
+    /// macOS and Linux can), and then no job is refused for want of memory.
     ///
     /// macOS grows its swap as it needs and compresses what is not used,
     /// so it has no limit on what may be committed short of its disk: what
@@ -36,7 +36,15 @@ impl Room {
             let (total, free) = macos_memory()?;
             Some(Self { free, can_take: free, total })
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
+        // Linux gives a program memory as it touches it, and takes what it
+        // has from others by swapping before it ends one: what it can take
+        // is what is free and the room left in the swap.
+        #[cfg(target_os = "linux")]
+        {
+            let memory = trill_fetch::memory()?;
+            Some(Self { free: memory.free, can_take: memory.free + memory.swap_free, total: memory.total })
+        }
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         None
     }
 }
@@ -83,8 +91,7 @@ fn macos_memory() -> Option<(u64, u64)> {
     Some((total, total.saturating_sub(held * page)))
 }
 
-// Only Windows and macOS can be asked yet.
-#[cfg(all(test, any(windows, target_os = "macos")))]
+#[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 

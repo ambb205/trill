@@ -251,6 +251,9 @@ fn run(options: &Options) -> Result<(), String> {
         plugins: options.plugins.then_some(Scanner::CurrentExecutable),
         storage,
     };
+    // Its threads are given the class as the window's would be: on Linux by
+    // the desktop's service too, which a stand-in device does not ask.
+    trill_engine::host::priority::ask_the_desktop();
     let device: Arc<dyn AudioHost> = match options.device {
         // The system's default output as programs share it, given silence.
         // The profile is this run's own and asks nothing of it.
@@ -537,6 +540,12 @@ fn run(options: &Options) -> Result<(), String> {
         level.map_or("unknown".to_string(), |level| level.to_string()),
         before.map_or("unknown".to_string(), |level| level.to_string())
     );
+    if let Some((given, refused)) = trill_engine::host::priority::threads_given() {
+        println!("threads given the audio class since the stream opened: {given}, refused: {refused}");
+    }
+    if let Some(why) = trill_engine::host::priority::refused_because() {
+        println!("{why}");
+    }
     if let Some(team) = team.filter(|team| team.rounds > 0) {
         println!(
             "the threads beside the callback's: work was handed out {} times and they took it up {} times; {} of those \
