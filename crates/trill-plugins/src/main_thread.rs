@@ -54,7 +54,7 @@ mod os_events;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use os_events::waits;
 #[cfg(target_os = "linux")]
-pub(crate) use os_events::{unwatch, watch};
+pub(crate) use os_events::{Ready, Wanted, Watcher, unwatch, watch};
 
 // A system that is none of the three: the thread only sleeps between jobs.
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]

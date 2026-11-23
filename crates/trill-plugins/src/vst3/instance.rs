@@ -597,6 +597,9 @@ impl ThreadState for Vst3Thread {
     /// reports what plugins left in their flags, and looks after their
     /// editors.
     fn idle(&mut self, nested: bool) {
+        // The timers views hung off the frame's run loop.
+        #[cfg(target_os = "linux")]
+        super::run_loop::tick();
         for instance in self.instances.values_mut() {
             instance.sync_controller();
             instance.report();

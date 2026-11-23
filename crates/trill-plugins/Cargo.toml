@@ -27,6 +27,8 @@ clack-extensions = { version = "0.2.0", features = [
     "state",
     "thread-check",
     "timer",
+    # Linux: a plugin's own connections, heard of by the plugin thread.
+    "posix-fd",
 ] }
 log.workspace = true
 serde.workspace = true

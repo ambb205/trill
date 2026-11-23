@@ -5,8 +5,6 @@
 //! plugin, except that this crate's unit tests never put a window on
 //! screen. What a user would do with the mouse is done to them by
 //! [`simulate`].
-// Some of what is used here only the tests that wait for `IRunLoop` on Linux use.
-#![cfg_attr(not(windows), allow(unused_imports))]
 
 use super::Vst3Factory;
 use super::scripted::{self, Action, ViewSeen, kind};
@@ -337,9 +335,6 @@ fn the_user_resizes_an_editor_only_to_sizes_its_view_accepts() {
     assert_eq!(simulate::client_size(window), natural);
 }
 
-// The scripted view does what its user did on its timer, which a view on Linux has from the host's
-// `IRunLoop`: not given yet (the next stage of editors on Linux).
-#[cfg(not(target_os = "linux"))]
 #[test]
 fn a_view_that_asks_for_another_size_gets_it_and_is_told() {
     needs_windows!();
@@ -390,9 +385,6 @@ fn a_view_that_asks_for_its_size_while_it_is_attached_gets_it() {
     assert_eq!(view(serial).resize_results, [kResultOk]);
 }
 
-// The scripted view does what its user did on its timer, which a view on Linux has from the host's
-// `IRunLoop`: not given yet (the next stage of editors on Linux).
-#[cfg(not(target_os = "linux"))]
 #[test]
 fn a_view_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
     needs_windows!();
@@ -436,9 +428,6 @@ fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
 
 // ---- edits ---------------------------------------------------------------------
 
-// The scripted view does what its user did on its timer, which a view on Linux has from the host's
-// `IRunLoop`: not given yet (the next stage of editors on Linux).
-#[cfg(not(target_os = "linux"))]
 #[test]
 fn an_edit_made_in_the_view_is_heard_and_reported_with_its_gesture() {
     needs_windows!();

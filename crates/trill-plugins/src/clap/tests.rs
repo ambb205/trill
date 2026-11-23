@@ -461,6 +461,34 @@ fn the_plugin_is_called_on_the_threads_it_was_promised() {
     }
 }
 
+/// On Linux a plugin hands the host what it wants to hear of (`posix-fd-support`),
+/// and is told on its main thread when there is something; nothing of it is heard
+/// once the plugin is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_plugin_is_told_on_its_main_thread_of_a_descriptor_it_asked_the_host_to_hear_of() {
+    let factory = ClapFactory::with_entries(&[scripted::entry(kind::EDITOR)]);
+    let mut instance = create(&factory, &device(kind::EDITOR));
+    let serial = value(&mut instance, scripted::SERIAL) as u64;
+    assert_eq!(value(&mut instance, scripted::PIPE_BYTES), 0.0);
+    for _ in 0..3 {
+        assert!(scripted::say_to_pipe(serial), "the plugin registered its pipe when it was made");
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while value(&mut instance, scripted::PIPE_BYTES) < 3.0 {
+        assert!(Instant::now() < deadline, "the plugin was never told of its pipe on its main thread");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(scripted::say_to_pipe(serial));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while value(&mut instance, scripted::PIPE_BYTES) < 4.0 {
+        assert!(Instant::now() < deadline, "a descriptor is heard of again and again");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(instance);
+    assert!(!scripted::say_to_pipe(serial), "the plugin let go of its pipe as it went");
+}
+
 #[test]
 fn the_lifecycle_runs_in_order_through_to_destruction() {
     let factory = factory();

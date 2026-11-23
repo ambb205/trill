@@ -745,6 +745,75 @@ mod view_timer {
     }
 }
 
+/// On Linux a view's timer is one it hangs off the run loop of the frame the
+/// host gave it, as a real view does.
+#[cfg(target_os = "linux")]
+mod view_timer {
+    use super::*;
+    use std::cell::RefCell;
+    use vst3::Steinberg::Linux::{IRunLoop, IRunLoopTrait, ITimerHandler, ITimerHandlerTrait};
+
+    const PERIOD_MS: u64 = 5;
+
+    /// Numbers the timers, as Windows numbers its own.
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+
+    struct Ticker {
+        timer: usize,
+    }
+
+    impl Class for Ticker {
+        type Interfaces = (ITimerHandler,);
+    }
+
+    impl ITimerHandlerTrait for Ticker {
+        unsafe fn onTimer(&self) {
+            let views: Vec<(u64, Arc<ViewState>)> = {
+                let views = VIEWS.lock().unwrap();
+                views.iter().flatten().map(|(serial, view)| (*serial, view.clone())).collect()
+            };
+            for (serial, view) in views {
+                if view.timer.load(Ordering::Relaxed) == self.timer {
+                    view.tick(serial);
+                }
+            }
+        }
+    }
+
+    /// A timer that is registered: its number, the run loop it is on, and
+    /// what that calls.
+    type Registered = (usize, ComPtr<IRunLoop>, ComPtr<ITimerHandler>);
+
+    thread_local! {
+        static TICKERS: RefCell<Vec<Registered>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn start(view: &ViewState) {
+        let frame = view.frame.lock().unwrap().clone();
+        let Some(run_loop) = frame.and_then(|frame| frame.cast::<IRunLoop>()) else { return };
+        let timer = NEXT.fetch_add(1, Ordering::Relaxed);
+        let Some(ticker) = ComWrapper::new(Ticker { timer }).to_com_ptr::<ITimerHandler>() else { return };
+        // SAFETY: the run loop is the host's, live; the ticker is held here
+        // for as long as it is registered.
+        if unsafe { run_loop.registerTimer(ticker.as_ptr(), PERIOD_MS) } == kResultOk {
+            view.timer.store(timer, Ordering::Relaxed);
+            TICKERS.with_borrow_mut(|tickers| tickers.push((timer, run_loop, ticker)));
+        }
+    }
+
+    pub(super) fn stop(view: &ViewState) {
+        let timer = view.timer.swap(0, Ordering::Relaxed);
+        let found = TICKERS.with_borrow_mut(|tickers| {
+            let at = tickers.iter().position(|(held, ..)| *held == timer)?;
+            Some(tickers.remove(at))
+        });
+        if let Some((_, run_loop, ticker)) = found {
+            // SAFETY: as in `start`.
+            unsafe { run_loop.unregisterTimer(ticker.as_ptr()) };
+        }
+    }
+}
+
 /// On macOS a timer of the thread's run loop, as a real view there has
 /// (JUCE's views do).
 #[cfg(target_os = "macos")]
@@ -798,7 +867,7 @@ mod view_timer {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod view_timer {
     pub(super) fn start(_view: &super::ViewState) {}
 

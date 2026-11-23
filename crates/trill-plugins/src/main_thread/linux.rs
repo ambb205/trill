@@ -7,13 +7,14 @@
 //! own (served by the plugin's own thread, or by its idle and timers that
 //! this thread runs), and the window Trill puts it in has a connection of
 //! Trill's (`editor/x11.rs`), whose events the editor drains when the thread
-//! idles. So the thread waits on what wakes it (an eventfd) and on those
-//! connections. A connection that has something is read at once, by what
-//! was handed in with it ([`watch`]), whether a window is open or not: a
-//! server says things by itself (a keyboard's mapping changed), and what is
-//! not read leaves the connection ready, and the thread turning, for good.
-//! Where what was read is news for a window, an idle is asked for at once
-//! instead of at the next interval.
+//! idles. So the thread waits on what wakes it (an eventfd), on those
+//! connections, and on whatever a plugin asked the host to hear of for it
+//! (a VST3 view's run loop, CLAP's `posix-fd-support`). A descriptor that is
+//! ready is handed at once to what was handed in with it ([`watch`]),
+//! whether a window is open or not: a server says things by itself (a
+//! keyboard's mapping changed), and what is not read leaves the connection
+//! ready, and the thread turning, for good. Where what was read is news,
+//! an idle is asked for at once instead of at the next interval.
 
 use std::cell::{Cell, RefCell};
 use std::io;
@@ -24,9 +25,68 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
-/// What reads a watched connection when it is ready: whether what it read
-/// is news for a window.
-pub(crate) type Reader = Rc<dyn Fn() -> bool>;
+/// What is told of a watched descriptor when it is ready, and what for:
+/// whether that is news, for a window or a plugin, to be served by an idle
+/// at once.
+pub(crate) type Reader = Rc<dyn Fn(Ready) -> bool>;
+
+/// Who watches a descriptor. Two may watch the same one: two instances of a
+/// plugin may share the library's one connection.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Watcher {
+    /// The X connection of Trill's editor windows.
+    Editors,
+    /// The VST3 views' run loop.
+    Views,
+    /// A CLAP plugin, by a number its host gave it.
+    Plugin(u64),
+}
+
+/// What a descriptor is watched for.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Wanted {
+    pub(crate) read: bool,
+    pub(crate) write: bool,
+}
+
+impl Wanted {
+    pub(crate) const READ: Self = Self { read: true, write: false };
+
+    fn events(self) -> i16 {
+        (if self.read { libc::POLLIN } else { 0 }) | (if self.write { libc::POLLOUT } else { 0 })
+    }
+}
+
+/// What a watched descriptor was found ready for.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ready(i16);
+
+impl Ready {
+    pub(crate) fn readable(self) -> bool {
+        self.0 & libc::POLLIN != 0
+    }
+
+    pub(crate) fn writable(self) -> bool {
+        self.0 & libc::POLLOUT != 0
+    }
+
+    /// An error, the other end gone, or a descriptor that is no longer open.
+    pub(crate) fn failed(self) -> bool {
+        self.0 & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+    }
+
+    /// The descriptor was closed without a word: it is not watched any more.
+    fn closed(self) -> bool {
+        self.0 & libc::POLLNVAL != 0
+    }
+}
+
+struct Watch {
+    watcher: Watcher,
+    fd: RawFd,
+    wanted: Wanted,
+    read: Reader,
+}
 
 /// How many times a plugin thread has waited, in all: for tests that hold
 /// that it sleeps.
@@ -41,23 +101,24 @@ pub(crate) fn waits() -> u64 {
 thread_local! {
     /// The connections this thread waits on besides its own wake-ups, each
     /// with what reads it.
-    static WATCHED: RefCell<Vec<(RawFd, Reader)>> = const { RefCell::new(Vec::new()) };
+    static WATCHED: RefCell<Vec<Watch>> = const { RefCell::new(Vec::new()) };
     /// The eventfd that wakes this thread, where it is a plugin thread.
     static WAKES: Cell<RawFd> = const { Cell::new(-1) };
 }
 
-/// Has the plugin thread (the calling one) wake when `fd` has something to
-/// read, and `read` read it, until [`unwatch`].
-pub(crate) fn watch(fd: RawFd, read: Reader) {
+/// Has the plugin thread (the calling one) wake when `fd` is ready for what
+/// is `wanted` (or has failed), and tell `read`, until [`unwatch`]. Watching
+/// it again for the same watcher takes the place of what was there.
+pub(crate) fn watch(watcher: Watcher, fd: RawFd, wanted: Wanted, read: Reader) {
     WATCHED.with_borrow_mut(|watched| {
-        watched.retain(|(watching, _)| *watching != fd);
-        watched.push((fd, read));
+        watched.retain(|watch| (watch.watcher, watch.fd) != (watcher, fd));
+        watched.push(Watch { watcher, fd, wanted, read });
     });
 }
 
-/// Stops waking for `fd`.
-pub(crate) fn unwatch(fd: RawFd) {
-    WATCHED.with_borrow_mut(|watched| watched.retain(|(watching, _)| *watching != fd));
+/// Stops waking for `fd` on behalf of `watcher`.
+pub(crate) fn unwatch(watcher: Watcher, fd: RawFd) {
+    WATCHED.with_borrow_mut(|watched| watched.retain(|watch| (watch.watcher, watch.fd) != (watcher, fd)));
 }
 
 pub(super) struct Pump {
@@ -88,9 +149,13 @@ impl Pump {
     pub(super) fn wait(&self, idle_in: Option<Duration>) {
         WAITS.fetch_add(1, Ordering::Relaxed);
         let mut fds = vec![libc::pollfd { fd: self.wakes.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-        let readers: Vec<Reader> = WATCHED.with_borrow(|watched| {
-            fds.extend(watched.iter().map(|(fd, _)| libc::pollfd { fd: *fd, events: libc::POLLIN, revents: 0 }));
-            watched.iter().map(|(_, read)| read.clone()).collect()
+        let readers: Vec<(Watcher, Reader)> = WATCHED.with_borrow(|watched| {
+            fds.extend(watched.iter().map(|watch| libc::pollfd {
+                fd: watch.fd,
+                events: watch.wanted.events(),
+                revents: 0,
+            }));
+            watched.iter().map(|watch| (watch.watcher, watch.read.clone())).collect()
         });
         // Rounded up: a wait that ends a little before the idle is due
         // would only come round again at once.
@@ -103,12 +168,17 @@ impl Pump {
         if fds[0].revents != 0 {
             drain(fds[0].fd);
         }
-        // Each ready connection is read now, by its reader (which may let go
-        // of it), and news for a window has the idle run at once.
+        // Each ready descriptor is told of now, to its reader (which may let
+        // go of it), and news has the idle run at once. One that was closed
+        // without a word would read ready for good: it is let go of.
         let mut news = false;
-        for (fd, read) in fds[1..].iter().zip(readers) {
-            if fd.revents != 0 {
-                news |= read();
+        for (polled, (watcher, read)) in fds[1..].iter().zip(readers) {
+            if polled.revents != 0 {
+                let ready = Ready(polled.revents);
+                news |= read(ready);
+                if ready.closed() {
+                    unwatch(watcher, polled.fd);
+                }
             }
         }
         if news {

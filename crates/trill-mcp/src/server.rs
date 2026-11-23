@@ -2302,9 +2302,11 @@ impl TrillServer {
                 Err(error) => return Err(explain(session.project(), error)),
             };
             if !session.device_has_editor(id) {
-                return Err(format!(
-                    "{name} has no window of its own. Read and set its parameters with get_device and update_device."
-                ));
+                let why = match trill_plugins::editors_cannot_be_shown() {
+                    Some(reason) => format!("No plugin's window can be shown in this run: {reason}."),
+                    None => format!("{name} has no window of its own."),
+                };
+                return Err(format!("{why} Read and set its parameters with get_device and update_device."));
             }
             if request.open.unwrap_or(true) {
                 let options = EditorOptions { title: name.clone(), ..EditorOptions::default() };

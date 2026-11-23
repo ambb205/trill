@@ -94,6 +94,13 @@ pub use scan::{Known, PluginRecord, ScanFailure, ScanMode, Scanner};
 pub use vendor::{VendorPlaces, describe_state, split_state};
 pub use vst3::{VST3_SCHEME, Vst3Config, Vst3Factory};
 
+/// Why no plugin's own window can be shown in this run of the program, where
+/// that is so (on Linux, no X server could be reached): a sentence to say
+/// once. No device then says it has one, so that none is offered.
+pub fn editors_cannot_be_shown() -> Option<&'static str> {
+    editor::cannot_show()
+}
+
 /// Keeps the windows of plugin editors this process opens from here on out
 /// of sight: for a program that takes pictures of them. On macOS they are
 /// never put on screen nor given the keyboard, and the program is never

@@ -195,6 +195,9 @@ impl Instance {
         self.placement = Some(hosted.close(&mut closing));
         // The view is released before the frame it was given.
         drop((scale, view));
+        // What it left registered on the frame's run loop goes with it.
+        #[cfg(target_os = "linux")]
+        super::run_loop::let_go_of(frame.instance());
         drop(frame);
     }
 
