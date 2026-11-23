@@ -73,3 +73,9 @@ clack-plugin = "0.2.0"
 clack-extensions = { version = "0.2.0", features = ["clack-plugin"] }
 # The `editor` example saves pictures of the editors it opens.
 png = "0.18"
+
+# Owns its first thread, which on macOS it lends to the plugins: libtest's
+# harness would run its tests on threads of its own.
+[[test]]
+name = "first_thread"
+harness = false

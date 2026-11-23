@@ -46,9 +46,20 @@ use std::time::{Duration, Instant};
 #[path = "main_thread/windows.rs"]
 mod os_events;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 #[path = "main_thread/portable.rs"]
 mod os_events;
+
+#[cfg(target_os = "macos")]
+#[path = "main_thread/macos.rs"]
+mod os_events;
+
+#[cfg(target_os = "macos")]
+#[path = "main_thread/cf.rs"]
+mod cf;
+
+#[cfg(target_os = "macos")]
+pub(crate) use os_events::{first_is_lent, lend, serve_here};
 
 /// How often an idling thread services plugin callbacks.
 const IDLE_INTERVAL: Duration = Duration::from_millis(15);
@@ -226,15 +237,18 @@ impl<S> Drop for Inner<S> {
         if self.sender.send(Message::Shutdown).is_ok() {
             self.waker.wake();
         }
-        let Some(thread) = self.thread.take() else { return };
         if thread::current().id() == self.thread_id {
             return;
         }
         // Wait for the libraries to unload: a process that exits while a
         // plugin is half-way through its teardown can crash in the plugin's
         // static destructors. But a plugin that hangs must not hang the DAW.
+        // (A home on a lent first thread has no thread to join: the thread
+        // goes on.)
         if self.exit.wait(SHUTDOWN_TIMEOUT) {
-            let _ = thread.join();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
         } else {
             log::warn!("the plugin main thread did not shut down in time; leaving it behind");
         }
@@ -257,11 +271,37 @@ impl<S: ThreadState> MainThread<S> {
     /// Starts a thread. The process's plugins all share the one that
     /// [`SharedMainThread`] hands out; a thread beside it is for tests of
     /// what a thread does.
+    #[cfg(test)]
     pub(crate) fn spawn(name: &str) -> std::io::Result<Self> {
+        Self::start(name, false)
+    }
+
+    /// Starts the thread, as the process's plugin thread where `first`:
+    /// on macOS that is the process's first thread, where the program lent
+    /// it ([`lend`]); elsewhere, and where none was lent, a thread of its
+    /// own either way.
+    fn start(name: &str, first: bool) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel();
-        let (ready, started) = mpsc::sync_channel(1);
         let exit = Arc::new(Exit::default());
         let signal = SignalOnDrop(exit.clone());
+        #[cfg(target_os = "macos")]
+        let (waker, thread_id, thread) = os_events::start::<S>(name, receiver, signal, first)?;
+        #[cfg(not(target_os = "macos"))]
+        let (waker, thread_id, thread) = Self::spawn_own(name, receiver, signal, first)?;
+        let backlog = Arc::new(Backlog::default());
+        let inner = Inner { backlog, sender, waker, thread_id, thread, exit };
+        Ok(Self { inner: Arc::new(inner) })
+    }
+
+    /// A thread of its own, which runs [`run`] with the system's pump.
+    #[cfg(not(target_os = "macos"))]
+    fn spawn_own(
+        name: &str,
+        receiver: Receiver<Message<S>>,
+        signal: SignalOnDrop,
+        _first: bool,
+    ) -> std::io::Result<(os_events::Waker, ThreadId, Option<JoinHandle<()>>)> {
+        let (ready, started) = mpsc::sync_channel(1);
         let thread = thread::Builder::new().name(name.to_string()).stack_size(STACK_SIZE).spawn(move || {
             // Declared first so that it drops last, after the state.
             let _exit = signal;
@@ -278,9 +318,7 @@ impl<S: ThreadState> MainThread<S> {
         let waker = started
             .recv()
             .map_err(|_| std::io::Error::other("the plugin main thread ended while it was starting"))??;
-        let backlog = Arc::new(Backlog::default());
-        let inner = Inner { backlog, sender, waker, thread_id: thread.thread().id(), thread: Some(thread), exit };
-        Ok(Self { inner: Arc::new(inner) })
+        Ok((waker, thread.thread().id(), Some(thread)))
     }
 
     /// Whether the thread is behind: it has had work to do for a while
@@ -427,7 +465,7 @@ impl<S: ThreadState> SharedMainThread<S> {
                 log::warn!("the previous plugin main thread is still shutting down; starting another");
             }
         }
-        let thread = MainThread::spawn(name)?;
+        let thread = MainThread::start(name, true)?;
         *latest = Some(Started { thread: Arc::downgrade(&thread.inner), exit: thread.inner.exit.clone() });
         Ok(thread)
     }
@@ -448,14 +486,33 @@ struct Home<S> {
 }
 
 impl<S: ThreadState> Home<S> {
+    fn new(receiver: Receiver<Message<S>>) -> Self {
+        Self {
+            state: RefCell::new(S::new()),
+            receiver,
+            held: Cell::new(None),
+            shutdown: Cell::new(false),
+            last_idle: Cell::new(Instant::now()),
+        }
+    }
+
     /// Runs the jobs that are waiting, then [`ThreadState::idle`] if it is
     /// due. `nested` is whether this is a call from inside an event loop
     /// the thread did not start.
     fn service(&self, nested: bool) {
+        self.service_some(nested, usize::MAX);
+    }
+
+    /// [`Self::service`], running at most `most` jobs. Returns how many it
+    /// ran.
+    fn service_some(&self, nested: bool, most: usize) -> usize {
+        let mut ran = 0;
         // In use further up this thread's stack. Whoever has it finishes
         // first, and the thread's loop comes back here afterwards.
-        let Ok(mut state) = self.state.try_borrow_mut() else { return };
-        while let Some(message) = self.next_message() {
+        let Ok(mut state) = self.state.try_borrow_mut() else { return ran };
+        while ran < most
+            && let Some(message) = self.next_message()
+        {
             match message {
                 Message::Run { at_rest: true, .. } | Message::Shutdown if nested => {
                     self.held.set(Some(message));
@@ -467,11 +524,12 @@ impl<S: ThreadState> Home<S> {
                     if catch_unwind(AssertUnwindSafe(|| job(&mut state))).is_err() {
                         log::error!("a job on the plugin main thread panicked");
                     }
+                    ran += 1;
                     self.idle(&mut state, nested);
                 }
                 Message::Shutdown => {
                     self.shutdown.set(true);
-                    return;
+                    return ran;
                 }
             }
         }
@@ -479,6 +537,7 @@ impl<S: ThreadState> Home<S> {
         if IDLE_REQUESTED.take() || (due && state.wants_idle()) {
             self.idle(&mut state, nested);
         }
+        ran
     }
 
     fn next_message(&self) -> Option<Message<S>> {
@@ -513,14 +572,9 @@ impl<S: ThreadState> Home<S> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn run<S: ThreadState>(receiver: Receiver<Message<S>>, pump: &os_events::Pump) {
-    let home = Home {
-        state: RefCell::new(S::new()),
-        receiver,
-        held: Cell::new(None),
-        shutdown: Cell::new(false),
-        last_idle: Cell::new(Instant::now()),
-    };
+    let home = Home::new(receiver);
     let _registered = Registered::new(&home);
     let mut left = Instant::now();
     loop {
@@ -563,7 +617,23 @@ struct Registration {
 struct Registered<'a>(PhantomData<&'a ()>);
 
 impl<'a> Registered<'a> {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn new<S: ThreadState>(home: &'a Home<S>) -> Self {
+        home.register();
+        Self(PhantomData)
+    }
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        unregister();
+    }
+}
+
+impl<S: ThreadState> Home<S> {
+    /// Makes this the home of the calling thread. It has to stay where it
+    /// is, and alive, until [`unregister`] is called on the same thread.
+    fn register(&self) {
         /// # Safety
         ///
         /// `home` must point to a live `Home<S>` of the calling thread.
@@ -572,18 +642,16 @@ impl<'a> Registered<'a> {
             unsafe { &*home.cast::<Home<S>>() }.service(true);
         }
         HOME.set(Some(Registration {
-            home: std::ptr::from_ref(home).cast(),
+            home: std::ptr::from_ref(self).cast(),
             state: TypeId::of::<S>(),
             service_nested: service_nested::<S>,
         }));
-        Self(PhantomData)
     }
 }
 
-impl Drop for Registered<'_> {
-    fn drop(&mut self) {
-        HOME.set(None);
-    }
+/// The calling thread has no home from here on.
+fn unregister() {
+    HOME.set(None);
 }
 
 /// Serves the calling thread's queue from inside an event loop that is not

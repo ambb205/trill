@@ -173,6 +173,10 @@ pub fn scanner_main() -> ExitCode {
 /// executable, told apart by the [`SCANNER_ENV`] variable its parent sets.
 pub fn run_as_scanner_if_requested() {
     if std::env::var_os(SCANNER_ENV).is_some() {
+        // A scan loads the plugin, asks it and lets it go on the thread
+        // that calls: here the first, as macOS's plugins want, with no loop
+        // run, so that nothing a plugin posts to it runs after the plugin
+        // has gone.
         std::process::exit(i32::from(run_scanner()));
     }
 }

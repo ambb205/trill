@@ -5,6 +5,16 @@
 MCP like any other device's. A plugin's own editor opens in a window (Windows only so far), from the Editor button
 on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
 
+**Which thread drives a plugin**: a plugin is made, asked and let go of from one thread of the program's. On
+Windows that is a thread of its own. On macOS plugins take the program's first thread for theirs and post work of
+their own to it, and some make no sound until that work has run, so there the first thread drives them: the
+program without a window and every process that renders, measures or probes lend it to the plugins and do their
+own work beside it. Measured on this: an amplifier (Archetype Tim Henson X) was silent when `trill-mcp` played it
+live, and Superior Drummer 3 and Hammond B-3X never answered their notes in a render, which was then refused; driven
+from the first thread, each sounds. A song's other plugins render to the same samples as before.
+`cargo run -p trill-plugins --example plugin_threads -- "vst3:Serum 2"` says, for an installed plugin, which thread
+its own work runs on and whether it sounds.
+
 A plugin's presets are listed, searched and loaded like a built-in device's. They are found the way each format
 provides: a CLAP plugin's through its preset-discovery providers, a VST3 plugin's as the `.vstpreset` files in the
 standard preset folders and the programs of its program lists. A big synth has thousands, so they are read in the

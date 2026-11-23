@@ -623,11 +623,17 @@ fn main() -> ExitCode {
     trill_plugins::scan::run_as_scanner_if_requested();
     trill_runtime::jobs::run_as_job_if_requested();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    match parse(&arguments).and_then(|options| run(&options)) {
-        Ok(()) => ExitCode::SUCCESS,
+    let work = move || match parse(&arguments).and_then(|options| run(&options)) {
+        Ok(()) => 0,
         Err(problem) => {
             eprintln!("{problem}");
-            ExitCode::FAILURE
+            1
         }
-    }
+    };
+    // Plugins driven as the program without a window drives them: on macOS
+    // from the first thread, with this beside it.
+    #[cfg(target_os = "macos")]
+    trill_plugins::first_thread::lend(work);
+    #[cfg(not(target_os = "macos"))]
+    ExitCode::from(work() as u8)
 }

@@ -65,6 +65,7 @@ pub mod clap;
 mod editor;
 mod edits;
 mod exclusive;
+pub mod first_thread;
 #[cfg(test)]
 mod key_tests;
 mod main_thread;

@@ -23,6 +23,13 @@ pub(super) fn watch() {
 pub(super) fn end_now(code: u32) -> ! {
     #[cfg(windows)]
     windows::end_now(code);
+    // Nothing that is run at exit: a plugin's library that is still loaded
+    // would take itself down on a thread it does not expect.
+    #[cfg(target_os = "macos")]
+    // SAFETY: ends the process.
+    unsafe {
+        libc::_exit(code as i32)
+    };
     #[allow(unreachable_code)]
     std::process::exit(code as i32)
 }
