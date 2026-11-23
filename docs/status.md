@@ -181,9 +181,8 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
   stage, and the song is as it was.
 - How much room a disk has. Nothing is refused for want of it.
 - A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
-- Where files dragged in from the Finder will land, shown while they are dragged. The window is not told where
-  the pointer is during such a drag; it places what was dropped when the pointer next moves (not yet tried with a
-  real mouse).
+- Files dragged in from the Finder, tried with a real mouse. Where they will land is shown while they are dragged,
+  from where the system says the pointer is, as on Windows.
 - A name written in two Unicode forms (an accented letter as one character, or as a letter and its accent) taken
   for one name, as macOS's disks take it. Two spellings that differ in case are one, as there.
 - An installer, a release and updates. A build of one's own neither looks for a newer Trill nor is replaced.

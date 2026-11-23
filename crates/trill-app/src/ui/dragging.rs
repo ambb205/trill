@@ -158,7 +158,13 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
             }
         }
         DragSource::System => {
-            let Some(pending) = &mut cx.state.system_drop else { return };
+            let Some(pending) = &mut cx.state.system_drop else {
+                // macOS says nothing while files hover over the window: each
+                // frame asks for the next, which looks where the pointer is.
+                #[cfg(target_os = "macos")]
+                ctx.request_repaint();
+                return;
+            };
             if drag.pointer.is_none() && pending.waited < SYSTEM_DROP_WAIT {
                 pending.waited += 1;
                 ctx.request_repaint();
@@ -300,7 +306,83 @@ fn system_pointer(ctx: &egui::Context) -> Option<Pos2> {
     Rect::from_min_size(Pos2::ZERO, inner.size()).contains(position).then_some(position)
 }
 
-#[cfg(not(windows))]
+/// The same on macOS, which tells a window that files came over it and
+/// were dropped, and nothing between: the pointer is asked of CoreGraphics
+/// (where it is, in points from the top left of the main display), which
+/// takes no permission. Looking is not watching: no event is listened to.
+#[cfg(target_os = "macos")]
+fn system_pointer(ctx: &egui::Context) -> Option<Pos2> {
+    let (inner, native) = ctx.input(|input| (input.viewport().inner_rect, input.viewport().native_pixels_per_point));
+    in_window(screen_pointer()?, inner?, native?, ctx.pixels_per_point())
+}
+
+/// Where the pointer is, in points from the top left of the main display.
+#[cfg(target_os = "macos")]
+fn screen_pointer() -> Option<Pos2> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *const c_void) -> *mut c_void;
+        fn CGEventGetLocation(event: *mut c_void) -> Point;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const c_void);
+    }
+    // SAFETY: an event made from no source only says where the pointer is;
+    // it is let go of once it has.
+    let point = unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        point
+    };
+    Some(Pos2::new(point.x as f32, point.y as f32))
+}
+
+/// Where a point the system says in its points is in the window's content
+/// area of `inner`, which is in the window's points: the system's points are
+/// `native` pixels each and the window's `scale`, which differ where the
+/// window is zoomed. `None` outside it.
+#[cfg(target_os = "macos")]
+fn in_window(system: Pos2, inner: Rect, native: f32, scale: f32) -> Option<Pos2> {
+    let position = Pos2::new(system.x * native / scale, system.y * native / scale) - inner.min.to_vec2();
+    Rect::from_min_size(Pos2::ZERO, inner.size()).contains(position).then_some(position)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn system_pointer(_ctx: &egui::Context) -> Option<Pos2> {
     None
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pointer_the_system_says_is_found_in_the_window_at_any_zoom() {
+        let inner = Rect::from_min_size(Pos2::new(100.0, 50.0), egui::vec2(800.0, 600.0));
+        // A window that is not zoomed: its points are the system's.
+        assert_eq!(in_window(Pos2::new(150.0, 60.0), inner, 2.0, 2.0), Some(Pos2::new(50.0, 10.0)));
+        assert_eq!(in_window(Pos2::new(99.0, 60.0), inner, 2.0, 2.0), None, "left of it");
+        assert_eq!(in_window(Pos2::new(150.0, 700.0), inner, 2.0, 2.0), None, "under it");
+        // Zoomed in by a quarter, the window's points are larger: where it
+        // is is said in them too.
+        let zoomed = Rect::from_min_size(Pos2::new(80.0, 40.0), egui::vec2(640.0, 480.0));
+        assert_eq!(in_window(Pos2::new(150.0, 60.0), zoomed, 2.0, 2.5), Some(Pos2::new(40.0, 8.0)));
+    }
+
+    #[test]
+    fn the_system_says_where_the_pointer_is_without_being_asked_for_leave() {
+        let pointer = screen_pointer().expect("CoreGraphics says where the pointer is");
+        assert!(pointer.x.is_finite() && pointer.y.is_finite(), "{pointer:?}");
+    }
 }
