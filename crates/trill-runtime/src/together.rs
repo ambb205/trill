@@ -367,6 +367,9 @@ struct Driver {
     joining: Vec<Joining>,
     /// The connections that were lost and are asked for again.
     again: Vec<Again>,
+    /// The people whose connection was lost on the way and is theirs to
+    /// ask for again: said to be away, and back when they are.
+    were_away: HashSet<u64>,
     /// The meeting point the song is shared through, and how the meeting
     /// stands there.
     through: Option<(MeetingPoint, Meeting)>,
@@ -516,6 +519,27 @@ impl Driver {
                     return;
                 }
                 let person = Presence::of(person).bounded().person;
+                // The same program on another connection: it lost the one
+                // it had (its line went down, and it saw that), and here
+                // that one was not seen to end yet. The older one is let go
+                // of without a word: its person is here.
+                let older: Vec<LinkId> = (self.peers.iter())
+                    .filter(|(other, peer)| {
+                        **other != link && peer.person.as_ref().is_some_and(|known| known.id == person.id)
+                    })
+                    .map(|(other, _)| *other)
+                    .collect();
+                for old in &older {
+                    self.files.lost(*old);
+                    self.peers.remove(old);
+                    for (_, via, _) in &mut self.people {
+                        if *via == *old {
+                            *via = link;
+                        }
+                    }
+                    self.net.close(*old, "the same program connected again");
+                }
+                let came_back = self.were_away.remove(&person.id);
                 let mut session = self.session.lock();
                 let same = song.is_some() && song == session.shared_song();
                 let reply = if same {
@@ -548,6 +572,9 @@ impl Driver {
                     }
                     (true, true) => self.say(format!("You are in the song with {name}.")),
                     (true, false) => {}
+                    // (Never said to be away: nothing to say of their return.)
+                    (false, _) if !older.is_empty() => {}
+                    (false, _) if came_back => self.say(format!("{name} is back.")),
                     (false, _) => self.say(format!("{name} is here.")),
                 }
                 if let Some(reply) = reply {
@@ -656,7 +683,8 @@ impl Driver {
                     self.shared.lock().status.revision += 1;
                 }
             }
-            Message::Bye { .. } => {}
+            // (Neither is handed on by the connection: said by it, to it.)
+            Message::Bye { .. } | Message::Still => {}
             // The song's files. Nothing of them is said between programs
             // that do not hold the same song yet: whatever is asked for
             // then is not here.
@@ -698,14 +726,25 @@ impl Driver {
         // (What has passed here since the meeting point said.)
         let left = left.saturating_sub(self.files.passed().saturating_sub(passed_then));
         let wait = left < LEFT_FOR_THE_SONG && Instant::now() < over;
+        let through: Vec<LinkId> = self.peers.iter().filter(|(_, peer)| peer.through).map(|(link, _)| *link).collect();
+        // No more is handed over than leaves that: the thread that hands
+        // out stops there by itself, however much was asked for at once
+        // and however fast it goes between two looks of this one.
+        let more = (Instant::now() < over).then(|| left.saturating_sub(LEFT_FOR_THE_SONG));
+        for link in &through {
+            self.files.may_hand(*link, more);
+        }
         if wait == self.files_wait.is_some() {
             return;
         }
         let at = point.shown();
-        let through: Vec<LinkId> = self.peers.iter().filter(|(_, peer)| peer.through).map(|(link, _)| *link).collect();
         let seconds = over.saturating_duration_since(Instant::now()).as_secs().max(1);
         for link in through {
-            self.files.close_way(link, if wait { seconds } else { 0 });
+            // Whoever asked for files over it is told, at once: nothing
+            // that was asked for before is handed over either.
+            if self.files.close_way(link, if wait { seconds } else { 0 }) && wait {
+                self.net.say(link, &Message::Later { seconds });
+            }
         }
         match wait {
             true => {
@@ -737,7 +776,9 @@ impl Driver {
             let through: Vec<LinkId> =
                 self.peers.iter().filter(|(_, peer)| peer.through).map(|(link, _)| *link).collect();
             for link in through {
-                self.files.close_way(link, seconds);
+                if self.files.close_way(link, seconds) {
+                    self.net.say(link, &Message::Later { seconds });
+                }
             }
         }
         let revision = self.session.lock().revision();
@@ -877,11 +918,14 @@ impl Driver {
                             LEFT => self.say(format!("{} left.", person.name)),
                             CLOSED => self.say(format!("{} closed their Trill.", person.name)),
                             // Lost on the way, and theirs to ask for again.
-                            why if !told => self.say(format!(
-                                "{} is away: the connection was lost ({why}). Their program asks for it again by \
-                                 itself.",
-                                person.name
-                            )),
+                            why if !told => {
+                                self.were_away.insert(person.id);
+                                self.say(format!(
+                                    "{} is away: the connection was lost ({why}). Their program asks for it again \
+                                     by itself.",
+                                    person.name
+                                ));
+                            }
                             why => self.say(format!("{} is no longer here: {why}.", person.name)),
                         },
                         // A connection this program asked for, gone
@@ -1192,6 +1236,7 @@ impl Sharing {
                     epoch: None,
                     joining: Vec::new(),
                     again: Vec::new(),
+                    were_away: HashSet::new(),
                     through: None,
                     presence_seq: 0,
                     presence_said: None,

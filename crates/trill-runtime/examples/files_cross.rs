@@ -32,7 +32,8 @@ use trill_core::project::AudioContent;
 use trill_engine::AudioBackend;
 use trill_engine::hand::by_hand;
 use trill_runtime::{Meeting, Reach, Runtime, RuntimeOptions, Storage};
-use trill_together::meet;
+use trill_together::line::{Line, Pace};
+use trill_together::{Invitation, meet};
 
 fn start(folder: &Path, name: &str) -> Runtime {
     let storage = Storage::At { settings: folder.join(name).join("settings.json"), library_index: None };
@@ -46,7 +47,7 @@ fn start(folder: &Path, name: &str) -> Runtime {
 fn until(what: &str, mut done: impl FnMut() -> bool) -> Duration {
     let began = Instant::now();
     while !done() {
-        assert!(began.elapsed() < Duration::from_secs(600), "timed out waiting until {what}");
+        assert!(began.elapsed() < Duration::from_secs(3600), "timed out waiting until {what}");
         std::thread::sleep(Duration::from_micros(200));
     }
     began.elapsed()
@@ -87,20 +88,21 @@ fn held_mb() -> Option<f64> {
     }
 }
 
-/// Writes a recording of about `megabytes` at `path`: a tone with noise
-/// on it, so that no stretch of it is like another.
-fn recording(path: &Path, megabytes: u64) {
+/// Writes a recording of about `bytes` at `path`: a tone with noise on it,
+/// so that no stretch of it is like another, and none like one of another
+/// `number`.
+fn recording(path: &Path, bytes: u64, number: u64) {
     let rate = 48_000.0;
     // Stereo, 16 bits: four bytes a frame.
-    let frames = (megabytes << 20) / 4;
-    let mut lot = 0x2545_F491_4F6C_DD1Du64;
+    let frames = bytes / 4;
+    let mut lot = 0x2545_F491_4F6C_DD1Du64 ^ (number + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let channel: Vec<f32> = (0..frames)
         .map(|n| {
             lot ^= lot << 13;
             lot ^= lot >> 7;
             lot ^= lot << 17;
             let noise = (lot >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
-            (n as f64 * 220.0 * std::f64::consts::TAU / rate).sin() as f32 * 0.4 + noise * 0.1
+            (n as f64 * (220.0 + number as f64) * std::f64::consts::TAU / rate).sin() as f32 * 0.4 + noise * 0.1
         })
         .collect();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -141,22 +143,44 @@ fn count(file: &str) {
 }
 
 fn main() {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     let usage = || -> ! {
         eprintln!(
-            "usage: files_cross MEGABYTES [--through-here | --through ADDRESS KEY]\n       files_cross --count SONG.trill"
+            "usage: files_cross MEGABYTES [--files COUNT] [--through-here | --through ADDRESS KEY] [--line \
+             UP:DOWN:MS]\n       \
+             files_cross --count SONG.trill"
         );
         std::process::exit(2)
+    };
+    // The line the two are on, where they are not to have the loopback's.
+    let pace = match arguments.iter().position(|argument| argument == "--line") {
+        Some(at) if at + 1 < arguments.len() => {
+            let pace = Pace::read(&arguments[at + 1]).unwrap_or_else(|| usage());
+            arguments.drain(at..at + 2);
+            Some(pace)
+        }
+        Some(_) => usage(),
+        None => None,
     };
     if let [flag, file] = arguments.as_slice()
         && flag == "--count"
     {
         return count(file);
     }
+    // In how many recordings the megabytes are: one, unless said.
+    let many = match arguments.iter().position(|argument| argument == "--files") {
+        Some(at) if at + 1 < arguments.len() => {
+            let many = arguments[at + 1].parse::<u64>().ok().filter(|many| *many > 0).unwrap_or_else(|| usage());
+            arguments.drain(at..at + 2);
+            many
+        }
+        Some(_) => usage(),
+        None => 1,
+    };
     let Some(megabytes) = arguments.first().and_then(|size| size.parse::<u64>().ok()).filter(|size| *size > 0) else {
         usage()
     };
-    let through: Option<(String, String, Option<meet::Server>)> = match &arguments[1..] {
+    let mut through: Option<(String, String, Option<meet::Server>)> = match &arguments[1..] {
         [] => None,
         [here] if here == "--through-here" => {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port on the loopback");
@@ -172,17 +196,35 @@ fn main() {
         [through, address, key] if through == "--through" => Some((address.clone(), key.clone(), None)),
         _ => usage(),
     };
+    // Through a meeting point both are on the line: each connects out to
+    // it over a line of its own home.
+    let mut line = match (&mut through, pace) {
+        (Some((address, _, _)), Some(pace)) => {
+            let line = Line::to(address, pace).expect("a line on the loopback");
+            *address = line.address();
+            println!("each on a line of {} to the meeting point", pace.said());
+            Some(line)
+        }
+        _ => None,
+    };
     let folder = std::env::temp_dir().join(format!("trill-files-cross-{}", std::process::id()));
-    let file: PathBuf = folder.join("made here").join("a long take.wav");
+    let files: Vec<PathBuf> =
+        (0..many).map(|number| folder.join("made here").join(format!("a long take {number}.wav"))).collect();
     let began = Instant::now();
-    recording(&file, megabytes);
-    let bytes = std::fs::metadata(&file).unwrap().len();
-    let mb = bytes as f64 / f64::from(1 << 20);
-    println!("a recording of {mb:.1} MB, made in {:.1} s", began.elapsed().as_secs_f64());
+    for (number, file) in files.iter().enumerate() {
+        recording(file, (megabytes << 20) / many, number as u64);
+    }
+    let sizes: Vec<u64> = files.iter().map(|file| std::fs::metadata(file).unwrap().len()).collect();
+    let mb = sizes.iter().sum::<u64>() as f64 / f64::from(1 << 20);
+    match many {
+        1 => println!("a recording of {mb:.1} MB, made in {:.1} s", began.elapsed().as_secs_f64()),
+        _ => println!("{many} recordings of {mb:.1} MB together, made in {:.1} s", began.elapsed().as_secs_f64()),
+    }
 
     // ---- what reading it costs ---------------------------------------------
     let began = Instant::now();
-    let content = trill_together::files::content_of(&file, |_| true).unwrap().unwrap();
+    let contents: Vec<_> =
+        files.iter().map(|file| trill_together::files::content_of(file, |_| true).unwrap().unwrap()).collect();
     let hashed = began.elapsed();
     println!(
         "read to say what it is (SHA-256 of all of it): {:.0} ms, {:.0} MB a second",
@@ -191,18 +233,35 @@ fn main() {
     );
 
     let (ada, ben) = (start(&folder, "Ada"), start(&folder, "Ben"));
-    let (track, clip) = {
+    let (track, clips) = {
         let _hand = by_hand();
         let mut session = ada.session.lock();
         let track = session.edit(|song| Ok(song.add_track("Audio"))).unwrap();
         session.edit(|song| Ok(song.add_track("Keys"))).unwrap();
-        let recording = AudioContent::new(file.to_string_lossy());
-        let clip = session.edit(|song| song.add_audio_clip(track, "A long take", 0.0, 16.0, recording)).unwrap();
-        (track, clip)
+        let clips: Vec<_> = (files.iter().enumerate())
+            .map(|(number, file)| {
+                let (recording, start) = (AudioContent::new(file.to_string_lossy()), 16.0 * number as f64);
+                session.edit(|song| song.add_audio_clip(track, "A long take", start, 16.0, recording)).unwrap()
+            })
+            .collect();
+        (track, clips)
     };
     let resting = held_mb();
     let invitation = match &through {
-        None => ada.share(Reach::ThisMachine, 0).expect("sharing starts"),
+        None => {
+            let invitation = ada.share(Reach::ThisMachine, 0).expect("sharing starts");
+            // Directly, the one who joins reaches the other over the line.
+            match pace {
+                Some(pace) => {
+                    let direct = Invitation::parse(&invitation).expect("an invitation");
+                    let (between, over) = trill_together::line::before(&direct, pace).expect("a line on the loopback");
+                    println!("the one who joins on a line of {} to the other", pace.said());
+                    line = Some(between);
+                    over.to_string()
+                }
+                None => invitation,
+            }
+        }
         Some((address, key, _)) => {
             ada.set_meeting_point(address, Some(key)).expect("what a keeper handed over");
             let invitation = ada.share_through_meeting_point().expect("sharing starts");
@@ -216,12 +275,14 @@ fn main() {
     // Its program says what the file is once it has read it: decoded, as
     // the song plays it, and hashed.
     let began = Instant::now();
+    // (What the file of each clip is said to be, clip by clip, once all are said.)
     let said = |runtime: &Runtime| {
-        let files = runtime.session.lock().files_here();
-        files.into_iter().find(|file| file.place == FilePlace::Clip(clip)).and_then(|file| file.is)
+        let here = runtime.session.lock().files_here();
+        let of = |clip| here.iter().find(|file| file.place == FilePlace::Clip(clip)).and_then(|file| file.is.clone());
+        clips.iter().map(|clip| of(*clip).map(|is| is.content())).collect::<Option<Vec<_>>>()
     };
-    until("the program has said what its file is", || said(&ada).is_some());
-    assert_eq!(said(&ada).unwrap().content(), content);
+    until("the program has said what its files are", || said(&ada).is_some());
+    assert_eq!(said(&ada).unwrap(), contents);
     println!(
         "the song says what the file is {:.0} ms after it was shared (it is read as audio, then hashed)",
         began.elapsed().as_secs_f64() * 1e3
@@ -229,10 +290,12 @@ fn main() {
 
     // ---- crossing, with the song worked in meanwhile -------------------------
     let whole = |runtime: &Runtime| {
-        let files = runtime.session.lock().files_here();
-        let here = files.into_iter().find(|file| file.place == FilePlace::Clip(clip));
-        here.is_some_and(|file| std::fs::metadata(&file.path).is_ok_and(|found| found.len() == bytes))
-            && runtime.together().files.is_empty()
+        let here = runtime.session.lock().files_here();
+        let there = |(clip, bytes): (&trill_core::ClipId, &u64)| {
+            let file = here.iter().find(|file| file.place == FilePlace::Clip(*clip));
+            file.is_some_and(|file| std::fs::metadata(&file.path).is_ok_and(|found| found.len() == *bytes))
+        };
+        clips.iter().zip(&sizes).all(there) && runtime.together().files.is_empty()
     };
     let began = Instant::now();
     ben.join(&invitation, true).expect("the invitation is read");
@@ -264,14 +327,16 @@ fn main() {
     }
     let crossed = began.elapsed();
     println!(
-        "the file was whole in the other program {:.2} s after joining: {:.0} MB a second",
+        "all of it was whole in the other program {:.2} s after joining: {:.1} MB a second",
         crossed.as_secs_f64(),
         mb / crossed.as_secs_f64()
     );
     let at_ben = ben.session.lock().files_here();
-    let arrived = at_ben.iter().find(|file| file.place == FilePlace::Clip(clip)).expect("the clip names a file");
-    let same = trill_together::files::content_of(Path::new(&arrived.path), |_| true).unwrap().unwrap() == content;
-    assert!(same, "what arrived is not the file");
+    for (clip, content) in clips.iter().zip(&contents) {
+        let arrived = at_ben.iter().find(|file| file.place == FilePlace::Clip(*clip)).expect("the clip names a file");
+        let same = trill_together::files::content_of(Path::new(&arrived.path), |_| true).unwrap().unwrap() == *content;
+        assert!(same, "what arrived is not the file");
+    }
     if edits.len() >= 3 {
         let count = edits.len();
         let (mid, nine, worst) = middle(edits);
@@ -327,6 +392,7 @@ fn main() {
     }
     drop((ada, ben));
     std::thread::sleep(Duration::from_millis(300));
+    drop(line);
     drop(through);
     let _ = std::fs::remove_dir_all(&folder);
     if !held {

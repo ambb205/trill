@@ -55,6 +55,32 @@ const FIRST_PAUSE: Duration = Duration::from_secs(1);
 const LONGEST_PAUSE: Duration = Duration::from_secs(20);
 /// How often the thread that holds a meeting looks whether it is to stop.
 const LOOKING: Duration = Duration::from_millis(100);
+/// How long a connection that has nothing to say leaves it at that before
+/// it says that it is there ([`Message::Still`]).
+const STILL_EVERY: Duration = Duration::from_secs(2);
+/// How long nothing at all may be heard over a connection before it is
+/// taken to be lost on the way. The other side says something every
+/// [`STILL_EVERY`] at the least, whatever its program is busy with, so
+/// this is five of those gone missing. A line that goes down says nothing:
+/// neither side is sent a word, and the side that only hears would wait
+/// for as long as its system keeps the connection, which is minutes on
+/// some. With this, each side has let go within seconds, and the one that
+/// asked for the connection asks again.
+const SILENT: Duration = Duration::from_secs(10);
+
+/// How a program's connections say that they are there, and how long they
+/// hear nothing before they are taken to be lost.
+#[derive(Copy, Clone, Debug)]
+struct Pulse {
+    still_every: Duration,
+    silent: Duration,
+}
+
+impl Default for Pulse {
+    fn default() -> Self {
+        Self { still_every: STILL_EVERY, silent: SILENT }
+    }
+}
 
 /// Where to listen.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -150,6 +176,15 @@ struct Waiting {
     closed: bool,
 }
 
+/// What a connection is to say next.
+enum Next {
+    Say(Arc<Vec<u8>>),
+    /// Nothing waited for as long as was asked.
+    Nothing,
+    /// Nothing more, ever.
+    Closed,
+}
+
 impl Queue {
     /// Puts `bytes` in the queue it belongs to, and returns how many bytes
     /// wait there now. `None` for a connection that says nothing more.
@@ -174,25 +209,30 @@ impl Queue {
         Some(now)
     }
 
-    /// The next thing to say, waited for: what is said of the song while
-    /// any of it waits, and a piece of a file otherwise. `None` once the
-    /// connection is to end and nothing of the song waits (the pieces
-    /// that do are let go of).
-    fn next(&self) -> Option<Arc<Vec<u8>>> {
+    /// The next thing to say, waited for `at_most` so long: what is said
+    /// of the song while any of it waits, and a piece of a file otherwise.
+    /// [`Next::Closed`] once the connection is to end and nothing of the
+    /// song waits (the pieces that do are let go of).
+    fn next(&self, at_most: Duration) -> Next {
+        let until = Instant::now() + at_most;
         let mut waiting = self.waiting.lock().unwrap();
         loop {
             if let Some(bytes) = waiting.first.pop_front() {
                 waiting.first_bytes -= bytes.len();
-                return Some(bytes);
+                return Next::Say(bytes);
             }
             if waiting.closed {
-                return None;
+                return Next::Closed;
             }
             if let Some(bytes) = waiting.pieces.pop_front() {
                 waiting.piece_bytes -= bytes.len();
-                return Some(bytes);
+                return Next::Say(bytes);
             }
-            waiting = self.more.wait(waiting).unwrap();
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Next::Nothing;
+            }
+            waiting = self.more.wait_timeout(waiting, left).unwrap().0;
         }
     }
 
@@ -277,6 +317,7 @@ struct Hold {
     links: Arc<Mutex<HashMap<LinkId, Link>>>,
     last: Arc<AtomicU64>,
     happened: Sender<Event>,
+    pulse: Pulse,
 }
 
 impl Hold {
@@ -346,6 +387,7 @@ impl Hold {
         }
         let (address, proved_by, proving) = (self.address.clone(), self.proved_by, self.proving.clone());
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
+        let pulse = self.pulse;
         proving.fetch_add(1, Ordering::Relaxed);
         let met = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
             let secured = match trill_meet::client::take(&address, ticket) {
@@ -355,7 +397,7 @@ impl Hold {
             proving.fetch_sub(1, Ordering::Relaxed);
             match secured {
                 Ok(pair) => {
-                    if let Err(error) = open(pair, None, &links, &last, &happened) {
+                    if let Err(error) = open(pair, None, &links, &last, &happened, pulse) {
                         log::warn!("a program that connected could not be heard: {error}");
                     }
                 }
@@ -384,6 +426,7 @@ pub struct Net {
     early: Vec<Event>,
     happened: Sender<Event>,
     listening: Option<Listening>,
+    pulse: Pulse,
 }
 
 impl Default for Net {
@@ -400,6 +443,7 @@ fn open(
     links: &Arc<Mutex<HashMap<LinkId, Link>>>,
     last: &Arc<AtomicU64>,
     happened: &Sender<Event>,
+    pulse: Pulse,
 ) -> io::Result<()> {
     let link = last.fetch_add(1, Ordering::Relaxed) + 1;
     let socket = hearer.socket();
@@ -410,8 +454,16 @@ fn open(
 
     let saying_socket = socket.clone();
     std::thread::Builder::new().name("trill-together-say".into()).spawn(move || {
-        while let Some(message) = queue.next() {
-            if sayer.say(&message).is_err() {
+        // With nothing to say for a while, it says that it is there: the
+        // other side takes a connection it hears nothing over for lost.
+        let still = Message::Still.encode();
+        loop {
+            let said = match queue.next(pulse.still_every) {
+                Next::Say(message) => sayer.say(&message),
+                Next::Nothing => sayer.say(&still),
+                Next::Closed => break,
+            };
+            if said.is_err() {
                 break;
             }
         }
@@ -424,6 +476,10 @@ fn open(
     let (links, happened) = (links.clone(), happened.clone());
     std::thread::Builder::new().name("trill-together-hear".into()).spawn(move || {
         let (mut since, mut count) = (Instant::now(), 0u32);
+        // (A wait that ends in the middle of a message leaves the
+        // connection of no use, and it is closed below: that is what a
+        // line does which goes down in the middle of one.)
+        let _ = hearer.wait_at_most(Some(pulse.silent));
         // Why it ended, and whether a side ended it and said so: what is
         // neither was lost on the way.
         let (why, told) = loop {
@@ -431,6 +487,12 @@ fn open(
                 Ok(bytes) => Message::decode(&bytes),
                 Err(Broken::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
                     break ("the other program closed the connection".to_owned(), false);
+                }
+                Err(Broken::Io(error))
+                    if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) =>
+                {
+                    let why = format!("nothing was heard over it for {} seconds", pulse.silent.as_secs());
+                    break (why, false);
                 }
                 Err(Broken::Io(error)) => break (Broken::Io(error).to_string(), false),
                 Err(broken) => break (broken.to_string(), true),
@@ -449,6 +511,8 @@ fn open(
             match message {
                 // In the other side's own words.
                 Ok(Message::Bye { why }) => break (shortened(&why), true),
+                // It is there, and has nothing to say.
+                Ok(Message::Still) => {}
                 Ok(message) => {
                     if happened.send(Event::Heard { link, message }).is_err() {
                         break ("this program stopped listening".to_owned(), true);
@@ -485,8 +549,16 @@ impl Net {
     pub fn new() -> Self {
         let (happened, events) = channel();
         let (early, pieces_said) = (Vec::new(), Arc::default());
-        let links = Arc::default();
-        Self { links, said: (0, 0), pieces_said, last: Arc::default(), events, early, happened, listening: None }
+        let (links, pulse) = (Arc::default(), Pulse::default());
+        Self { links, said: (0, 0), pieces_said, last: Arc::default(), events, early, happened, listening: None, pulse }
+    }
+
+    /// For a test: connections made from here on say that they are there
+    /// every `still_every` and are taken to be lost after `silent` of
+    /// hearing nothing, in place of two seconds and ten.
+    pub fn with_pulse(mut self, still_every: Duration, silent: Duration) -> Self {
+        self.pulse = Pulse { still_every, silent };
+        self
     }
 
     /// A way to say bytes of files from another thread: see [`Pieces`].
@@ -511,6 +583,7 @@ impl Net {
         let stop = Arc::new(AtomicBool::new(false));
         let (key, stopped) = (invitation.key(), stop.clone());
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
+        let pulse = self.pulse;
         let meeting = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new().name("trill-together-listen".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
@@ -538,7 +611,7 @@ impl Net {
                     proving.fetch_sub(1, Ordering::Relaxed);
                     match secured {
                         Ok(pair) => {
-                            if let Err(error) = open(pair, None, &links, &last, &happened) {
+                            if let Err(error) = open(pair, None, &links, &last, &happened, pulse) {
                                 log::warn!("a program that connected could not be heard: {error}");
                             }
                         }
@@ -581,6 +654,7 @@ impl Net {
             links: self.links.clone(),
             last: self.last.clone(),
             happened: self.happened.clone(),
+            pulse: self.pulse,
         };
         let (done, ended) = channel();
         std::thread::Builder::new().name("trill-together-hold".into()).spawn(move || {
@@ -618,7 +692,7 @@ impl Net {
     pub fn join(&mut self, invitation: Invitation) -> JoinId {
         let join = self.last.fetch_add(1, Ordering::Relaxed) + 1;
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
-        let failed = self.happened.clone();
+        let (failed, pulse) = (self.happened.clone(), self.pulse);
         let spawned = std::thread::Builder::new().name("trill-together-join".into()).spawn(move || {
             // Why not, and whether asking again by itself is no use.
             let connect = || -> Result<(), (String, bool)> {
@@ -640,7 +714,7 @@ impl Net {
                         }
                         broken => (broken.to_string(), false),
                     })?;
-                    return open(pair, Some(join), &links, &last, &happened).map_err(unheard);
+                    return open(pair, Some(join), &links, &last, &happened, pulse).map_err(unheard);
                 }
                 let found = (address.to_socket_addrs())
                     .map_err(|error| (format!("{address} is no address this machine finds: {error}"), false))?;
@@ -666,7 +740,7 @@ impl Net {
                                 }
                                 broken => (broken.to_string(), false),
                             })?;
-                            return open(pair, Some(join), &links, &last, &happened).map_err(unheard);
+                            return open(pair, Some(join), &links, &last, &happened, pulse).map_err(unheard);
                         }
                         Err(error) => {
                             last_error = format!(

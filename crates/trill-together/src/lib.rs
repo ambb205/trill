@@ -41,6 +41,7 @@
 
 pub mod files;
 mod invite;
+pub mod line;
 mod net;
 mod point;
 mod wire;
@@ -107,6 +108,38 @@ mod tests {
         assert_eq!(link, ours);
         assert!(why.contains("Jo left"), "{why}");
         assert!(sharer.links().is_empty() && joiner.links().is_empty());
+    }
+
+    #[test]
+    fn a_connection_whose_line_goes_down_without_a_word_is_let_go_of_by_the_side_that_sees_nothing() {
+        // (Connections: one, through a line, which is two on the loopback.)
+        let (still, silent) = (Duration::from_millis(100), Duration::from_millis(700));
+        let mut sharer = Net::new().with_pulse(still, silent);
+        let mut joiner = Net::new().with_pulse(still, silent);
+        let invitation = sharer.listen(Reach::ThisMachine, 0).unwrap();
+        let (line, over) = line::before(&invitation, line::Pace::of(8000, 8000, 5)).unwrap();
+        joiner.join(over);
+        assert!(matches!(next(&mut joiner), Event::Open { joined: Some(_), .. }));
+        let Event::Open { link: ours, joined: None } = next(&mut sharer) else { panic!("the sharer is connected") };
+
+        // Neither program says a word for twice as long as a connection
+        // may be silent: the connections say that they are there, and
+        // nobody hears of that.
+        assert!(sharer.next(2 * silent).is_none(), "a connection that has nothing to say is not lost");
+        assert!(joiner.events().is_empty());
+
+        // The line goes down. The joiner's side of it ends; the sharer is
+        // sent no word of that, and what it says goes nowhere.
+        line.lose();
+        assert!(matches!(next(&mut joiner), Event::Lost { told: false, .. }));
+        let began = Instant::now();
+        let Event::Lost { link, why, told } = next_within(&mut sharer, 5 * silent) else {
+            panic!("the side that sees nothing lets go by itself")
+        };
+        assert_eq!((link, told), (ours, false), "lost on the way: whoever asked for it may ask again");
+        assert!(why.contains("nothing was heard"), "{why}");
+        assert!(began.elapsed() < 3 * silent, "it let go after {:?}", began.elapsed());
+        assert!(sharer.links().is_empty());
     }
 
     #[test]

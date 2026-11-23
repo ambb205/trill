@@ -30,7 +30,8 @@ use trill_core::merge::lot::Lot;
 use trill_dsp::BuiltinFactory;
 use trill_engine::{AudioBackend, Session};
 use trill_runtime::{Meeting, Reach, Runtime, RuntimeOptions, Storage};
-use trill_together::meet;
+use trill_together::line::{Line, Pace};
+use trill_together::{Invitation, meet};
 
 fn start(folder: &Path, name: &str) -> Runtime {
     let storage = Storage::At { settings: folder.join(name).join("settings.json"), library_index: None };
@@ -50,7 +51,7 @@ fn song(runtime: &Runtime) -> String {
 fn until(what: &str, done: impl Fn() -> bool) -> Duration {
     let began = Instant::now();
     while !done() {
-        assert!(began.elapsed() < Duration::from_secs(120), "timed out waiting until {what}");
+        assert!(began.elapsed() < Duration::from_secs(900), "timed out waiting until {what}");
         std::thread::sleep(Duration::from_micros(200));
     }
     began.elapsed()
@@ -63,15 +64,25 @@ fn middle(mut times: Vec<Duration>) -> (f64, f64, f64) {
 }
 
 fn main() {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     let usage = || -> ! {
-        eprintln!("usage: together SONG.trill [--through-here | --through ADDRESS KEY]");
+        eprintln!("usage: together SONG.trill [--through-here | --through ADDRESS KEY] [--line UP:DOWN:MS]");
         std::process::exit(2)
+    };
+    // The line the two are on, where they are not to have the loopback's.
+    let pace = match arguments.iter().position(|argument| argument == "--line") {
+        Some(at) if at + 1 < arguments.len() => {
+            let pace = Pace::read(&arguments[at + 1]).unwrap_or_else(|| usage());
+            arguments.drain(at..at + 2);
+            Some(pace)
+        }
+        Some(_) => usage(),
+        None => None,
     };
     let Some(file) = arguments.first().cloned() else { usage() };
     // The meeting point the two meet through, where they do: its address
     // and a key, and the meeting point itself where it is started here.
-    let through: Option<(String, String, Option<meet::Server>)> = match &arguments[1..] {
+    let mut through: Option<(String, String, Option<meet::Server>)> = match &arguments[1..] {
         [] => None,
         [here] if here == "--through-here" => {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port on the loopback");
@@ -84,6 +95,17 @@ fn main() {
         }
         [through, address, key] if through == "--through" => Some((address.clone(), key.clone(), None)),
         _ => usage(),
+    };
+    // Through a meeting point both are on the line: each connects out to
+    // it over a line of its own home.
+    let mut line = match (&mut through, pace) {
+        (Some((address, _, _)), Some(pace)) => {
+            let line = Line::to(address, pace).expect("a line on the loopback");
+            *address = line.address();
+            println!("each on a line of {} to the meeting point", pace.said());
+            Some(line)
+        }
+        _ => None,
     };
     let folder = std::env::temp_dir().join(format!("trill-together-{}", std::process::id()));
     let (ada, ben) = (start(&folder, "Ada"), start(&folder, "Ben"));
@@ -98,7 +120,20 @@ fn main() {
 
     // ---- joining ---------------------------------------------------------
     let invitation = match &through {
-        None => ada.share(Reach::ThisMachine, 0).expect("sharing starts"),
+        None => {
+            let invitation = ada.share(Reach::ThisMachine, 0).expect("sharing starts");
+            // Directly, the one who joins reaches the other over the line.
+            match pace {
+                Some(pace) => {
+                    let direct = Invitation::parse(&invitation).expect("an invitation");
+                    let (between, over) = trill_together::line::before(&direct, pace).expect("a line on the loopback");
+                    println!("the one who joins on a line of {} to the other", pace.said());
+                    line = Some(between);
+                    over.to_string()
+                }
+                None => invitation,
+            }
+        }
         Some((address, key, _)) => {
             ada.set_meeting_point(address, Some(key)).expect("what a keeper handed over");
             let began = Instant::now();
@@ -211,6 +246,7 @@ fn main() {
     // (Where the meeting point is this process's, its last lines say how
     // much it passed.)
     std::thread::sleep(Duration::from_millis(300));
+    drop(line);
     drop(through);
 
     // ---- what taking a change in costs the one who hears it ----------------

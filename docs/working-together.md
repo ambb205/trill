@@ -244,6 +244,16 @@ invitation it had. Only when asking again is no use does it stop, with a sentenc
 invitation again: the other shares under another invitation by now, or ended the meeting. (Someone who *leaves*,
 or closes their Trill, has said so: that is not a lost connection, and nothing is asked for again.)
 
+**A line that goes down says nothing, so each connection says that it is there.** When a cable is pulled or a
+wireless network drops, neither program is sent a word. The one whose own line it was sees its connection end
+within seconds. The other sees nothing at all: as far as its system can tell the connection is open, and it would
+go on showing someone who is no longer there for minutes. So every connection says a few bytes every two seconds
+when it has nothing else to say, whatever the program is busy with, and a program that hears nothing over a
+connection for ten seconds takes it to be lost: it lets go, says so (*the connection was lost: nothing was heard
+over it for 10 seconds*), and whichever of the two asked for the connection asks again. Whoever's own line dropped
+and came back is usually in the song again before the other was told anything: their program asks again at once,
+and the connection it had before is let go of without a word, because its person is here.
+
 **Leave** (in the panel, or File, Leave the shared song) ends the connections; the song stays as it is. A shared
 song is saved with what it takes to merge it again, so each of you can save, close, work alone for a day, and
 join again: both sets of work are merged by the same rules as above, and where they clash you are told as above.
@@ -390,6 +400,33 @@ at a time, which is thousands of questions a second for a long recording: more, 
 works in a song says, and the connection was let go of for it once in every 200 MB or so and came back a second
 later. And an edit that arrived while an arrived file was being read to be played waited for that reading, two
 seconds for 300 MB. A file is now asked for in strides, and read before it has its name.
+
+**On a line as a home has it.** All of the above is two programs on one machine, where a megabyte takes a
+millisecond. With `--line UP:DOWN:MS` each program is put on a stand-in for a home's line: so many kilobits a
+second up and down, and so many milliseconds each way (`trill_together::line`). The two still talk over this
+machine, so nothing is lost on the way as it can be on a real network, but bytes take the time they would.
+Twelve recordings of a megabyte each, through a meeting point, with a fader set in the song meanwhile (the
+middle one of the edits; the machine was running other tests, so the figures swing):
+
+| Each program's line | all twelve arrived in | the line alone takes | a fader set meanwhile | the same with nothing crossing |
+|---|---|---|---|---|
+| 5 Mbit/s up, 50 down, 20 ms each way | 21 s | 19 s | 157 to 167 ms | 68 to 74 ms |
+| The same, 60 ms each way | 22 to 23 s | 19 s | 254 to 320 ms | 149 to 206 ms |
+| 1 Mbit/s up, 10 down, 40 ms each way (twelve of half a megabyte) | 56 to 61 s | 48 s | 172 to 217 ms | 141 to 171 ms |
+| Directly, 5 Mbit/s both ways, 150 ms each way | 22 s | 19 s | 237 to 370 ms | 177 to 289 ms |
+
+So the song's audio takes what the line carries, and what is done in the song meanwhile arrives about a tenth of
+a second later than it otherwise would. It did neither before it was measured so. What a program says of the
+song goes ahead of the files in its own queue, but behind whatever its system and the line have taken already,
+and that is as much as it was asked for. Each file had been asked for ahead on its own, so twelve at once were
+twelve times as much: with sixteen recordings arriving, a fader took 540 ms where it took 120 ms with one, and on
+the slow line two seconds. And only what arrives in a quarter of a second had been asked for ahead, whatever the
+way: where a question and its answer take that long to cross, the line stood idle while the program asked, and
+twelve megabytes took 45 seconds on the line that carries them in 19. Now no more is asked of one program at
+once, of all its files together, than is on its way there and back and arrives in an eighth of a second; how
+long the way is is measured by a small question put while nothing is on its way, and what the line carries is
+the most that was counted to arrive of late (going by the last count alone, what was asked for swung until
+nearly nothing was). The file with least to go is asked for first, so that the most are whole the soonest.
 
 ## What is not built
 
