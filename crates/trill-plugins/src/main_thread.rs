@@ -348,6 +348,8 @@ impl<S: ThreadState> MainThread<S> {
             // Dropped, and with that announcing, however this closure ends.
             let announcer = announcer;
             let value = job(state);
+            // Off Windows the announcer holds nothing that needs dropping.
+            #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
             drop(announcer);
             let _ = reply.send(value);
         })?;
@@ -379,6 +381,8 @@ impl<S: ThreadState> MainThread<S> {
         self.send(false, move |state| {
             let announcer = announcer;
             let value = job(state);
+            // Off Windows the announcer holds nothing that needs dropping.
+            #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
             drop(announcer);
             if let Err(SendError(value)) = reply.send(value) {
                 unclaimed(state, value);

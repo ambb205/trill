@@ -2,6 +2,10 @@
 //! that can be checked exactly, and everything that depends on a plugin
 //! misbehaving. The integration tests cover real, installed plugins.
 
+// The SDK's enums are a C `int` on Windows and `unsigned` elsewhere, so a
+// cast that is needed there is to the same type here.
+#![cfg_attr(not(windows), allow(clippy::unnecessary_cast))]
+
 use super::class_id::ClassId;
 use super::probe::records;
 use super::scripted::{self, Seen, kind};
@@ -923,14 +927,19 @@ fn a_plugin_that_fails_while_running_is_bypassed() {
 #[test]
 fn a_plugin_made_for_a_render_is_set_up_and_processed_offline() {
     use trill_core::device::Purpose;
-    use vst3::Steinberg::Vst::ProcessModes_::{kOffline, kRealtime};
+    // The modes are an enum, which the bindings make an `i32` on Windows
+    // and a `u32` elsewhere; a plugin is told them as an `int32`.
+    #[allow(clippy::unnecessary_cast)]
+    const REALTIME: vst3::Steinberg::int32 = vst3::Steinberg::Vst::ProcessModes_::kRealtime as vst3::Steinberg::int32;
+    #[allow(clippy::unnecessary_cast)]
+    const OFFLINE: vst3::Steinberg::int32 = vst3::Steinberg::Vst::ProcessModes_::kOffline as vst3::Steinberg::int32;
     let factory = factory();
     // Made to be played, as every device of a session is: realtime.
     let mut played = create(&factory, &device(kind::IMPULSE));
     block(&mut played, BLOCK, &[], 0.0);
     let seen = self::seen(&mut played);
-    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kRealtime));
-    assert_eq!(seen.block_mode, Some(kRealtime));
+    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(REALTIME));
+    assert_eq!(seen.block_mode, Some(REALTIME));
 
     // Made for a render: told so when it is set up, and with every block,
     // and again when it is set up for another sample rate.
@@ -940,12 +949,12 @@ fn a_plugin_made_for_a_render_is_set_up_and_processed_offline() {
     let (left, _) = block(&mut rendered, BLOCK, &[on(3, 1.0)], 0.0);
     assert_eq!(left[3], 1.0, "it plays as it would played live");
     let seen = self::seen(&mut rendered);
-    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kOffline));
-    assert_eq!(seen.block_mode, Some(kOffline));
+    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(OFFLINE));
+    assert_eq!(seen.block_mode, Some(OFFLINE));
     rendered.processor.prepare(44_100.0, 32);
     block(&mut rendered, 32, &[], 0.0);
     let seen = self::seen(&mut rendered);
-    assert_eq!(seen.setup, Some((44_100.0, 32, kOffline, 0)));
+    assert_eq!(seen.setup, Some((44_100.0, 32, OFFLINE, 0)));
 }
 
 // ---- through the engine --------------------------------------------------

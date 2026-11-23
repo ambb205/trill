@@ -3,7 +3,8 @@
 Trill is an early build. Everything the other pages describe works and is held by tests. This page lists what is
 not built yet.
 
-Only Windows has been run so far.
+Windows is where Trill is made. macOS on Apple silicon builds, passes the tests and runs the window, the server
+and the engine; what it has not got yet is [below](#macos). Linux has not been run.
 
 ## Arrangement and engine
 
@@ -166,6 +167,30 @@ Only Windows has been run so far.
 - What is in front of the instrument.
 - A plugin that is not installed kept in the song until it is. The sound is made without it.
 - Taking back the deletion of a saved one. It is asked about first, and is then for good.
+
+## macOS
+
+What Windows has and macOS has not, yet. Each is said where it would be used, never a crash.
+
+- The audio threads in the class macOS keeps for audio. The device's own thread is the system's and plays in
+  time (a built-in song of 14 tracks, 30 seconds on a MacBook Pro's speakers: no buffer late); the threads
+  beside it, which a larger song is made on, are ordinary threads, and `keeps_up` says the class was refused.
+- Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
+  `~/Library/Audio/Plug-Ins` and `/Library/Audio/Plug-Ins` are found, scanned and played.
+- A plugin that takes a render down named by its file. The render says that its process went down, at which
+  stage, and the song is as it was.
+- The Trash. A recording that is removed goes into the `removed` folder beside the takes.
+- How much memory the machine has free, and how much room a disk has. No render or study is refused for want of
+  either; a study's own process is measured, and ended when it takes more than it was given.
+- A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
+- Where files dragged in from the Finder will land, shown while they are dragged. The window is not told where
+  the pointer is during such a drag; it places what was dropped when the pointer next moves (not yet tried with a
+  real mouse).
+- Paths compared as the disk has them. macOS disks are usually blind to case, and two spellings of one file
+  that differ only in case are taken for two files.
+- An installer, a release and updates. A build of one's own neither looks for a newer Trill nor is replaced.
+- A picture of the window (`--screenshot`) is taken in a window without a title bar, off every screen, by a
+  program that has no Dock icon and never comes to the front.
 
 ## Installing and updating
 

@@ -34,6 +34,7 @@ impl Room {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::*;
 
     #[cfg(windows)]

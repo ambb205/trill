@@ -297,11 +297,18 @@ pub fn attend(job: &mut Job, limit: Option<u64>, stop: &AtomicBool, on: &mut dyn
             Err(RecvTimeoutError::Timeout) => {}
             // Its output closed without a word on how it ended: it went down.
             Err(RecvTimeoutError::Disconnected) => {
-                let code = job.process.wait().ok().and_then(|status| status.code());
+                let status = job.process.wait().ok();
+                let code = status.and_then(|status| status.code());
                 // What it said last is on its way through another thread.
                 std::thread::sleep(LOOK_EVERY);
                 let words = job.words.lock().trim().to_owned();
                 let code = code.map_or(String::new(), |code| format!(" (it ended with code {:#x})", code as u32));
+                // A process that faults on a Unix is ended by a signal, and has no code.
+                #[cfg(unix)]
+                let code = match status.and_then(|status| std::os::unix::process::ExitStatusExt::signal(&status)) {
+                    Some(signal) => format!(" (it was ended by signal {signal})"),
+                    None => code,
+                };
                 let mut sentence = format!(
                     "the process that studies went down{}{code}. Trill is as it was, and every stage of the study that had \
                      finished is kept: run it again to take it up there",

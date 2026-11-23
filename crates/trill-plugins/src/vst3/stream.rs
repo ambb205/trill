@@ -146,6 +146,9 @@ impl ISizeableStreamTrait for MemoryStream {
     }
 }
 
+// The SDK's enums are a C `int` on Windows and `unsigned` elsewhere, so a
+// cast that is needed there is to the same type here.
+#[cfg_attr(not(windows), allow(clippy::unnecessary_cast))]
 #[cfg(test)]
 mod tests {
     use super::*;

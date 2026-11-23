@@ -30,6 +30,21 @@ impl TestDir {
         std::fs::write(&path, contents).expect("the temporary directory is writable");
         path
     }
+
+    /// A CLAP plugin at `name` that is no plugin, in the form this system
+    /// installs them: a library file, or on macOS a bundle (a folder whose
+    /// library is in `Contents/MacOS`). Returns the path a scan names it by.
+    pub(crate) fn broken_clap(&self, name: &str) -> PathBuf {
+        const NOT_A_LIBRARY: &[u8] = b"this is not a shared library";
+        if cfg!(target_os = "macos") {
+            let bundle = self.0.join(name);
+            let stem = bundle.file_stem().and_then(|stem| stem.to_str()).expect("a plugin's name").to_owned();
+            self.file(&format!("{name}/Contents/MacOS/{stem}"), NOT_A_LIBRARY);
+            bundle
+        } else {
+            self.file(name, NOT_A_LIBRARY)
+        }
+    }
 }
 
 impl Drop for TestDir {
@@ -60,6 +75,7 @@ pub(crate) fn eventually(limit: std::time::Duration, mut condition: impl FnMut()
 }
 
 /// Fails a test that deadlocks instead of hanging the whole suite.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn within(limit: std::time::Duration, body: impl FnOnce() + Send + 'static) {
     let (done, finished) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -79,6 +95,7 @@ pub(crate) fn within(limit: std::time::Duration, body: impl FnOnce() + Send + 's
 }
 
 /// A window title no other test uses, to find a test's own editor by.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn unique_title(what: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     format!("{what} #{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))

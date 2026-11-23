@@ -26,6 +26,10 @@ use trill_runtime::{Parts, Runtime, RuntimeOptions, Storage, Studying};
 use trill_study::models::scripted::Script;
 use trill_study::run::Programs;
 
+/// How a process that went down ended, as the sentence says it: Windows
+/// gives an exception's code, a Unix the signal that ended it.
+const ENDED: &str = if cfg!(windows) { "it ended with code 0x" } else { "it was ended by signal " };
+
 type Client = RunningService<RoleClient, ClientConfig>;
 
 struct Fixture {
@@ -396,7 +400,7 @@ async fn a_model_that_fails_or_takes_its_process_down_is_a_sentence_and_the_serv
     assert_eq!(failed["state"], "failed", "{failed}");
     let error = failed["error"].as_str().unwrap();
     assert!(
-        error.starts_with("the process that studies went down while finding the beat (it ended with code 0x"),
+        error.starts_with(&format!("the process that studies went down while finding the beat ({ENDED}")),
         "{error}"
     );
     assert!(error.contains("Trill is as it was, and every stage of the study that had finished is kept"), "{error}");
