@@ -31,7 +31,7 @@ struct Places {
     #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
     programs: Vec<PathBuf>,
     /// Windows' `ProgramData`.
-    #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))] // Read only where Windows' places are.
     program_data: Option<PathBuf>,
 }
 

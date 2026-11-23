@@ -37,10 +37,7 @@ mod preset_tests;
 mod presets;
 mod probe;
 mod processor;
-// What the scripted editors do is asked only by the tests of editors, which
-// are Windows' until editors are hosted elsewhere.
 #[cfg(test)]
-#[cfg_attr(not(windows), allow(dead_code))]
 mod scripted;
 #[cfg(test)]
 mod tests;

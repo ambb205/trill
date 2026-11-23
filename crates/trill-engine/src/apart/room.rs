@@ -35,6 +35,7 @@ impl Room {
 // Only Windows can be asked yet.
 #[cfg(all(test, windows))]
 mod tests {
+    #[cfg(windows)]
     use super::*;
 
     #[test]

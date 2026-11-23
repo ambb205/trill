@@ -68,10 +68,5 @@ impl Arrival {
     }
 }
 
-/// What a job takes with it; see the Windows counterpart. Dropping it
-/// announces nothing here, since nothing waits on anything but the reply.
+/// What a job takes with it; see the Windows counterpart.
 pub(super) struct Announcer;
-
-impl Drop for Announcer {
-    fn drop(&mut self) {}
-}

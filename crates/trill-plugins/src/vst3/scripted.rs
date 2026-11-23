@@ -14,6 +14,10 @@
 //! everything a view does to its host: it negotiates a size, and has a
 //! "user" ([`act`]) who turns its knob and makes it ask for another size.
 
+// The SDK's enums are a C `int` on Windows and `unsigned` elsewhere, so a
+// cast that is needed there is to the same type here.
+#![cfg_attr(not(windows), allow(clippy::unnecessary_cast))]
+
 use super::class_id::ClassId;
 use super::text;
 use std::collections::HashMap;
@@ -550,6 +554,7 @@ pub(crate) const ATTACHED_SIZE: (i32, i32) = (450, 300);
 
 /// Something the user of a view does in it.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) enum Action {
     /// Turns the gain knob to this normalized value, as one gesture.
     TurnKnob(f64),
@@ -573,8 +578,10 @@ struct ViewState {
     height: AtomicI32,
     /// The window the view was put into, as a number.
     parent: AtomicUsize,
+    #[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
     /// The timer the view runs while it is attached, or 0.
     timer: AtomicUsize,
+    #[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
     ticks: AtomicU32,
     /// What the host answered each request for another size.
     resize_results: Mutex<Vec<tresult>>,
@@ -582,6 +589,7 @@ struct ViewState {
 
 /// What the tests read back about a view.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) struct ViewSeen {
     pub scale: f32,
     pub size: (i32, i32),
@@ -593,23 +601,27 @@ pub(crate) struct ViewSeen {
 /// The view most recently made for each instance, by serial.
 static VIEWS: Mutex<Option<HashMap<u64, Arc<ViewState>>>> = Mutex::new(None);
 static VIEW_STEPS: Mutex<Vec<(u64, &'static str)>> = Mutex::new(Vec::new());
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 static ACTIONS: Mutex<Vec<(u64, Action)>> = Mutex::new(Vec::new());
 
 fn view_log(serial: u64, step: &'static str) {
     VIEW_STEPS.lock().unwrap().push((serial, step));
 }
 
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 fn view_of(serial: u64) -> Option<Arc<ViewState>> {
     VIEWS.lock().unwrap().get_or_insert_default().get(&serial).cloned()
 }
 
 /// The calls the views of the instance with this serial have received, in
 /// order. Outlives the views, so their destruction can be observed.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn view_steps(serial: u64) -> Vec<&'static str> {
     VIEW_STEPS.lock().unwrap().iter().filter(|(instance, _)| *instance == serial).map(|(_, step)| *step).collect()
 }
 
 /// What the latest view of the instance with this serial has observed.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn view_seen(serial: u64) -> Option<ViewSeen> {
     let view = view_of(serial)?;
     Some(ViewSeen {
@@ -624,6 +636,7 @@ pub(crate) fn view_seen(serial: u64) -> Option<ViewSeen> {
 /// Has the user of the view of the instance with this serial do `action`.
 /// The view carries it out on its next timer tick, as a plugin reacts to
 /// its user: from the message loop, with the host free to answer at once.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn act(serial: u64, action: Action) {
     ACTIONS.lock().unwrap().push((serial, action));
 }
@@ -631,6 +644,7 @@ pub(crate) fn act(serial: u64, action: Action) {
 /// Has the view do `action` right now. Called from a job on the plugin
 /// main thread, this is a view calling its host back while the host is in
 /// the middle of something.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn act_now(serial: u64, action: Action) {
     if let Some(view) = view_of(serial) {
         view.perform(action);
@@ -679,6 +693,7 @@ impl ViewState {
 
     /// Counts a tick of the view's timer, and does what the view's user
     /// did since the last one.
+    #[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
     fn tick(&self, serial: u64) {
         self.ticks.fetch_add(1, Ordering::Relaxed);
         let mine: Vec<Action> = {

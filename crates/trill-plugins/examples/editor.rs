@@ -411,6 +411,8 @@ fn run(options: &Options) -> Result<ExitCode, String> {
     drop(controller);
     stop.store(true, Ordering::Relaxed);
     audio.join().map_err(|_| "the audio thread panicked")?;
+    // Off Windows there is no owner window, and nothing to drop.
+    #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
     drop(owner);
     drop(factory);
     drop(host);
@@ -759,11 +761,6 @@ mod platform {
     pub fn be_dpi_aware() {}
 
     pub struct Owner;
-
-    /// Nothing to take down; it is dropped where the Windows one is.
-    impl Drop for Owner {
-        fn drop(&mut self) {}
-    }
 
     impl Owner {
         pub fn create() -> Self {

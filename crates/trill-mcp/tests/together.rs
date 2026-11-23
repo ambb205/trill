@@ -248,8 +248,12 @@ fn tone(path: std::path::PathBuf, hertz: f64, seconds: f64) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_audio_of_a_shared_song_is_said_before_it_goes_while_it_arrives_and_where_it_is_held() {
     let folder = tempfile::tempdir().unwrap();
+    // A file is said by the path the file system has for it. On macOS the
+    // temporary folder is reached through a link (`/var` is `/private/var`),
+    // so the file is named by its real path from the start.
+    let base = if cfg!(windows) { folder.path().to_path_buf() } else { folder.path().canonicalize().unwrap() };
     let (ada, ben) = (program().await, program().await);
-    let vocal = tone(folder.path().join("Ada's music").join("vocal take.wav"), 220.0, 1.0);
+    let vocal = tone(base.join("Ada's music").join("vocal take.wav"), 220.0, 1.0);
     let track = ok(&ada.client, "create_track", json!({ "name": "Vocal" })).await["track_id"].clone();
     let arguments = json!({ "track": track, "path": vocal, "start": 0, "name": "Verse vocal" });
     let verse = ok(&ada.client, "create_audio_clip", arguments).await["clip_id"].clone();

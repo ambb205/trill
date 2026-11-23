@@ -77,10 +77,7 @@ mod presets;
 mod repeats;
 pub mod scan;
 mod signal;
-// Some of it is for the tests of editors, which are Windows' until editors
-// are hosted elsewhere.
 #[cfg(test)]
-#[cfg_attr(not(windows), allow(dead_code))]
 mod test_support;
 mod transport;
 #[cfg(test)]

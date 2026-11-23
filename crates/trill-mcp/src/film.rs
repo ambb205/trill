@@ -514,11 +514,11 @@ mod tests {
         let place = |server: &TrillServer, asked: Option<&str>| {
             server.write_path_or(&runtime.session.lock(), asked, "a film", &["mp4"], "films", usual)
         };
-        // A place of the machine's outside the assistant's folder: on another drive, or at the root.
-        let elsewhere = if cfg!(windows) { "D:/films/night.mp4" } else { "/films/night.mp4" };
         // A client trusted as the user is: where it says, or where films go.
         let trusted = TrillServer::new(runtime.clone());
         assert_eq!(place(&trusted, None), Ok(usual()));
+        // A place outside the working folder, as this system writes one.
+        let elsewhere = if cfg!(windows) { "D:/films/night.mp4" } else { "/films/night.mp4" };
         assert_eq!(place(&trusted, Some(elsewhere)), Ok(PathBuf::from(elsewhere)));
         // The assistant: under the same name, in `films` in its working folder.
         let guarded = TrillServer::guarded(runtime.clone(), work.clone());

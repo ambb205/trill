@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn both_formats_are_scanned_and_report_their_failures_together() {
         let dir = TestDir::new();
-        let broken_clap = dir.file("plugins/broken.clap", b"this is not a shared library");
+        let broken_clap = dir.broken_clap("plugins/broken.clap");
         let host = host(&dir);
         assert!(host.scan_failures().iter().any(|failure| failure.path == broken_clap));
         assert_eq!(host.scan_failures().len(), host.clap().scan_failures().len() + host.vst3().scan_failures().len());

@@ -5207,6 +5207,7 @@ name = "trill-study"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "libc",
  "log",
  "ort",
  "parking_lot",

@@ -18,6 +18,10 @@ use trill_study::store::{Source, Stage, StageState, State, Studies, StudyFolder,
 mod common;
 use common::{RATE, program, recording, script};
 
+/// How a process that went down ended, as the sentence says it: Windows
+/// gives an exception's code, a Unix the signal that ended it.
+const ENDED: &str = if cfg!(windows) { "it ended with code 0x" } else { "it was ended by signal " };
+
 /// A new study of a recording made for the test.
 fn study_in(root: &Path) -> StudyFolder {
     let source = root.join("small song.wav");
@@ -182,10 +186,8 @@ fn a_model_that_takes_its_process_down_costs_a_sentence() {
     let folder = study_in(root.path());
     let (outcome, _) = run(&folder, Script { crash_at: Some(Stage::Words), ..script() }, None, None);
     let Outcome::Failed(sentence) = outcome else { panic!("{outcome:?}") };
-    // Windows ends a process that aborts with a code; Unix with a signal, and no code.
-    let how = if cfg!(windows) { "(it ended with code 0x" } else { "(it was ended by signal 6, SIGABRT)" };
     assert!(
-        sentence.starts_with(&format!("the process that studies went down while writing down the words {how}")),
+        sentence.starts_with(&format!("the process that studies went down while writing down the words ({ENDED}")),
         "{sentence}"
     );
     assert!(

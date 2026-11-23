@@ -2,9 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Trill is an open-source digital audio workstation in Rust (GPL-3.0-or-later), developed on Windows; it builds and
-its tests pass on Linux too (`docs/development.md`, "On Linux"), where what is Windows' alone is a `cfg` arm or a
-file of its own, what every Unix shares is under `cfg(unix)`, and what Linux lacks yet is in `docs/status.md`. Three goals
+Trill is an open-source digital audio workstation in Rust (GPL-3.0-or-later), developed on Windows and built and
+tested on macOS (Apple silicon) and Linux (x86-64) too (`docs/development.md`). Three goals
 decide every trade-off: it does not crash or stall, it hosts CLAP and VST3 plugins, and everything it can do is
 reachable over MCP so an AI can write and mix a song. `README.md` is the front page (what Trill is,
 how to build it and how to use it) and stays short; `docs/` describes the features, a page a topic, and
@@ -40,7 +39,7 @@ cargo run -p trill-runtime --example together -- SONG.trill      # two programs 
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build -p trill-meet --release --target x86_64-unknown-linux-musl   # the meeting point as one static file for a Linux server (the `load` example beside it holds many meetings open, to see what that takes)
 sh scripts/friend-bundle.sh                         # a release build gathered into target/friend/Trill to hand to a friend: the programs, the licences, a page of what their computer needs
 sh scripts/release.sh --key FILE --notes NOTES.txt  # a release into target/release-out/<version>: the installer, the archive an installed Trill updates from, the signed announcement (publishes nothing; `--trial KEYFILE` is a build to try the updater out with, never to publish; see docs/development.md)
-cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack and announce (see the example)
+cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack, describe (a build worked out from its archive alone) and announce (one or several builds, signed) (see the example)
 ```
 
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine
@@ -58,6 +57,8 @@ cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an ann
   `a_hundred_and_twenty_eight_voices_of_a_sampled_instrument_cost_less_than_the_time_they_play`, `trill-dsp`
   `eight_notes_of_eight_voices_leave_most_of_a_core`, `trill-mcp`
   `an_agent_arms_a_track_plays_it_and_records_a_take`, `trill-assistant`'s `pipeline`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
+- The compiler is the one `rust-toolchain.toml` names, on every machine: "clippy is clean" is judged on it, and a
+  newer compiler's new lints are not chased until it is raised there, on all three systems at once.
 - Development builds are optimized (`[profile.dev]` in `Cargo.toml`) because unoptimized audio code cannot keep
   up; what only runs while building is not, and debug info is line tables only.
 - Do not rename or move a `target` folder: tests of `trill-assistant` and `trill-plugins` have its path built in.
@@ -920,8 +921,9 @@ on the samples.
 - **The look** comes from `trill-noir`'s theme tokens: near-black surfaces, hairlines, zero corner radius, caps
   micro labels, the signal orange used sparingly, nothing below 10 px. Extend the kit instead of styling in place.
 - **Pictures are not kept.** `render.sh <word>` renders the few pictures that show a change into
-  `target/screenshots` (off-screen, taking no focus; on Linux through X, as a window the window manager leaves
-  alone, `ui/unseen.rs`); look at them and leave them there. Never run it for every
+  `target/screenshots` (off-screen, taking no focus; on Linux and macOS as `ui/unseen.rs` has it: through X as a
+  window the window manager leaves alone, and without a title bar by a program never brought to the front); look at
+  them and leave them there. Never run it for every
   picture as routine. Only the five the README and `docs/` show, in `docs/images`, are tracked (`render.sh readme`, on purpose): four
   of the window and one of the stage, which the film example draws. Films and their stills go under `target/`.
 - **The assistant keeps five rules**, written at the top of `trill-assistant/src/lib.rs`: it never touches
@@ -931,6 +933,12 @@ on the samples.
 - **Nothing of a plugin maker's is in the repository**: no preset file, no part of one, no dump of a state.
   Tests of `trill-plugins/src/vendor` build their own small files in the format and load them into the scripted
   plugins; the ones on installed plugins are `#[ignore]`d (`tests/vendor.rs`). Trill only reads in a maker's folders.
+- **Each system's code is its own.** What only Windows does is under `cfg(windows)`, what only macOS does under
+  `cfg(target_os = "macos")` and what only Linux does under `cfg(target_os = "linux")`, each in arms or files of its own, so that a change for one leaves the other as it
+  was; what every Unix does alike is under `cfg(unix)`. A test that is about one system by its nature (a path as
+  Windows writes it, the code a process ended with) says so where it chooses; it is not left out elsewhere. A
+  macOS temporary folder is reached through a link (`/var` is `/private/var`), so a test that compares a path
+  Trill shows names its files by their real path. What macOS and Linux have not got yet is in `docs/status.md`.
 - **Dependencies** must be GPL-compatible and worth their build time (`cargo build --timings`).
 - **Code is written here.** Nothing is copied from the owner's other projects, with two exceptions: `trill-noir`,
   which carries their design language, and Magpie (their project that takes a recording apart), whose method

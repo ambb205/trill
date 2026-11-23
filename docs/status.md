@@ -3,8 +3,8 @@
 Trill is an early build. Everything the other pages describe works and is held by tests. This page lists what is
 not built yet.
 
-Trill is developed on Windows. It builds and runs on Linux too, where its tests pass, the window draws and a song
-plays through the system's sound; what Linux does not have yet is [below](#linux). macOS has not been run.
+Windows is where Trill is made. macOS on Apple silicon and Linux on x86-64 build, pass the tests and run the
+window, the server and the engine; what each has not got yet is below ([macOS](#macos), [Linux](#linux)).
 
 ## Arrangement and engine
 
@@ -168,6 +168,54 @@ plays through the system's sound; what Linux does not have yet is [below](#linux
 - A plugin that is not installed kept in the song until it is. The sound is made without it.
 - Taking back the deletion of a saved one. It is asked about first, and is then for good.
 
+## macOS
+
+What Windows has and macOS has not, yet. Each is said where it would be used, never a crash.
+
+- The audio threads in the class macOS keeps for audio. The device's own thread is the system's and plays in
+  time (a built-in song of 14 tracks, 30 seconds on a MacBook Pro's speakers: no buffer late); the threads
+  beside it, which a larger song is made on, are ordinary threads, and `keeps_up` says the class was refused.
+- Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
+  `~/Library/Audio/Plug-Ins` and `/Library/Audio/Plug-Ins` are found, scanned and played.
+- A plugin that takes a render down named by its file. The render says that its process went down, at which
+  stage, and the song is as it was.
+- The Trash. A recording that is removed goes into the `removed` folder beside the takes.
+- How much memory the machine has free. No render or study is refused for want of it; a study's own process is
+  measured, and ended when it takes more than it was given. (The room on a disk is asked as on Linux, by a call
+  every Unix has.)
+- A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
+- Where files dragged in from the Finder will land, shown while they are dragged. The window is not told where
+  the pointer is during such a drag; it places what was dropped when the pointer next moves (not yet tried with a
+  real mouse).
+- Paths compared as the disk has them. macOS disks are usually blind to case, and two spellings of one file
+  that differ only in case are taken for two files.
+- An installer, a release and updates. A build of one's own neither looks for a newer Trill nor is replaced.
+- A picture of the window (`--screenshot`) is taken in a window without a title bar, off every screen, by a
+  program that has no Dock icon and never comes to the front.
+
+## Linux
+
+What Windows has and Linux has not, yet. Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64; what runs
+there and how it was checked is in [Building and testing](development.md#on-linux).
+
+- The audio threads in the class Linux keeps for audio. They run at an ordinary thread's priority (a built-in song
+  of 14 tracks, 30 seconds handed to the system's output as silence: no buffer late), so a song that keeps up on an
+  idle machine may fall short on a busy one; `keeps_up` says the class was refused.
+- Plugins installed on Linux tried: CLAP and VST3 are looked for in their usual Linux folders, and none has been
+  loaded. Plugin editors: opening one says that they are not supported on this system yet.
+- Taking an output for Trill alone (exclusive mode). Asked for, it says the device cannot be taken exclusively on
+  this system, and the device is shared.
+- The trash. A recording that is removed goes to the `removed` folder beside the takes.
+- How much memory the machine has free for a render or a probe in a process of its own, and what a thread ran. A
+  study asks the machine, and measures and ends its own process.
+- The assistant's processes ending with Trill when Trill itself is killed. They are one group, stopped together
+  when a turn is stopped or Trill closes, as on Windows; a Windows job also ends them when Trill is killed.
+- A study. The models' runtime is published for Windows alone so far: a study says that the part `runtime` is not
+  published for this system yet.
+- An installer, a release and updates.
+- A picture of the window (`--screenshot`) is taken in a window that is never seen and never given the keyboard
+  where there is an X server (a Wayland desktop has one beside it); without one the window is shown meanwhile.
+
 ## Installing and updating
 
 - A certificate. The installer and the programs are not signed, and Windows says so the first time one is run.
@@ -182,22 +230,3 @@ plays through the system's sound; what Linux does not have yet is [below](#linux
   that release for as long as it runs; a second key can be added to the releases after it.
 - An update between two published releases. The whole of it was tried on the real programs with builds made for
   the trial, served from the same machine; the first that crosses the internet is the one after 0.1.0.
-
-## Linux
-
-Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64. What runs there and how it was checked is in
-[Building and testing](development.md#on-linux). Not yet:
-
-- The audio threads in the class the system keeps for audio. They run at an ordinary thread's priority, so a song
-  that keeps up on an idle machine may fall short on a busy one.
-- Plugins installed on Linux tried: CLAP and VST3 are looked for in their usual Linux folders, and none has been
-  loaded. Their editors are not shown: opening one says "plugin editors are not supported on this platform yet".
-- Taking an output for Trill alone (exclusive mode). Asked for, it says the device cannot be taken exclusively on
-  this system, and the device is shared.
-- The trash. A recording that is removed goes to the `removed` folder beside the takes.
-- What a render or a probe in a process of its own measures of the machine's memory, and of what a thread ran.
-- The assistant's processes ending with Trill when Trill itself is killed. They are one group, stopped together
-  when a turn is stopped or Trill closes, as on Windows; a Windows job also ends them when Trill is killed.
-- A study. The models' runtime is published for Windows alone so far: a study says that the part `runtime` is not
-  published for this system yet.
-- A release, an installer and the updater.

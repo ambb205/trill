@@ -208,6 +208,9 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
     let blocks = 48;
     let hopped = {
         let taken = std::sync::Mutex::new((&mut instance.processor, &mut left, &mut right));
+        // The test's own lock, which on macOS makes the system's mutex the
+        // first time it is taken: that is not the host's, so it is done here.
+        drop(taken.lock().unwrap());
         let take_turns = |mine: usize| {
             allocator_calls(|| {
                 for block in (mine..blocks).step_by(2) {

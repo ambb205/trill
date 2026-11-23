@@ -71,7 +71,7 @@ pub struct Held {
 }
 
 /// What the process `pid` holds. `None` when it is gone, or where a
-/// process cannot be asked.
+/// process cannot be asked (Windows and macOS can).
 pub fn held_by(pid: u32) -> Option<Held> {
     #[cfg(windows)]
     {
@@ -99,7 +99,23 @@ pub fn held_by(pid: u32) -> Option<Held> {
         let now = field("VmRSS:")? + field("VmSwap:").unwrap_or(0);
         Some(Held { now, peak: field("VmHWM:").unwrap_or(0).max(now) })
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // What the system counts against a process (its footprint: what it
+        // wrote to, in memory or compressed), which is what a run is given
+        // room for; and the most it has had at once.
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+        let pid = i32::try_from(pid).ok()?;
+        // SAFETY: the buffer is the structure the flavour asks for, and the
+        // call writes nothing else.
+        let asked = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, info.as_mut_ptr().cast()) };
+        (asked == 0).then(|| {
+            // SAFETY: the call succeeded, so it filled the structure in.
+            let info = unsafe { info.assume_init() };
+            Held { now: info.ri_phys_footprint, peak: info.ri_lifetime_max_phys_footprint.max(info.ri_phys_footprint) }
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
@@ -137,6 +153,14 @@ mod tests {
         assert!(processor < nvidia && nvidia < any, "{processor} {nvidia} {any}");
         assert_eq!(said(3 << 30), "3.0 GB");
         assert_eq!(said(512 << 20), "512 MB");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn this_process_says_what_it_holds() {
+        let own = held_by(std::process::id()).expect("this process is there");
+        assert!(own.now > 0 && own.peak >= own.now, "{own:?}");
+        assert_eq!(held_by(u32::MAX - 7), None);
     }
 
     #[cfg(any(windows, target_os = "linux"))]
