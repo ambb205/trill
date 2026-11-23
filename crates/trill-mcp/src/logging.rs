@@ -13,7 +13,10 @@ impl log::Log for StderrLogger {
         // Dependencies (the GPU and windowing stack especially) are chatty
         // at info and warn about things nobody here can act on.
         let limit = if metadata.target().starts_with(OWN_PREFIX) { log::Level::Info } else { log::Level::Error };
-        metadata.level() <= limit
+        // What each step of a plugin's making took, for whoever measures,
+        // with `TRILL_LOG_MAKING` set.
+        let making = metadata.target() == trill_plugins::making::TARGET && std::env::var_os(MAKING_ENV).is_some();
+        metadata.level() <= limit || making
     }
 
     fn log(&self, record: &log::Record) {
@@ -29,6 +32,10 @@ impl log::Log for StderrLogger {
 /// errors to stderr. Does nothing if a logger is already installed.
 pub fn init_stderr() {
     if log::set_logger(&StderrLogger).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+        let making = std::env::var_os(MAKING_ENV).is_some();
+        log::set_max_level(if making { log::LevelFilter::Debug } else { log::LevelFilter::Info });
     }
 }
+
+/// Set, has what each step of a plugin's making took said in the log.
+const MAKING_ENV: &str = "TRILL_LOG_MAKING";

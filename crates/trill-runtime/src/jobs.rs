@@ -209,6 +209,11 @@ pub fn run_as_job_if_requested() {
     // A study's run is done by the program started a second time too.
     trill_study::helper::run_if_requested();
     if std::env::var_os(JOB_ENV).is_some() {
+        // On macOS the first thread drives the job's plugins, and the job is
+        // done on a thread beside it.
+        #[cfg(target_os = "macos")]
+        trill_plugins::first_thread::lend(|| trill_engine::apart::serve(&make));
+        #[cfg(not(target_os = "macos"))]
         trill_engine::apart::serve(&make)
     }
 }

@@ -346,6 +346,16 @@ before are still there, each new one costs their maker's own work 0.46 to 0.86 s
 3.9 s over the song in place of 1.4 s. They are kept for a quarter of a minute because taking one down young
 takes the program down ([plugins](plugins-and-presets.md)), so that is theirs too.
 
+*On macOS*, where the window draws on the thread plugins are driven from and a plugin is made a step a frame (its
+file loaded beforehand on another thread), the same measurement in the real window, on a song of eight plugins
+(Serum 2, Pianoteq 9, Superior Drummer 3, Hammond B-3X, an amplifier and the Consort guitar, two reverbs) played
+with no device: 1,596 and 1,615 frames in fifteen seconds (106 and 108 a second), and the longest time between two
+frames 613 and 595 ms, which is the longest step: Hammond B-3X activating (602 and 584 ms; 387 to 443 ms where
+the first thread ran no loop, before it was driven from there). The amplifier's file, its longest making there
+(0.8 s), is loaded off the window's thread. In the program without a window, which drives plugins from its first
+thread and does its own work beside it, the `opens` example on the same song: the song there 2 ms after it was
+asked for, the longest look 0 to 2 ms, as before.
+
 *A long song without plugins* was never the plugins' wait and is nearly all recordings. One of 57 tracks and
 183 built-in devices, 36,864 notes in 1,536 clips and eight recordings of four minutes at another rate than the
 device's opened in 1.56 s: 0.02 s for its file of 6 MB, 0.04 s for everything else, and 1.5 s for the

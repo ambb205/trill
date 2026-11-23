@@ -99,7 +99,8 @@ use std::time::Duration;
 use trill_core::device::{CompositeFactory, DeviceFactory};
 use trill_dsp::Builtins;
 use trill_engine::{
-    AudioBackend, AudioConfig, AudioDevices, AudioHost, AudioSetup, Session, SessionError, SharedSession, StreamInfo,
+    AudioBackend, AudioConfig, AudioDevices, AudioHost, AudioSetup, Session, SessionError, SessionLock, SharedSession,
+    StreamInfo,
 };
 use trill_library::{AudioSettings, Library, SaveError, Settings};
 use trill_media::MediaCache;
@@ -377,7 +378,7 @@ impl Runtime {
         });
         session.keep_received_in(Some(received.clone()));
         let live = session.live();
-        let session: SharedSession = Arc::new(Mutex::new(session));
+        let session: SharedSession = Arc::new(SessionLock::new(session));
 
         let midi = match midi_backend {
             None => None,

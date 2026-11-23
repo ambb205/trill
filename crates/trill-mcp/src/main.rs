@@ -90,7 +90,22 @@ fn main() -> anyhow::Result<()> {
     // and songs with plugins are rendered, measured and probed in one.
     trill_plugins::scan::run_as_scanner_if_requested();
     trill_runtime::jobs::run_as_job_if_requested();
+    // On macOS plugins take the first thread for their own: it drives them,
+    // and the server runs beside it.
+    #[cfg(target_os = "macos")]
+    trill_plugins::first_thread::lend(|| match serve() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            1
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    serve()
+}
 
+/// The server, from its options to its end.
+fn serve() -> anyhow::Result<()> {
     if std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V") {
         println!("{}", trill_update::says());
         return Ok(());

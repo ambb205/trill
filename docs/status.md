@@ -172,18 +172,16 @@ window, the server and the engine; what each has not got yet is below ([macOS](#
 
 What Windows has and macOS has not, yet. Each is said where it would be used, never a crash.
 
+- A window that goes on when a plugin hangs. On macOS the window draws on the thread plugins are driven from, so a
+  plugin that never comes back from a call freezes it until the program is ended; the safety copy of unsaved work
+  is still written and offered back at the next start. A step of a plugin's making stands the window still for as
+  long as it takes (0.6 s at the most on a song of eight plugins).
 - Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
   `~/Library/Audio/Plug-Ins` and `/Library/Audio/Plug-Ins` are found, scanned and played.
-- Plugins whose framework posts work to the process's main thread (JUCE's do), played live by `trill-mcp`, which
-  runs no loop there: such work waits for good. One amplifier tried (Archetype Tim Henson X) is silent until it
-  has run; in the window, whose main thread runs one, and in a render, which a plugin is told is offline, it
-  sounds.
 - Joining a device's audio workgroup. The threads that make a song's sound have the class macOS keeps for audio,
   which on what was measured is enough; a song that keeps more threads busy may want the workgroup as well.
 - A plugin that takes a render down named by its file. The render says that its process went down, at which
   stage, and the song is as it was.
-- The room on a disk, tried on a Mac. It is asked as on Linux, by a call every Unix has, and that was run on Linux
-  alone.
 - A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
 - Files dragged in from the Finder, tried with a real mouse. Where they will land is shown while they are dragged,
   from where the system says the pointer is, as on Windows.

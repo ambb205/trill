@@ -34,6 +34,12 @@ impl Steps {
         Self { waited, began: now, last: now, taken: Vec::with_capacity(8) }
     }
 
+    /// A step begins now, after the plugin thread did other things since
+    /// the step before: what passed meanwhile is not the next step's.
+    pub(crate) fn resume(&mut self) {
+        self.last = Instant::now();
+    }
+
     /// The step `step` is done: what has passed since the one before was
     /// its time.
     pub(crate) fn done(&mut self, step: &'static str) {

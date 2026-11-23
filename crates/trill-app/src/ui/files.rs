@@ -698,7 +698,6 @@ fn export_summary(report: &RenderReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
     use std::sync::Arc;
     use trill_core::device::CompositeFactory;
     use trill_dsp::BuiltinFactory;
@@ -762,7 +761,9 @@ mod tests {
 
     fn shared_session() -> SharedSession {
         let factory = Arc::new(CompositeFactory::new(vec![Box::new(BuiltinFactory)]));
-        Arc::new(Mutex::new(Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).unwrap()))
+        Arc::new(trill_engine::SessionLock::new(
+            Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).unwrap(),
+        ))
     }
 
     /// A scratch folder for one test, removed when dropped.

@@ -300,7 +300,8 @@ impl Watching {
         // What the views are handed in place of the session: empty, silent,
         // and nobody else's. It starts no audio device.
         let sandbox = Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: 48_000 });
-        let sandbox = Arc::new(parking_lot::Mutex::new(sandbox.expect("a session without an audio device starts")));
+        let sandbox =
+            Arc::new(trill_engine::SessionLock::new(sandbox.expect("a session without an audio device starts")));
         let snapshot = Snapshot::of_song(trill_core::Project::new(""), 0, &[], &BuiltinFactory);
         let time = replay.length() * start.at.clamp(0.0, 1.0);
         Self {

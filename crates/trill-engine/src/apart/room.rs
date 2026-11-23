@@ -59,6 +59,13 @@ fn macos_memory() -> Option<(u64, u64)> {
         /// Declared here: `libc` has it only under a name it is retiring.
         fn mach_host_self() -> libc::mach_port_t;
     }
+    /// The host's port, taken once: each `mach_host_self` is a send right
+    /// that would have to be given back.
+    fn host() -> libc::mach_port_t {
+        static HOST: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
+        // SAFETY: names this machine's host; kept for the life of the process.
+        *HOST.get_or_init(|| unsafe { mach_host_self() })
+    }
     let mut total = 0u64;
     let mut size = size_of::<u64>();
     // SAFETY: the name is a C string, the value a `u64` that says its size.
@@ -72,8 +79,7 @@ fn macos_memory() -> Option<(u64, u64)> {
     let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
     let mut count = libc::HOST_VM_INFO64_COUNT;
     // SAFETY: the structure and its count are the ones the flavour is asked with.
-    let asked =
-        unsafe { libc::host_statistics64(mach_host_self(), libc::HOST_VM_INFO64, (&raw mut stats).cast(), &mut count) };
+    let asked = unsafe { libc::host_statistics64(host(), libc::HOST_VM_INFO64, (&raw mut stats).cast(), &mut count) };
     if asked != libc::KERN_SUCCESS {
         return None;
     }

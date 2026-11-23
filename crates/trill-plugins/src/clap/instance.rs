@@ -115,6 +115,38 @@ struct Activated {
     latency: u32,
 }
 
+/// A plugin being made: what its making has come to between two steps
+/// ([`ClapThread::advance`]). It lives on the plugin thread.
+pub(crate) struct Making {
+    request: CreateRequest,
+    stage: Stage,
+    made: Option<Made>,
+}
+
+/// What there is of a plugin once its instance is made.
+struct Made {
+    plugin: PluginInstance<TrillHost>,
+    has_editor: bool,
+    specs: Vec<ParamSpec>,
+    initial_values: Vec<(usize, f64)>,
+    ports: Option<PortLayout>,
+    notes: Option<NotePort>,
+}
+
+/// The step of a making that comes after the instance is made.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Stage {
+    State,
+    Params,
+    Activate,
+}
+
+impl Making {
+    pub(crate) fn new(request: CreateRequest) -> Self {
+        Self { request, stage: Stage::State, made: None }
+    }
+}
+
 /// A freshly created, activated instance, ready for the audio thread.
 pub(crate) struct Created {
     pub id: InstanceId,
@@ -297,6 +329,8 @@ pub(crate) struct ClapThread {
     /// The plugins whose unused abilities have been logged, so that each
     /// is listed once and not for every instance.
     described: HashSet<String>,
+    /// Plugins being made a step at a time, between two of their steps.
+    makings: HashMap<u64, Making>,
 }
 
 /// How this host introduces itself to plugins, and to their preset
@@ -315,6 +349,7 @@ impl ThreadState for ClapThread {
             next_id: 1,
             due_timers: Vec::new(),
             described: HashSet::new(),
+            makings: HashMap::new(),
         }
     }
 
@@ -368,20 +403,101 @@ impl ClapThread {
         Ok((path, records))
     }
 
-    /// Loads, instantiates and activates a plugin, restoring `state` and
-    /// then applying `values` on top of it.
+    /// Loads, instantiates and activates a plugin: all of
+    /// [`Self::advance`]'s steps, one after another.
     pub(crate) fn create(&mut self, request: CreateRequest) -> Result<Created, String> {
-        let entry = self.entry(&request.path)?;
-        let plugin_id = CString::new(request.plugin_id.as_str()).map_err(|_| "the plugin id contains a NUL byte")?;
-        let mut plugin = PluginInstance::<TrillHost>::new(
-            |_| HostShared::new(&request.plugin_id),
-            |shared| HostMainThread::new(shared),
-            &entry,
-            &plugin_id,
-            &self.host_info,
-        )
-        .map_err(|error| format!("cannot instantiate the plugin: {error}"))?;
+        let mut making = Making::new(request);
+        loop {
+            if let Some(created) = self.advance(&mut making)? {
+                return Ok(created);
+            }
+        }
+    }
 
+    /// Takes `making` one step further: its file and the instance, its
+    /// state, its parameters and ports, activating. The made plugin comes
+    /// with the last step. Between two steps the thread may do anything
+    /// else (a window draws), and `making` waits as it is.
+    pub(crate) fn advance(&mut self, making: &mut Making) -> Result<Option<Created>, String> {
+        let Some(made) = making.made.as_mut() else {
+            let request = &making.request;
+            let entry = self.entry(&request.path)?;
+            let plugin_id =
+                CString::new(request.plugin_id.as_str()).map_err(|_| "the plugin id contains a NUL byte")?;
+            let mut plugin = PluginInstance::<TrillHost>::new(
+                |_| HostShared::new(&request.plugin_id),
+                |shared| HostMainThread::new(shared),
+                &entry,
+                &plugin_id,
+                &self.host_info,
+            )
+            .map_err(|error| format!("cannot instantiate the plugin: {error}"))?;
+            let handle = plugin.plugin_handle();
+            let has_editor = handle.get_extension::<PluginGui>().is_some_and(|gui| gui::is_embeddable(gui, &handle));
+            if self.described.insert(request.plugin_id.clone()) {
+                log_unused_extensions(&handle, &request.plugin_id);
+            }
+            making.made = Some(Made {
+                plugin,
+                has_editor,
+                specs: Vec::new(),
+                initial_values: Vec::new(),
+                ports: None,
+                notes: None,
+            });
+            return Ok(None);
+        };
+        let request = &making.request;
+        let handle = made.plugin.plugin_handle();
+        let state: Option<PluginState> = handle.get_extension();
+        let params: Option<PluginParams> = handle.get_extension();
+        match making.stage {
+            Stage::State => {
+                // An empty state is what `save_state` never returns; treat it as
+                // "nothing saved" rather than handing the plugin zero bytes.
+                if let Some(bytes) = request.state.as_deref().filter(|bytes| !bytes.is_empty()) {
+                    match state {
+                        Some(state) => state
+                            .load(&handle, &mut Cursor::new(bytes))
+                            .map_err(|_| "the plugin rejected its saved state")?,
+                        None => {
+                            log::warn!("[{}] has saved state but cannot load state; ignoring it", request.plugin_id)
+                        }
+                    }
+                }
+                making.stage = Stage::Params;
+                Ok(None)
+            }
+            Stage::Params => {
+                // Said before the plugin is activated, which is when a sampler
+                // decides how it will get at its samples.
+                if request.offline
+                    && let Some(render) = handle.get_extension::<PluginRender>()
+                    && render.set(&handle, RenderMode::Offline).is_err()
+                {
+                    log::warn!(
+                        "[{}] would not be set to render offline; it runs as if it were played",
+                        request.plugin_id
+                    );
+                }
+                made.specs = params.map(|params| read_params(params, &handle, &request.plugin_id)).unwrap_or_default();
+                made.initial_values = resolve_values(&made.specs, &request.values);
+                made.ports = Some(read_ports(&handle));
+                made.notes = read_note_port(&handle);
+                making.stage = Stage::Activate;
+                Ok(None)
+            }
+            Stage::Activate => {
+                let Some(made) = making.made.take() else { return Err("the plugin was not made".to_string()) };
+                self.activate(&making.request, made).map(Some)
+            }
+        }
+    }
+
+    /// The last step of a making: the plugin activated, and what the host
+    /// keeps of it.
+    fn activate(&mut self, request: &CreateRequest, made: Made) -> Result<Created, String> {
+        let Made { mut plugin, has_editor, mut specs, initial_values, ports, notes } = made;
         let handle = plugin.plugin_handle();
         let state: Option<PluginState> = handle.get_extension();
         let params: Option<PluginParams> = handle.get_extension();
@@ -389,36 +505,6 @@ impl ClapThread {
         let gui: Option<PluginGui> = handle.get_extension();
         let timer: Option<PluginTimer> = handle.get_extension();
         let preset_load: Option<PluginPresetLoad> = handle.get_extension();
-        let has_editor = gui.is_some_and(|gui| gui::is_embeddable(gui, &handle));
-        if self.described.insert(request.plugin_id.clone()) {
-            log_unused_extensions(&handle, &request.plugin_id);
-        }
-
-        // An empty state is what `save_state` never returns; treat it as
-        // "nothing saved" rather than handing the plugin zero bytes.
-        if let Some(bytes) = request.state.as_deref().filter(|bytes| !bytes.is_empty()) {
-            match state {
-                Some(state) => {
-                    state.load(&handle, &mut Cursor::new(bytes)).map_err(|_| "the plugin rejected its saved state")?
-                }
-                None => log::warn!("[{}] has saved state but cannot load state; ignoring it", request.plugin_id),
-            }
-        }
-
-        // Said before the plugin is activated, which is when a sampler
-        // decides how it will get at its samples.
-        if request.offline
-            && let Some(render) = handle.get_extension::<PluginRender>()
-            && render.set(&handle, RenderMode::Offline).is_err()
-        {
-            log::warn!("[{}] would not be set to render offline; it runs as if it were played", request.plugin_id);
-        }
-
-        let mut specs = params.map(|params| read_params(params, &handle, &request.plugin_id)).unwrap_or_default();
-        let initial_values = resolve_values(&specs, &request.values);
-        let ports = read_ports(&handle);
-        let notes = read_note_port(&handle);
-
         let mut activated = activate(&mut plugin, latency, request.sample_rate, request.max_block)?;
         if let Some(params) = params {
             // Only now are the values settled: some plugins fill in their
@@ -458,8 +544,8 @@ impl ClapThread {
         let editor_status = EditorStatus::new(has_editor);
         let instance = Instance {
             plugin,
-            plugin_id: request.plugin_id,
-            name: request.name,
+            plugin_id: request.plugin_id.clone(),
+            name: request.name.clone(),
             state,
             params,
             latency,
@@ -483,11 +569,27 @@ impl ClapThread {
             latency: activated.latency,
             params: specs,
             initial_values,
-            ports,
+            ports: ports.unwrap_or_default(),
             notes,
             feedback,
             editor: editor_status,
         })
+    }
+
+    /// Keeps a making between two of its steps.
+    pub(crate) fn park(&mut self, token: u64, making: Making) {
+        self.makings.insert(token, making);
+    }
+
+    /// A making that was kept, or `None` if there is none of that token.
+    pub(crate) fn unpark(&mut self, token: u64) -> Option<Making> {
+        self.makings.remove(&token)
+    }
+
+    /// How many makings are kept between two of their steps.
+    #[cfg(test)]
+    pub(crate) fn makings_kept(&self) -> usize {
+        self.makings.len()
     }
 
     /// Closes the editor of an instance, deactivates and destroys it. Its
