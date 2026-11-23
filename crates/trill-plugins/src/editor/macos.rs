@@ -48,6 +48,22 @@ pub(crate) const TELLS_SCALE: bool = false;
 /// tests they are not: the windows are real, and are made, resized and
 /// closed like any other, but nobody running the tests sees one.
 const SHOWN: bool = !cfg!(test);
+/// Whether editor windows are kept out of sight: for a program that takes
+/// their pictures ([`keep_out_of_sight`]).
+static OUT_OF_SIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Keeps every editor window of this process out of sight from here on, as
+/// a picture of the main window is: never put on screen, never given the
+/// keyboard, and the program never brought to the front or given a Dock
+/// icon. A picture of one is asked of its views ([`Window::capture`]).
+pub(crate) fn keep_out_of_sight() {
+    OUT_OF_SIGHT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where a window kept out of sight is, in points: further down and to the
+/// left of the main screen than any arrangement of screens reaches.
+const OFF_EVERY_SCREEN: f64 = -50_000.0;
+
 /// What a window is made with, before its view has said what it wants.
 const PROVISIONAL_SIZE: f64 = 320.0;
 
@@ -207,13 +223,23 @@ impl Window {
         // is made, without an icon in the Dock or a menu bar of its own.
         let had_one = crate::main_thread::has_application();
         let app = NSApplication::sharedApplication(mtm);
-        if !had_one {
+        let out_of_sight = OUT_OF_SIGHT.load(std::sync::atomic::Ordering::Relaxed);
+        if out_of_sight {
+            app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        } else if !had_one {
             app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         }
         let shared =
             Rc::new(Shared { window: RefCell::new(None), events: Cell::default(), resizing: Cell::new(0), constrain });
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PROVISIONAL_SIZE, PROVISIONAL_SIZE));
-        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
+        // A window with a title bar is put back on a screen by AppKit; one kept
+        // out of sight has none (its content is the same), and is placed off
+        // every screen, so that a plugin that puts it in front shows nothing.
+        let style = if out_of_sight {
+            NSWindowStyleMask::Borderless
+        } else {
+            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable
+        };
         // SAFETY: a window made on the first thread, which closing does not
         // free (the host holds it until it is dropped).
         let window = unsafe {
@@ -233,6 +259,7 @@ impl Window {
         let delegate = Delegate::new(mtm, shared.clone());
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         match position.zip(primary_height(mtm)).filter(|((x, y), _)| is_on_a_screen(mtm, *x, *y)) {
+            _ if out_of_sight => window.setFrameOrigin(NSPoint::new(OFF_EVERY_SCREEN, OFF_EVERY_SCREEN)),
             Some(((x, y), top)) => window.setFrameTopLeftPoint(NSPoint::new(f64::from(x), top - f64::from(y))),
             None => window.center(),
         }
@@ -275,7 +302,7 @@ impl Window {
     /// takes the keyboard only with `activate`. Shown again, a window that
     /// is open comes to the front, or back from the Dock.
     pub(crate) fn show(&self, activate: bool) {
-        if !SHOWN {
+        if !SHOWN || OUT_OF_SIGHT.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         let Some(window) = self.shared.window() else { return };

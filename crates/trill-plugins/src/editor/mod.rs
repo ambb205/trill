@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::device::{EditorImage, EditorOptions};
 #[cfg(all(test, any(windows, target_os = "macos")))]
 pub(crate) use window::simulate;
-pub(crate) use window::{SUPPORTED, TELLS_SCALE, Window};
+pub(crate) use window::{SUPPORTED, TELLS_SCALE, Window, keep_out_of_sight};
 
 /// How long a plugin may take to open or close its editor before the
 /// caller stops waiting. Generous: an editor may load its graphics, or its

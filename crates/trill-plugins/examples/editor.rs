@@ -280,6 +280,10 @@ fn run(options: &Options) -> Result<ExitCode, String> {
         position: options.position,
         activate: options.activate,
     };
+    // A picture is of a window nobody sees, where the system allows it.
+    if options.screenshot.is_some() {
+        trill_plugins::keep_editors_out_of_sight();
+    }
     let opening = Instant::now();
     let opened = controller.open_editor(&editor);
     println!("open: {opened:?} after {:.0?}; the editor is open: {}", opening.elapsed(), controller.is_editor_open());
@@ -420,7 +424,28 @@ fn run(options: &Options) -> Result<ExitCode, String> {
     Ok(outcome)
 }
 
+/// On macOS plugins and their editors are driven from the first thread,
+/// which the program lends them; its own work runs beside it.
+#[cfg(target_os = "macos")]
+fn main() {
+    trill_plugins::first_thread::lend(|| {
+        let code = start();
+        if code == ExitCode::SUCCESS { 0 } else { code_of(code) }
+    });
+}
+
+/// The number an `ExitCode` stands for, which it does not say.
+#[cfg(target_os = "macos")]
+fn code_of(code: ExitCode) -> i32 {
+    [1u8, 2, 3, 4, 5].into_iter().find(|number| ExitCode::from(*number) == code).map_or(1, i32::from)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn main() -> ExitCode {
+    start()
+}
+
+fn start() -> ExitCode {
     let options = match parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(message) => {
@@ -752,9 +777,112 @@ mod platform {
     }
 }
 
-/// Editors are hosted on Windows only so far; elsewhere the program gets
-/// as far as the host telling it so.
-#[cfg(not(windows))]
+/// On macOS the editor's window is AppKit's, on the first thread, which this
+/// program lends to the plugins (`main`); what is asked of windows here is
+/// asked there. A picture is taken of a window nobody sees
+/// (`trill_plugins::keep_editors_out_of_sight`), and nothing is ever read off
+/// the screen.
+#[cfg(target_os = "macos")]
+mod platform {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use std::time::Duration;
+    use trill_core::device::EditorImage;
+    use trill_plugins::first_thread::on_the_plugin_thread;
+
+    const ASK: Duration = Duration::from_secs(10);
+
+    pub fn be_dpi_aware() {}
+
+    pub struct Owner;
+
+    impl Owner {
+        pub fn create() -> Self {
+            Self
+        }
+
+        pub fn handle(&self) -> isize {
+            0
+        }
+
+        pub fn pump(&self) {}
+    }
+
+    pub struct Stray {
+        pub description: String,
+    }
+
+    /// The windows of this program on the first thread, with where they are.
+    fn windows() -> Vec<(String, String, bool)> {
+        on_the_plugin_thread(ASK, || {
+            let Some(mtm) = MainThreadMarker::new() else { return Vec::new() };
+            NSApplication::sharedApplication(mtm)
+                .windows()
+                .iter()
+                .filter(|window| window.isVisible() || window.delegate().is_some())
+                .map(|window| {
+                    let frame = window.frame();
+                    // Whether any of it is on a screen anybody could see.
+                    let seen = window.isVisible()
+                        && objc2_app_kit::NSScreen::screens(mtm).iter().any(|screen| {
+                            let on = screen.frame();
+                            frame.origin.x < on.origin.x + on.size.width
+                                && on.origin.x < frame.origin.x + frame.size.width
+                                && frame.origin.y < on.origin.y + on.size.height
+                                && on.origin.y < frame.origin.y + frame.size.height
+                        });
+                    let content = window.contentRectForFrameRect(frame);
+                    let place = format!(
+                        "at {:.0},{:.0} size {:.0}x{:.0} (inside its frame {:.0}x{:.0}){}",
+                        frame.origin.x,
+                        frame.origin.y,
+                        frame.size.width,
+                        frame.size.height,
+                        content.size.width,
+                        content.size.height,
+                        match (window.isVisible(), seen) {
+                            (_, true) => "",
+                            (true, false) => ", ordered in off every screen",
+                            (false, _) => ", not on screen",
+                        }
+                    );
+                    (window.title().to_string(), place, seen)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// The windows that are on screen, other than the editor: a plugin's own.
+    pub fn stray_windows(editor: &str) -> Vec<Stray> {
+        windows()
+            .into_iter()
+            .filter(|(title, _, visible)| *visible && title != editor)
+            .map(|(title, place, _)| Stray { description: format!("'{title}' {place}") })
+            .collect()
+    }
+
+    /// A plugin's own window is not pictured: that would be reading the
+    /// screen, which takes the user's leave on macOS.
+    pub fn capture(_stray: &Stray) -> Option<EditorImage> {
+        None
+    }
+
+    /// Nothing is kept in front: the picture is asked of the views.
+    pub fn keep_in_front(_title: &str) {}
+
+    pub fn describe(title: &str) -> Option<String> {
+        windows().into_iter().find(|(named, _, _)| named == title).map(|(_, place, _)| place)
+    }
+
+    pub fn drag(_title: &str, _from: (i32, i32), _to: (i32, i32)) -> String {
+        "not done on macOS: only the system's own events reach a view there".to_string()
+    }
+}
+
+/// Editors are hosted on Windows and macOS so far; elsewhere the program
+/// gets as far as the host telling it so.
+#[cfg(not(any(windows, target_os = "macos")))]
 mod platform {
     use trill_core::device::EditorImage;
 

@@ -92,3 +92,13 @@ pub use presets::file::file_of as preset_file_of;
 pub use scan::{Known, PluginRecord, ScanFailure, ScanMode, Scanner};
 pub use vendor::{VendorPlaces, describe_state, split_state};
 pub use vst3::{VST3_SCHEME, Vst3Config, Vst3Factory};
+
+/// Keeps the windows of plugin editors this process opens from here on out
+/// of sight: for a program that takes pictures of them. On macOS they are
+/// never put on screen nor given the keyboard, and the program is never
+/// brought to the front (a picture is asked of the views, and nothing is
+/// read off the screen, which takes the user's leave there). Elsewhere
+/// nothing changes.
+pub fn keep_editors_out_of_sight() {
+    editor::keep_out_of_sight();
+}
