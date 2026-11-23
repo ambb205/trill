@@ -44,13 +44,15 @@ Trill is an early build and has only been run on Windows. [Status](docs/status.m
 
 ## Getting started
 
-You need:
+Trill needs 64-bit Windows. It is developed on Windows 11; macOS and Linux have not been run.
 
-- 64-bit Windows. It is developed on Windows 11; macOS and Linux have not been run.
-- [Rust](https://rustup.rs) 1.90 or newer with the MSVC toolchain, which needs the "Desktop development with C++"
-  workload of the Visual Studio Build Tools.
+**Install it.** Download `Trill-<version>-setup.exe` from the
+[latest release](https://github.com/ambb205/trill/releases/latest) and run it. It installs for you alone, asks for
+no administrator, and an installed Trill says when a newer version is out. The build is not signed yet, so Windows
+asks before it runs the installer. ([Installing and updating](docs/installing-and-updating.md))
 
-Build and run from the repository:
+**Or build it.** You need [Rust](https://rustup.rs) 1.90 or newer with the MSVC toolchain, which needs the
+"Desktop development with C++" workload of the Visual Studio Build Tools. Then, from the repository:
 
 ```sh
 git clone https://github.com/ambb205/trill.git
@@ -96,7 +98,8 @@ and undo them like your own. Any MCP client can connect; with Claude Code:
 claude mcp add --transport http trill http://127.0.0.1:7777/mcp
 ```
 
-Trill also runs without a window, started by the MCP client over stdio:
+Trill also runs without a window, started by the MCP client over stdio. An installed Trill has that program
+beside the window's, as `%LOCALAPPDATA%\Programs\Trill\trill-mcp.exe`; from the repository:
 
 ```sh
 cargo build --release -p trill-mcp

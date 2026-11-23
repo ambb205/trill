@@ -160,3 +160,24 @@ Only Windows has been run so far.
   have met through it over the internet, with plugins on one side only, a restart of the server and one let go
   ([what it costs](working-together.md#what-it-costs)); both were on one computer behind one router. Sharing to a
   network has not been run once, because it asks the firewall a question that is its user's to answer.
+
+## Sounds of more than one device
+
+- What is in front of the instrument.
+- A plugin that is not installed kept in the song until it is. The sound is made without it.
+- Taking back the deletion of a saved one. It is asked about first, and is then for good.
+
+## Installing and updating
+
+- A certificate. The installer and the programs are not signed, and Windows says so the first time one is run.
+- Anything but Windows on x86-64. A release has a build for each kind of machine it names, and names one.
+- Starting again from the window. A newer Trill that was fetched goes in at the next start; the window does not
+  close and start itself, and says to close every Trill.
+- `trill-mcp` putting a newer Trill in place. It leaves that to the window's next start, and while a client keeps
+  it running nothing goes in.
+- Fetching only what changed. An update is the whole build.
+- Going back to an older Trill from the window. The older version's installer does that.
+- Taking a key out of trust in the Trills that are installed. A key that was built into a release is trusted by
+  that release for as long as it runs; a second key can be added to the releases after it.
+- An update between two published releases. The whole of it was tried on the real programs with builds made for
+  the trial, served from the same machine; the first that crosses the internet is the one after 0.1.0.

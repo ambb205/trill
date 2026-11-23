@@ -113,7 +113,7 @@ What an installed Trill does with them is in [Installing and updating](installin
   file is there every one of them hears of the release. A release without it is one nobody is told of.
 
 **Trying the updater out** takes no release and no network. `sh scripts/release.sh --trial KEYFILE` builds a
-Trill that trusts a key made for the trial beside its makers' (none yet), says the version `--trial-version`
+Trill that trusts a key made for the trial beside its makers', says the version `--trial-version`
 gives, looks where `TRILL_UPDATE_ADDRESS` says when it runs, takes a build from an address on this machine, and is
 installed as "Trill trial" under an id of its own, never as the Trill a machine really has. Make one, install it
 into a folder under `target`, make a second with a higher `--trial-version`, serve its folder on the loopback

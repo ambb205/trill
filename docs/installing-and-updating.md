@@ -6,7 +6,8 @@ with them, and nothing they need has to be installed first.
 
 ## Installing
 
-A release comes as two files, and either gives you the same Trill:
+Releases are on [GitHub](https://github.com/ambb205/trill/releases). Each comes as two files, and either gives
+you the same Trill:
 
 - **`Trill-<version>-setup.exe`**, the installer. It installs for you alone, into your own folder
   (`%LOCALAPPDATA%\Programs\Trill`), and asks for no administrator's word. It adds Trill to the Start menu and, if you

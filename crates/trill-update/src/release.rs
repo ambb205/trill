@@ -30,10 +30,13 @@ const KEY_FILE: &str = "trill-release-key:";
 /// in hexadecimal. A new one goes at the end; one that is taken out is
 /// trusted by the builds that were made with it for as long as they run.
 ///
-/// None yet: the first is written here when the first release is made
-/// (`cargo run -p trill-update --example release -- key FILE`, which says
-/// the line to add). A build that knows no key takes no announcement.
-const KEYS: &[&str] = &[];
+/// One is made with `cargo run -p trill-update --example release -- key
+/// FILE`, which says the line to add. A build that knows no key takes no
+/// announcement.
+const KEYS: &[&str] = &[
+    // The key Trill's releases are announced under since 0.1.0 (2026-11-23).
+    "80bd0ff5ff7ac7b933b48f6d4869569605a558538e8082bd6b46b6ca43f0cff3",
+];
 
 /// The kind of machine this build runs on, as an announcement names it.
 pub fn runs_on() -> String {
