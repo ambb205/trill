@@ -265,6 +265,9 @@ impl Place {
             let instead = if cfg!(target_os = "macos") {
                 "move Trill.app into your Applications folder (or another folder of yours) and start it from \
                  there, or put the new version in its place by hand"
+            } else if cfg!(target_os = "linux") {
+                // Linux has no installer: the archive is unpacked into a folder of one's own.
+                "unpack the new version into a folder of yours and start it from there"
             } else {
                 "run the installer of the new version instead"
             };

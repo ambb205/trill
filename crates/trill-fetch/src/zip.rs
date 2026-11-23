@@ -268,10 +268,19 @@ pub fn unpack(
 /// A zip archive of `members` (name, bytes, deflated), as any tool writes
 /// one: for tests, here and of whoever hands this crate a list of its own.
 pub fn archive_of(members: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    let members: Vec<(&str, &[u8], bool, Option<u32>)> =
+        members.iter().map(|&(name, bytes, deflated)| (name, bytes, deflated, None)).collect();
+    archive_with_modes(&members)
+}
+
+/// The same, where each member may say the Unix mode of its file (`0o755`
+/// for a program), as a Unix tool writes it: for whoever unpacks the archive
+/// with a tool of their own. [`unpack`] never reads it.
+pub fn archive_with_modes(members: &[(&str, &[u8], bool, Option<u32>)]) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::DeflateEncoder;
     let (mut out, mut listing) = (Vec::new(), Vec::new());
-    for (name, bytes, deflated) in members {
+    for (name, bytes, deflated, mode) in members {
         let mut crc = Crc::new();
         crc.update(bytes);
         let packed = if *deflated {
@@ -296,9 +305,13 @@ pub fn archive_of(members: &[(&str, &[u8], bool)]) -> Vec<u8> {
         out.extend([0u8; 2]);
         out.extend(name.as_bytes());
         out.extend(&packed);
-        listing.extend([0x50, 0x4b, 0x01, 0x02, 20, 0, 20, 0, 0, 0]);
+        // Made by Unix (3) where a mode is said, so that a tool takes the
+        // attributes for a file's mode: a plain file with it.
+        let made_by: u8 = if mode.is_some() { 3 } else { 0 };
+        listing.extend([0x50, 0x4b, 0x01, 0x02, 20, made_by, 20, 0, 0, 0]);
         common(&mut listing);
-        listing.extend([0u8; 12]);
+        listing.extend([0u8; 8]);
+        listing.extend(mode.map_or(0, |mode| (0o100000 | (mode & 0o777)) << 16).to_le_bytes());
         listing.extend(offset.to_le_bytes());
         listing.extend(name.as_bytes());
     }
@@ -400,6 +413,36 @@ mod tests {
         assert!(!folder.path().join("escaped.txt").exists());
         assert_eq!(below(Path::new("f"), "a/b.wav"), Some(Path::new("f").join("a").join("b.wav")));
         assert_eq!(below(Path::new("f"), ""), None);
+    }
+
+    #[test]
+    fn a_mode_is_said_for_a_tool_of_someone_elses_and_never_taken_by_unpacking() {
+        // Without modes it is the archive it always was.
+        let plain = archive_of(&[("a.txt", b"text", true)]);
+        assert_eq!(plain, archive_with_modes(&[("a.txt", b"text", true, None)]));
+        let said = archive_with_modes(&[("trill", b"#!/bin/sh\n", true, Some(0o755)), ("a.txt", b"text", true, None)]);
+        // Each member's entry in the listing at the end: who made it, and its attributes.
+        let entries: Vec<usize> =
+            (0..said.len() - 4).filter(|&at| said[at..at + 4] == [0x50, 0x4b, 0x01, 0x02]).collect();
+        assert_eq!(entries.len(), 2);
+        let made_by = |at: usize| said[at + 5];
+        let attributes = |at: usize| u32::from_le_bytes(said[at + 38..at + 42].try_into().unwrap());
+        assert_eq!((made_by(entries[0]), attributes(entries[0]) >> 16), (3, 0o100755), "a Unix file, 0755");
+        assert_eq!((made_by(entries[1]), attributes(entries[1])), (0, 0), "a member that says nothing");
+
+        // Unpacking reads none of it: what it writes is a plain file, whatever the archive says.
+        let folder = tempfile::tempdir().unwrap();
+        let archive = folder.path().join("said.zip");
+        std::fs::write(&archive, &said).unwrap();
+        let out = folder.path().join("out");
+        unpack(&archive, &out, &all, &quiet(), &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read(out.join("trill")).unwrap(), b"#!/bin/sh\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(out.join("trill")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0, "no file is made a program by what an archive says: {mode:o}");
+        }
     }
 
     #[test]

@@ -186,6 +186,42 @@ publishes a version whose window does not come up and sees the one before put ba
 pictures, off every screen and out of the Dock, and it ends by deleting the bundle and having Launch Services forget
 it.
 
+### On Linux
+
+Trill for Linux on x86-64 is made on such a machine, by a script of its own, and announced with the other systems'
+builds by the machine that has the key:
+
+```sh
+sh scripts/release-linux.sh                       # into target/release-out/<version>
+sh scripts/update-trial-linux.sh                  # the updater tried out on the real programs (see below)
+```
+
+It builds `trill` and `trill-mcp` as a release in `target/dist`, with the commit and with the folders of this
+machine written as names, and refuses a program that asks for a library when it starts that a Linux desktop need
+not have (allowed: the C library and its parts, and ALSA's `libasound.so.2`; the window's X, Wayland and graphics
+libraries are looked for when it runs), does not say that it is this version at this commit, or still names this
+machine's home or the repository. It writes:
+
+- **`trill-<version>-linux-x86_64.zip`**: the two programs, `READ ME.txt` and the licences, below no folder. It is
+  what people unpack (into a folder of their own) and what an unpacked Trill fetches to update itself. Packed on
+  Unix, it says each file's mode, so that `unzip` and a desktop's tools keep the programs programs; Trill's own
+  unpacking never reads that, and makes runnable only its own two programs, by name, once they were held to the
+  announcement.
+- **`build-linux-x86_64.json`**: what that archive is (`describe`), unsigned, for the machine with the key to hold
+  against what it works out itself.
+- **`needs.txt`**: the newest version of the C library a program asks for (`objdump -T`, leaving out the symbols
+  that are only taken where they are there). A build needs a glibc at least as new as the one it was built against:
+  on Ubuntu 26.04 that is 2.43, because libm's float functions took new versions there.
+
+The script signs no announcement and publishes nothing; the release key is never on this machine.
+
+**Trying the updater out on Linux**: `sh scripts/update-trial-linux.sh` makes two trial builds (`--trial`), unpacks the
+first under `target/trial-linux` with `unzip`, serves the second on the loopback, has the unpacked `trill-mcp` look
+and fetch, starts the window, which puts the newer one in and comes up as it (its programs runnable, nothing else
+made one), then publishes a version whose window does not come up and sees the one before put back. Its windows
+take their own pictures through X, off every screen, and it ends by deleting the folder. It needs an X server (a
+Wayland desktop has one), `unzip`, `curl` and Python 3.
+
 ## Architecture
 
 ```

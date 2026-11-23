@@ -41,6 +41,8 @@ sh scripts/friend-bundle.sh                         # a release build gathered i
 sh scripts/release.sh --key FILE --notes NOTES.txt  # a release into target/release-out/<version>: the installer, the archive an installed Trill updates from, the signed announcement (publishes nothing; `--trial KEYFILE` is a build to try the updater out with, never to publish; see docs/development.md)
 sh scripts/release-macos.sh                         # the release for Macs with Apple silicon, on such a Mac: Trill.app signed ad hoc, the archive an installed Trill updates from and its description for the machine that has the key (signs nothing; `--trial KEYFILE` as above)
 sh scripts/update-trial-macos.sh                    # the updater tried out on the real programs on macOS, under target/: installed, updated at a start, a version that does not come up put back
+sh scripts/release-linux.sh                         # the release for Linux on x86-64, on such a machine: the archive people unpack and an unpacked Trill updates from, its description for the machine that has the key, and the newest glibc it needs (signs nothing; `--trial KEYFILE` as above)
+sh scripts/update-trial-linux.sh                    # the updater tried out on the real programs on Linux, under target/: unpacked, updated at a start, a version that does not come up put back
 cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack, describe (a build worked out from its archive alone) and announce (one or several builds, signed) (see the example)
 ```
 
@@ -525,7 +527,7 @@ on the samples.
   version by its address and to its bytes by a SHA-256 (`cargo run -p trill-fetch --example pin`). Trill hosts
   nothing: a part comes from where its makers publish it.
 - **Something of a release, or of how a newer Trill goes in** (`trill-update`, `scripts/release.sh`,
-  `scripts/release-macos.sh`, `installer/trill.iss`; [docs/installing-and-updating.md](docs/installing-and-updating.md) is what a user is
+  `scripts/release-macos.sh`, `scripts/release-linux.sh`, `installer/trill.iss`; [docs/installing-and-updating.md](docs/installing-and-updating.md) is what a user is
   told): four rules hold by every route. **Nothing is taken that its makers did not sign**: an announcement is
   read under the keys built into the program (`release::read`) and a build is held to the checksum it gives, as
   it is fetched and again right before it goes in; no path of a release lies outside Trill's own folder
@@ -550,7 +552,14 @@ on the samples.
   touching `place.rs`, `start` or the installer's script. On macOS an installed Trill is `Trill.app`, signed ad hoc as a whole
   (a bundle whose programs carry only their linker's signature is one macOS calls damaged when downloaded): an
   update brings the bundle's seal with the files it holds and keeps everything of its own beside the bundle, never
-  in it, since a file the seal does not hold breaks it; `scripts/update-trial-macos.sh` is the trial there.
+  in it, since a file the seal does not hold breaks it; `scripts/update-trial-macos.sh` is the trial there. On Linux
+  an installed Trill is the folder its archive was unpacked into; its programs have no mark in their names, so
+  `place.rs` names them (`PROGRAMS`, in Linux's arm of `is_a_program`), and only those, of what an announcement
+  names, are made runnable as an update is staged (`make_runnable`): nothing an archive says of a file's mode is
+  read (`trill_fetch::zip::unpack`), though `pack` says each file's mode for whoever unpacks with a tool of their
+  own (`archive_with_modes`). What a Linux release asks of the system when it starts is checked where it is
+  gathered (`release-linux.sh`: the libraries it names, and the newest glibc, in `needs.txt`);
+  `scripts/update-trial-linux.sh` is the trial there.
 - **Something that says a MIDI channel:** a note and a clip's controller curve are each on one of sixteen
   (`trill_core::Channel`: 1 to 16 wherever a person, a model or a file reads or writes one, 0 to 15 only on the
   wire to a plugin, and a value of the type cannot mix the two up). Absent is the first, and neither a note nor a
