@@ -57,7 +57,7 @@ type Test = Box<dyn Fn() -> Result<(), String>>;
 
 /// Runs every test and says how each went, as libtest would.
 fn run(first: ThreadId) -> i32 {
-    let tests: [(&str, Test); 6] = [
+    let tests: [(&str, Test); 7] = [
         (
             "plugin_work_is_done_on_the_first_thread_where_the_program_lends_it",
             Box::new(move || where_work_is_done(first)),
@@ -67,6 +67,10 @@ fn run(first: ThreadId) -> i32 {
         ("a_program_ends_when_its_work_is_done_though_a_plugin_never_comes_back", Box::new(|| ends(false, 7))),
         ("a_program_ends_when_its_work_panics_though_a_plugin_never_comes_back", Box::new(|| ends(true, 101))),
         ("a_long_job_is_waited_for_where_no_window_shares_the_thread", Box::new(a_long_job_is_waited_for)),
+        (
+            "once_the_program_is_an_application_the_lent_first_thread_hands_its_events_on",
+            Box::new(events_are_handed_on),
+        ),
     ];
     let total = tests.len();
     println!("\nrunning {} tests", tests.len());
@@ -285,4 +289,80 @@ mod loops {
             }
         }
     }
+}
+
+/// An editor's window makes a program without a window of its own an
+/// application; from then on the first thread it lent hands the events it
+/// fetches on, as an application does, or the editor would take no mouse.
+#[cfg(target_os = "macos")]
+fn events_are_handed_on() -> Result<(), String> {
+    use objc2::rc::Retained;
+    use objc2::runtime::{ClassBuilder, Sel};
+    use objc2::{ClassType, MainThreadMarker, msg_send, sel};
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::NSPoint;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    static HANDED_ON: AtomicBool = AtomicBool::new(false);
+    const OURS: i16 = 11;
+
+    unsafe extern "C-unwind" fn send_event(app: *mut NSApplication, _selector: Sel, event: *mut NSEvent) {
+        // SAFETY: the application and the event AppKit hands the method.
+        let (app, event) = unsafe { (&*app, &*event) };
+        if event.r#type() == NSEventType::ApplicationDefined && event.subtype().0 == OURS {
+            HANDED_ON.store(true, Ordering::Relaxed);
+            return;
+        }
+        // SAFETY: the application's own `sendEvent:`, as it is called.
+        unsafe { msg_send![super(app, NSApplication::class()), sendEvent: event] }
+    }
+
+    // The application is made on the first thread, as an editor's window
+    // makes it, and an event is posted to it.
+    on_the_plugin_thread(WAIT, || {
+        let mut class = ClassBuilder::new(c"TrillLentApplication", NSApplication::class()).expect("a class of its own");
+        // SAFETY: `sendEvent:`'s signature.
+        unsafe {
+            class.add_method(
+                sel!(sendEvent:),
+                send_event as unsafe extern "C-unwind" fn(*mut NSApplication, Sel, *mut NSEvent),
+            )
+        };
+        let class = class.register();
+        // SAFETY: the shared application, of that class, made on the first thread.
+        let app: Retained<NSApplication> = unsafe { msg_send![class, sharedApplication] };
+        // Nothing of it is ever seen: no icon, no menu bar, no keyboard.
+        app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        let _ = MainThreadMarker::new().expect("the first thread");
+        let event =
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::ApplicationDefined,
+                NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                0,
+                None,
+                OURS,
+                0,
+                0,
+            )
+            .expect("an event");
+        app.postEvent_atStart(&event, false);
+    })
+    .ok_or("the first thread never made the application")?;
+    let asked = Instant::now();
+    while !HANDED_ON.load(Ordering::Relaxed) {
+        if asked.elapsed() > WAIT {
+            return Err("the event was never handed on".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// Elsewhere no thread is lent, and there is nothing of the kind.
+#[cfg(not(target_os = "macos"))]
+fn events_are_handed_on() -> Result<(), String> {
+    Ok(())
 }

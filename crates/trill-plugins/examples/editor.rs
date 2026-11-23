@@ -21,6 +21,8 @@
 //! --note                   hold middle C, so that an instrument has something to show
 //! --drag <x1,y1,x2,y2>     drag the mouse across the editor, by messages to its window
 //!                          only: the real pointer and the focus are left alone
+//! --resize <width,height>  once the picture is taken, resize the window as a user's drag of its edge
+//!                          ends: the inside of its frame to that many points (macOS)
 //! --reopen                 close the editor and open it a second time before exiting
 //! ```
 //!
@@ -66,13 +68,14 @@ struct Options {
     owned: bool,
     note: bool,
     drag: Option<[i32; 4]>,
+    resize: Option<[i32; 2]>,
     reopen: bool,
 }
 
 fn usage() -> String {
     "usage: editor <device uri | scheme:plugin name | list> [--screenshot <png>] [--settle <seconds>] \
      [--exit-after <seconds>] [--position <x,y>] [--title <text>] [--activate] [--owned] [--note] \
-     [--drag <x1,y1,x2,y2>] [--reopen]"
+     [--drag <x1,y1,x2,y2>] [--resize <width,height>] [--reopen]"
         .to_string()
 }
 
@@ -102,6 +105,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Options, String>
         owned: false,
         note: false,
         drag: None,
+        resize: None,
         reopen: false,
     };
     while let Some(argument) = arguments.next() {
@@ -116,6 +120,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Options, String>
             "--owned" => options.owned = true,
             "--note" => options.note = true,
             "--drag" => options.drag = Some(numbers::<4>(&value()?)?),
+            "--resize" => options.resize = Some(numbers::<2>(&value()?)?),
             "--reopen" => options.reopen = true,
             _ if argument.starts_with("--") => return Err(format!("unknown option {argument}\n{}", usage())),
             _ if options.device.is_empty() => options.device = argument,
@@ -311,6 +316,7 @@ fn run(options: &Options) -> Result<ExitCode, String> {
         let started = Instant::now();
         let wants_picture = options.screenshot.is_some();
         let (mut captured, mut dragged, mut reopened) = (!wants_picture, options.drag.is_none(), !options.reopen);
+        let mut resize = options.resize;
         // When the editor first showed anything, and when it was last
         // looked at for that.
         let (mut drawn, mut looked) = (None, Duration::ZERO);
@@ -382,6 +388,16 @@ fn run(options: &Options) -> Result<ExitCode, String> {
                         outcome = ExitCode::from(4);
                     }
                 }
+            } else if captured
+                && dragged
+                && let Some([width, height]) = resize.take()
+            {
+                println!("resize: to {width}x{height}: {}", platform::resize(&title, width, height));
+                // What the plugin made of it is in the window a moment later.
+                thread::sleep(Duration::from_millis(500));
+                if let Some(geometry) = platform::describe(&title) {
+                    println!("window: {geometry}");
+                }
             } else if captured && dragged && !reopened {
                 reopened = true;
                 controller.close_editor();
@@ -397,7 +413,12 @@ fn run(options: &Options) -> Result<ExitCode, String> {
             }
             // The time asked for is over, and nothing that was asked for
             // is still to do.
-            if options.exit_after.is_some_and(|limit| elapsed >= limit) && captured && dragged && reopened {
+            if options.exit_after.is_some_and(|limit| elapsed >= limit)
+                && captured
+                && dragged
+                && resize.is_none()
+                && reopened
+            {
                 break;
             }
         }
@@ -749,6 +770,10 @@ mod platform {
         }
     }
 
+    pub fn resize(_title: &str, _width: i32, _height: i32) -> String {
+        "not done on this system".to_string()
+    }
+
     /// Drags the left mouse button from `from` to `to`, both inside the
     /// editor's window, by posting to the plugin's window the messages a
     /// real drag would bring it. The pointer on screen does not move.
@@ -886,8 +911,97 @@ mod platform {
         windows().into_iter().find(|(named, _, _)| named == title).map(|(_, place, _)| place)
     }
 
-    pub fn drag(_title: &str, _from: (i32, i32), _to: (i32, i32)) -> String {
-        "not done on macOS: only the system's own events reach a view there".to_string()
+    /// The editor's window by its title, on the first thread.
+    fn window(mtm: MainThreadMarker, title: &str) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        let windows = NSApplication::sharedApplication(mtm).windows();
+        windows.iter().find(|window| window.delegate().is_some() && window.title().to_string() == title)
+    }
+
+    thread_local! {
+        /// The view that took the press of a drag, which is handed the rest
+        /// of it, as AppKit does. On the first thread.
+        static PRESSED: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSView>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A drag of the left button from `from` to `to` (points from the top
+    /// left of the editor), as events made for the editor's window and
+    /// handed, on the first thread, to the view under the point there: the
+    /// view AppKit would hand them to. Not through the window, which takes
+    /// a press in a program that is not in front as one that only brings it
+    /// there, and this one never comes to the front. The pointer on screen
+    /// does not move, and nothing else is told.
+    pub fn drag(title: &str, from: (i32, i32), to: (i32, i32)) -> String {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        use objc2_foundation::NSPoint;
+        let steps = 12;
+        let began = std::time::Instant::now();
+        for step in 0..=steps + 1 {
+            let (kind, at) = match step {
+                0 => (NSEventType::LeftMouseDown, from),
+                step if step <= steps => {
+                    let along = |a: i32, b: i32| a + (b - a) * step / steps;
+                    (NSEventType::LeftMouseDragged, (along(from.0, to.0), along(from.1, to.1)))
+                }
+                _ => (NSEventType::LeftMouseUp, to),
+            };
+            let title = title.to_owned();
+            let time = began.elapsed().as_secs_f64();
+            let sent = on_the_plugin_thread(ASK, move || {
+                let mtm = MainThreadMarker::new()?;
+                let window = window(mtm, &title)?;
+                let height = window.contentRectForFrameRect(window.frame()).size.height;
+                let location = NSPoint::new(f64::from(at.0), height - f64::from(at.1));
+                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    kind,
+                    location,
+                    NSEventModifierFlags::empty(),
+                    time,
+                    window.windowNumber(),
+                    None,
+                    0,
+                    1,
+                    if kind == NSEventType::LeftMouseUp { 0.0 } else { 1.0 },
+                )?;
+                let content = window.contentView()?;
+                let view = match kind {
+                    NSEventType::LeftMouseDown => {
+                        let under = content.hitTest(location)?;
+                        PRESSED.with(|pressed| *pressed.borrow_mut() = Some(under.clone()));
+                        under
+                    }
+                    _ => PRESSED.with(|pressed| pressed.borrow().clone())?,
+                };
+                match kind {
+                    NSEventType::LeftMouseDown => view.mouseDown(&event),
+                    NSEventType::LeftMouseDragged => view.mouseDragged(&event),
+                    _ => {
+                        view.mouseUp(&event);
+                        PRESSED.with(|pressed| pressed.borrow_mut().take());
+                    }
+                }
+                Some(())
+            })
+            .flatten();
+            if sent.is_none() {
+                return "the editor's window is not there".into();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        "events handed to the view under the point".into()
+    }
+
+    /// Resizes the editor's window as a user's drag of its edge ends: the
+    /// inside of its frame to `width` by `height` points.
+    pub fn resize(title: &str, width: i32, height: i32) -> String {
+        let title = title.to_owned();
+        let done = on_the_plugin_thread(ASK, move || {
+            let window = window(MainThreadMarker::new()?, &title)?;
+            window.setContentSize(objc2_foundation::NSSize::new(f64::from(width), f64::from(height)));
+            Some(())
+        })
+        .flatten();
+        if done.is_some() { "the window was given the size".into() } else { "the editor's window is not there".into() }
     }
 }
 
@@ -968,6 +1082,10 @@ mod platform {
             geometry.height,
             children.len()
         ))
+    }
+
+    pub fn resize(_title: &str, _width: i32, _height: i32) -> String {
+        "not done on this system".to_string()
     }
 
     /// The deepest window under `at` (in the editor window's own pixels),
@@ -1095,5 +1213,9 @@ mod platform {
 
     pub fn drag(_title: &str, _from: (i32, i32), _to: (i32, i32)) -> String {
         "not supported on this platform".to_string()
+    }
+
+    pub fn resize(_title: &str, _width: i32, _height: i32) -> String {
+        "not done on this system".to_string()
     }
 }

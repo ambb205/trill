@@ -176,11 +176,10 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
   plugin that never comes back from a call freezes it until the program is ended; the safety copy of unsaved work
   is still written and offered back at the next start. A step of a plugin's making stands the window still for as
   long as it takes (0.6 s at the most on a song of eight plugins).
-- Some of what a plugin editor's window does on Windows. Editors open in windows of their own, sized, resized and
-  closed as on Windows (held by the scripted plugins of both formats, and tried on real ones of each), but the
-  window does not yet stay above Trill's (an owner), the `editor` example cannot drag across an editor (only the
-  system's own events reach a view), and the opt-in test of real editors on the screen (`tests/editor_windows.rs`)
-  has not been made to run there. Opened from Trill's window, an editor has not been tried by hand.
+- Dragging across a plugin's editor in the `editor` example (`--drag`). The events are handed to the view under the
+  point, but the two plugins it was tried on (ValhallaRoom and Consort's Marimba) took nothing from them, likely
+  because they read where the pointer is from the system, and a test does not move the real pointer. A user's own
+  drag is AppKit's, and works as in any program.
 - Joining a device's audio workgroup. The threads that make a song's sound have the class macOS keeps for audio,
   which on what was measured is enough; a song that keeps more threads busy may want the workgroup as well.
 - A plugin that takes a render down named by its file. The render says that its process went down, at which

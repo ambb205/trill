@@ -1,7 +1,7 @@
 //! Editors of real, installed plugins, in real windows on the screen.
 //!
-//! These tests put windows on the desktop of whoever runs them, so they
-//! only run when asked to: with `TRILL_TEST_PLUGIN_WINDOWS=1` in the
+//! These tests put windows on the desktop of whoever runs them (on macOS
+//! they are kept out of sight), so they only run when asked to: with `TRILL_TEST_PLUGIN_WINDOWS=1` in the
 //! environment. Otherwise each prints a note and passes, and a plain
 //! `cargo test` never flashes a window on anyone's screen. (The life of an
 //! editor is tested without visible windows, against scripted plugins, in
@@ -24,6 +24,7 @@ use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
 
 /// The plugins whose editors are opened: format and name. Small ones, so
 /// that little of the screen is covered.
+#[cfg(not(target_os = "macos"))]
 const PLUGINS: [(&str, &str); 5] = [
     ("clap", "Surge XT Effects"),
     ("vst3", "Surge XT Effects"),
@@ -31,6 +32,12 @@ const PLUGINS: [(&str, &str); 5] = [
     ("vst3", "WaveForge Development Shell"),
     ("vst3", "JS80P"),
 ];
+
+/// On macOS: what is installed where this was made to run, two of each
+/// format. The windows are kept out of sight there.
+#[cfg(target_os = "macos")]
+const PLUGINS: [(&str, &str); 4] =
+    [("clap", "Hall"), ("vst3", "ValhallaRoom"), ("clap", "Marimba"), ("vst3", "SWAM Violin 3")];
 
 const SR: f64 = 48_000.0;
 const BLOCK: usize = 512;
@@ -67,7 +74,47 @@ fn enabled() -> bool {
     if !enabled {
         eprintln!("skipping: set TRILL_TEST_PLUGIN_WINDOWS=1 to open real plugin editors on this screen");
     }
-    enabled && cfg!(windows)
+    // On macOS an editor's window is never on anyone's screen: it is made
+    // out of sight, and its picture asked of its views.
+    #[cfg(target_os = "macos")]
+    trill_plugins::keep_editors_out_of_sight();
+    enabled && cfg!(any(windows, target_os = "macos"))
+}
+
+/// On macOS plugins and their editors' windows are driven from the first
+/// thread, which libtest leaves waiting for its tests: as in the crate's
+/// unit tests, a function the loader runs before `main` lends the first
+/// thread to the plugins and hands libtest's `main` to a thread of its own.
+#[cfg(target_os = "macos")]
+mod first_thread {
+    use std::ffi::{c_char, c_int, c_void};
+
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    /// `RTLD_DEFAULT`: every image of the process, the program first.
+    const EVERY_IMAGE: *mut c_void = -2isize as *mut c_void;
+
+    type Main = unsafe extern "C" fn(c_int, *const *const c_char) -> c_int;
+
+    extern "C" fn before_main(argc: c_int, argv: *const *const c_char) {
+        // SAFETY: the program's own `main`, which libtest's harness is.
+        let main = unsafe { dlsym(EVERY_IMAGE, c"main".as_ptr()) };
+        if main.is_null() {
+            return;
+        }
+        let (main, argv) = (main as usize, argv as usize);
+        trill_plugins::first_thread::lend(move || {
+            // SAFETY: `main` with the arguments the loader gave the program.
+            unsafe { std::mem::transmute::<usize, Main>(main)(argc, argv as *const *const c_char) }
+        });
+    }
+
+    /// Run by the loader before `main`, with the program's arguments.
+    #[used]
+    #[unsafe(link_section = "__DATA,__mod_init_func")]
+    static BEFORE_MAIN: extern "C" fn(c_int, *const *const c_char) = before_main;
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -211,6 +258,8 @@ fn a_session_opens_editors_and_closes_them_when_it_lets_go_of_their_devices() {
         for (index, uri) in uris.iter().enumerate() {
             step(&format!("add and open {uri}"));
             let device = session.add_device(ChainRef::Track(track), uri, None, None).unwrap_or_else(|e| panic!("{e}"));
+            // A plugin comes after the song has it.
+            assert!(session.wait_until_opened(Duration::from_secs(60)), "{uri}: never made");
             assert!(session.device_has_editor(device), "{uri}");
             // Several editors at once, side by side.
             let position = Some((300 + 420 * index as i32, 200 + 60 * index as i32));
@@ -234,6 +283,7 @@ fn a_session_opens_editors_and_closes_them_when_it_lets_go_of_their_devices() {
         // Undo brings the device back, without its window.
         step("undo");
         assert!(session.undo());
+        assert!(session.wait_until_opened(Duration::from_secs(60)), "never made again");
         assert!(session.device_has_editor(devices[0]) && !session.is_device_editor_open(devices[0]));
 
         // Another project closes them all.
@@ -244,6 +294,7 @@ fn a_session_opens_editors_and_closes_them_when_it_lets_go_of_their_devices() {
         // And a session that ends with an editor open takes it along.
         step("add and open the last");
         let device = session.add_device(ChainRef::Master, &uris[0], None, None).unwrap();
+        assert!(session.wait_until_opened(Duration::from_secs(60)), "never made");
         session.open_device_editor(device, &options("Trill test, last")).unwrap();
         thread::sleep(LOOK);
         let closing = Instant::now();

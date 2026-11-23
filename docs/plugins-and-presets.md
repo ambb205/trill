@@ -20,9 +20,14 @@ step at a time (its instance, its state, setting up, its parameters, activating)
 steps, and its file is loaded beforehand on another thread. While a step runs the window stands still: on a song of
 eight plugins, 0.6 s at the most (Hammond B-3X activating), and the line that says which device is coming next is on
 screen before it. An editor's window on macOS is made on that thread too, and opening one stands the window still for as long as the
-plugin takes to make its view: measured with the `editor` example, 0.1 to 0.35 s (Pianoteq 9, SWAM Violin 3, Serum 2,
-ValhallaRoom and ValhallaSupermassive, Consort's Hall and Marimba in CLAP) and 3 s for Hammond B-3X. A view's sizes
-are in points and it is told no scale: AppKit draws it at its screen's resolution. **A plugin that hangs on macOS
+plugin takes to make its view. In Trill's window, from the editor being asked for to the end of the run, the
+longest time between two frames was 42 ms for ValhallaRoom, 61 ms for SWAM Violin 3 (VST3), 43 ms for Consort's
+Marimba and Hall (CLAP); the `editor` example, which counts the wait for the plugin's thread too, has 0.1 to 0.35 s
+for these and for Pianoteq 9, Serum 2 and ValhallaSupermassive, and 3 s for Hammond B-3X. An editor floats above
+Trill's window while Trill is in front and goes out of sight with it when another program is, as an owned window
+does on Windows. A view's sizes are in points and it is told no scale: AppKit draws it at its screen's resolution.
+`trill-mcp`, which has no window, hands events on to an editor's window once one has opened, so that
+`show_device_editor` gives a window that takes the mouse and the keyboard there too. **A plugin that hangs on macOS
 freezes the window**, which cannot be drawn or closed until the
 program is ended (Force Quit). The song is not lost: the safety copy of unsaved work goes on being written by
 another thread every twenty seconds, with each plugin's state as it last was, and the next start offers it back. On

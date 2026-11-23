@@ -49,6 +49,8 @@ pub(super) fn keep_out_of_sight(options: &mut NativeOptions) {
     }
     #[cfg(target_os = "macos")]
     {
+        // A plugin's own window, asked for at start, is kept out of sight as well.
+        trill_plugins::keep_editors_out_of_sight();
         options.viewport = options.viewport.clone().with_decorations(false);
         options.event_loop_builder = Some(Box::new(|builder| {
             use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};

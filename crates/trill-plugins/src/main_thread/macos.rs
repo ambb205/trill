@@ -694,13 +694,39 @@ pub(crate) fn lend(body: Box<dyn FnOnce() -> i32 + Send>) -> ! {
         leave(1);
     }
     loop {
-        // SAFETY: the first thread's own loop, run until the program's work
-        // is done and stops it. (A stop that lands in a loop a plugin runs
-        // stops that one: this one looks again every quarter of a second.)
-        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 0) };
+        // The first thread's own loop, run until the program's work is done
+        // and stops it. (A stop that lands in a loop a plugin runs stops that
+        // one: this one looks again every quarter of a second.)
+        objc2::rc::autoreleasepool(|_| turn_a_while(0.25));
         if let Some(value) = *code.lock().unwrap_or_else(PoisonError::into_inner) {
             leave(value);
         }
+    }
+}
+
+/// Runs the first thread's loop for up to `seconds`, where it is lent: as a
+/// plain loop until something has made the program an application (an
+/// editor's window does), and from then on as an application runs it, an
+/// event fetched and handed on, so that a window there takes the mouse and
+/// the keyboard. `sendEvent:` is counted then, as in a window's program, so
+/// that a loop entered from an event's handler is someone else's.
+fn turn_a_while(seconds: f64) {
+    use objc2_app_kit::{NSApplication, NSEventMask};
+    use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
+    let Some(mtm) = objc2::MainThreadMarker::new().filter(|_| has_application()) else {
+        // SAFETY: the calling thread's own loop.
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 0) };
+        return;
+    };
+    count_events();
+    let app = NSApplication::sharedApplication(mtm);
+    let until = NSDate::dateWithTimeIntervalSinceNow(seconds);
+    // SAFETY: the application's own way of waiting for an event, on the first thread.
+    let event = unsafe {
+        app.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, Some(&until), NSDefaultRunLoopMode, true)
+    };
+    if let Some(event) = event {
+        app.sendEvent(&event);
     }
 }
 
