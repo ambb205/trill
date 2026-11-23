@@ -19,6 +19,10 @@ bench = false
 serde_json.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Says so where the CLI could be given no keeper (see `process.rs`).
+log.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

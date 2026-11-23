@@ -61,6 +61,21 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The class macOS keeps for audio (a thread's time-constraint policy), and
+# how much memory the machine has free. In the tree already, through other
+# crates.
+libc = "0.2"
+# The Trash: a recording Trill removes goes there. In the tree already,
+# through the audio and window libraries.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSError",
+    "NSFileManager",
+    "NSString",
+    "NSURL",
+] }
+
 [dev-dependencies]
 # Fixtures for the audio tests: temporary folders and files.
 tempfile = "3"

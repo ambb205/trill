@@ -1160,6 +1160,8 @@ impl Engine {
         if !(asked || at_once || has > 0) || wanted < 2 || has >= wanted - 1 {
             return;
         }
+        // Its threads are given the class for buffers of the stream's length.
+        crate::host::priority::expect_period(self.info.buffer_frames, self.info.sample_rate);
         let team = Box::new(Team::new(wanted - 1));
         let (made, watch) = (team.len(), team.watch());
         if made > 0 && self.send(Message::Team(Some(team))) {

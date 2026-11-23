@@ -51,10 +51,20 @@ pub const FROM_OTHERS_FOLDER: &str = "from others";
 
 /// A path as two spellings of it are told to be one: Windows minds
 /// neither the case of a name nor which way its strokes lean, and a song
-/// that was opened by a path spelled otherwise names the same files.
+/// that was opened by a path spelled otherwise names the same files. macOS
+/// on the disk it is installed on (and on any it formats unless asked
+/// otherwise) minds no case either; a backslash is a letter there. (A
+/// name written in two Unicode forms, which that disk also takes for one,
+/// is not taken for one here.)
 pub fn spelled(path: &Path) -> String {
     let text = path.to_string_lossy();
-    if cfg!(windows) { text.replace('/', "\\").to_lowercase() } else { text.into_owned() }
+    if cfg!(windows) {
+        text.replace('/', "\\").to_lowercase()
+    } else if cfg!(target_os = "macos") {
+        text.to_lowercase()
+    } else {
+        text.into_owned()
+    }
 }
 
 /// Every file `project` names, as the one place that knows says them: its
@@ -478,6 +488,11 @@ mod tests {
         );
         assert_eq!(spelled(one) == spelled(other), cfg!(windows));
         assert_eq!(spelled(one), spelled(one));
+        // On macOS the case does not part two spellings; a backslash does.
+        let (one, other) = (Path::new("/Users/me/Songs/takes/Voice.wav"), Path::new("/users/ME/songs/Takes/voice.WAV"));
+        assert_eq!(spelled(one) == spelled(other), cfg!(any(windows, target_os = "macos")));
+        let leaning = Path::new("/Users/me/Songs\\takes/Voice.wav");
+        assert_eq!(spelled(one) == spelled(leaning), cfg!(windows));
     }
 
     #[test]
