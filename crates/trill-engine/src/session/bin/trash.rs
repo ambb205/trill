@@ -40,7 +40,7 @@ fn home_trash() -> Option<PathBuf> {
 
 /// [`trash`] with the home trash and the user said: what a test gives.
 pub(super) fn trash_with(path: &Path, home: &Path, uid: u32) -> io::Result<PathBuf> {
-    let path = std::path::absolute(path)?;
+    let path = resolved(path)?;
     let disk = fs::symlink_metadata(&path)?.dev();
     // The home trash where it is on the same disk (made if it is not
     // there yet: its parent is the user's own).
@@ -64,6 +64,17 @@ pub(super) fn trash_with(path: &Path, home: &Path, uid: u32) -> io::Result<PathB
         Ok(trash) => trash.take(&path, path.strip_prefix(&top).unwrap_or(&path)),
         Err(error) => Err(tried.pop().unwrap_or(error)),
     }
+}
+
+/// `path` with its folder as it really lies: a recording reached through a
+/// linked folder is where the link leads, and its disk's top is found from
+/// there. The file itself is taken as it is (a link that is removed goes to
+/// the trash as a link).
+fn resolved(path: &Path) -> io::Result<PathBuf> {
+    let path = std::path::absolute(path)?;
+    let name = path.file_name().ok_or_else(|| io::Error::other("a path without a name"))?;
+    let folder = path.parent().ok_or_else(|| io::Error::other("a path without a folder"))?;
+    Ok(fs::canonicalize(folder)?.join(name))
 }
 
 /// The disk `path` (or the nearest folder of it that is there) is on.
@@ -110,7 +121,7 @@ impl Trash {
             let candidate = named(name, number);
             let info = self.root.join("info").join(format!("{}.trashinfo", candidate.to_string_lossy()));
             let into = self.root.join("files").join(&candidate);
-            if into.exists() {
+            if fs::symlink_metadata(&into).is_ok() {
                 continue;
             }
             // The note first, and only if no other has that name: it is
@@ -121,13 +132,53 @@ impl Trash {
                 Err(error) => return Err(error),
             };
             let written = note.write_all(note_of(said, &now()).as_bytes()).and_then(|()| note.sync_all());
-            if let Err(error) = written.and_then(|()| fs::rename(path, &into)) {
-                let _ = fs::remove_file(&info);
-                return Err(error);
+            match written.and_then(|()| rename_new(path, &into)) {
+                Ok(()) => return Ok(into),
+                // What appeared there meanwhile is left as it is, and the
+                // next name is tried.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&info);
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&info);
+                    return Err(error);
+                }
             }
-            return Ok(into);
         }
         Err(io::Error::other("the trash has no free name for it"))
+    }
+}
+
+/// Renames `from` to `to` where nothing is at `to`, and never replaces what
+/// is: `renameat2` with `RENAME_NOREPLACE`, and where the file system does
+/// not know the flag, a look and a rename as close together as can be.
+fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other);
+    let (from_c, to_c) = (c(from)?, c(to)?);
+    // SAFETY: two strings that end, relative to nothing (they are whole
+    // paths), and a flag.
+    let said = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if said == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
+            if fs::symlink_metadata(to).is_ok() {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            fs::rename(from, to)
+        }
+        _ => Err(error),
     }
 }
 
@@ -229,6 +280,41 @@ mod tests {
         fs::write(&take, b"RIFF").unwrap();
         assert!(trash_with(&take, &blocked, 1000).is_err());
         assert!(take.exists());
+    }
+
+    #[test]
+    fn a_recording_reached_through_a_linked_folder_is_where_the_link_leads() {
+        let disk = tempfile::tempdir().unwrap();
+        let real = disk.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, disk.path().join("music")).unwrap();
+        let through = disk.path().join("music").join("take.wav");
+        fs::write(&through, b"RIFF").unwrap();
+        let found = resolved(&through).unwrap();
+        assert_eq!(found, fs::canonicalize(&real).unwrap().join("take.wav"));
+        // Its disk's top is found from where it really is, never inside the link.
+        let top = top_of(&found, fs::metadata(&found).unwrap().dev()).unwrap();
+        assert!(!top.starts_with(disk.path().join("music")), "{}", top.display());
+        assert!(found.starts_with(&top));
+        // And it goes to the trash from there, with a note of where it really was.
+        let home = disk.path().join("Trash");
+        let went = trash_with(&through, &home, 1000).unwrap();
+        assert!(!through.exists() && went.exists());
+        let note = read(&home.join("info").join("take.wav.trashinfo"));
+        assert!(note.contains(&format!("Path={}", found.display())), "{note}");
+    }
+
+    #[test]
+    fn nothing_in_the_trash_is_ever_replaced() {
+        let disk = tempfile::tempdir().unwrap();
+        let (from, to) = (disk.path().join("take.wav"), disk.path().join("there.wav"));
+        fs::write(&from, b"new").unwrap();
+        fs::write(&to, b"old").unwrap();
+        let refused = rename_new(&from, &to).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!((read(&from), read(&to)), ("new".to_string(), "old".to_string()));
+        rename_new(&from, &disk.path().join("free.wav")).unwrap();
+        assert!(!from.exists());
     }
 
     #[test]

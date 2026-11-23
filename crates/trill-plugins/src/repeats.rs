@@ -37,12 +37,28 @@
 //!   the rest of the song (the drums alone do it). With nothing asked of
 //!   it at all before the song, it does it too.
 
+//!
+//! - Surge XT (1.3.4, as a CLAP and as a VST3; measured on Linux, November
+//!   2026, by rendering one song twice, each render in a process that had
+//!   just started, through `trill-mcp`) starts each note's oscillators at a
+//!   phase it draws at random, and draws anew in every process: on its
+//!   starting patch (Init Saw) and on a factory pad (Pad Another warm) the
+//!   two renders differ from the first note on (their difference within 10
+//!   dB of what the tracks peak at), while a factory bass (Attacky) was the
+//!   same samples. Switching its oscillators' Retrigger on (`A Osc 1
+//!   Retrigger` to 3, and B's) made the starting patch the same samples;
+//!   the pad still differed (by 29 dB under its peak), since it draws more
+//!   than the phase. So nothing is known that stops it for every patch, and
+//!   none is claimed: a render names it.
+
 use trill_core::device::Repeating;
 
 /// Ample Sound's instruments, by the beginning of their class ids.
 const AMPLE: &str = "vst3:ABCDEF019182FAEB41707364";
 /// Superior Drummer 3.
 const SUPERIOR_DRUMMER: &str = "vst3:565354534433617375706572696F7220";
+/// Surge XT, in its two formats.
+const SURGE_XT: [&str; 2] = ["clap:org.surge-synth-team.surge-xt", "vst3:ABCDEF019182FAEB566D624153675854"];
 
 /// What makes the plugin `uri` repeat itself, where that is known.
 pub(crate) fn of(uri: &str) -> Option<Repeating> {
@@ -50,6 +66,14 @@ pub(crate) fn of(uri: &str) -> Option<Repeating> {
         return Some(Repeating {
             what: "chooses for itself, anew every time it is made, which recording a cymbal plays when it is struck \
                    again while it still rings"
+                .into(),
+            ..Repeating::default()
+        });
+    }
+    if SURGE_XT.iter().any(|surge| uri.eq_ignore_ascii_case(surge)) {
+        return Some(Repeating {
+            what: "starts each note's oscillators at a phase it draws at random, anew every time it is made (on many \
+                   of its patches, not all)"
                 .into(),
             ..Repeating::default()
         });
@@ -79,6 +103,11 @@ mod tests {
         // The drum sampler is known for what it does, and for nothing that stops it.
         let drums = of("vst3:565354534433617375706572696F7220").expect("Superior Drummer 3");
         assert!(!drums.can_be_stopped() && drums.costs.is_empty() && !drums.begins_alike && bass.can_be_stopped());
-        assert_eq!(of("clap:org.surge-synth-team.surge-xt"), None);
+        // Surge XT is known for what it does in both formats, and for nothing that stops it on every patch.
+        for surge in ["clap:org.surge-synth-team.surge-xt", "vst3:ABCDEF019182FAEB566D624153675854"] {
+            let synth = of(surge).expect("Surge XT");
+            assert!(!synth.can_be_stopped() && synth.costs.is_empty() && !synth.begins_alike, "{surge}");
+        }
+        assert_eq!(of("clap:org.surge-synth-team.surge-xt-fx"), None);
     }
 }
