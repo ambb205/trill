@@ -88,6 +88,15 @@ pub mod vst3;
 
 pub use clap::{CLAP_SCHEME, ClapConfig, ClapFactory};
 pub use plugin_host::PluginHost;
+
+/// Has every plugin editor's window from now on be one that is never seen
+/// and never takes the keyboard: for a program that only takes pictures.
+/// On Linux it is a window the window manager leaves alone, far off every
+/// screen. Nothing elsewhere, where a picture's editor is shown as any.
+pub fn keep_editors_out_of_sight() {
+    #[cfg(target_os = "linux")]
+    editor::keep_out_of_sight();
+}
 pub use presets::file::file_of as preset_file_of;
 pub use scan::{Known, PluginRecord, ScanFailure, ScanMode, Scanner};
 pub use vendor::{VendorPlaces, describe_state, split_state};
