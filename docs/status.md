@@ -156,28 +156,7 @@ Only Windows has been run so far.
   arriving.
 - A journal that keeps what it keeps by the comparison everything else uses. It still has its own, coarser one;
   a step that arrives from someone else is entered under their name.
-- A second machine, and *My network*. Everything was run on one computer: both programs on Windows, and the
-  meeting point as the Linux program under WSL beside them. Nothing has crossed a real network, a router or the
-  internet; sharing to a network has not been run once, because it asks the firewall a question that is its
-  user's to answer.
-
-## Sounds of more than one device
-
-- What is in front of the instrument.
-- A plugin that is not installed kept in the song until it is. The sound is made without it.
-- Taking back the deletion of a saved one. It is asked about first, and is then for good.
-
-## Installing and updating
-
-- A release. None has been published yet, and the key releases are announced under has not been made: until
-  its public half is written into the program, a build knows no key and takes no announcement.
-- A certificate. The installer and the programs are not signed, and Windows says so the first time one is run.
-- Anything but Windows on x86-64. A release has a build for each kind of machine it names, and names one.
-- Starting again from the window. A newer Trill that was fetched goes in at the next start; the window does not
-  close and start itself, and says to close every Trill.
-- `trill-mcp` putting a newer Trill in place. It leaves that to the window's next start, and while a client keeps
-  it running nothing goes in.
-- Fetching only what changed. An update is the whole build.
-- Going back to an older Trill from the window. The older version's installer does that.
-- Taking a key out of trust in the Trills that are installed. A key that was built into a release is trusted by
-  that release for as long as it runs; a second key can be added to the releases after it.
+- A second machine, a second home, and *My network*. The meeting point has run on a real server and two Trills
+  have met through it over the internet, with plugins on one side only, a restart of the server and one let go
+  ([what it costs](working-together.md#what-it-costs)); both were on one computer behind one router. Sharing to a
+  network has not been run once, because it asks the firewall a question that is its user's to answer.

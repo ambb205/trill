@@ -41,8 +41,10 @@ fn start(folder: &Path, name: &str) -> Runtime {
     runtime
 }
 
+/// The song a program holds as every program that holds it has it:
+/// without what is each one's own, where its files lie among it.
 fn song(runtime: &Runtime) -> String {
-    let mut song = runtime.session.lock().project().clone();
+    let mut song = runtime.session.lock().said_song();
     song.count_ids_from(0);
     song.to_json()
 }
@@ -153,7 +155,9 @@ fn main() {
     until("the one who joined has the song", || ben.session.lock().project().tracks.len() == tracks);
     let joined = began.elapsed();
     until("each sees the other", || ada.together().people.len() == 1 && ben.together().people.len() == 1);
-    assert!(song(&ada) == song(&ben), "both hold the same song");
+    // (What a program says its files are follows the song, as it reads
+    // them: over a real line that is a moment later.)
+    until("both hold the same song", || song(&ada) == song(&ben));
     let said = ada.together().said;
     println!(
         "joining: the song was in the other program after {:.0} ms, and {:.2} MB were said for it",
