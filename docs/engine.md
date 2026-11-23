@@ -136,7 +136,13 @@ without waiting for anything. All of them run in the class Windows keeps for aud
 device's thread in shared mode, which until now ran at the priority of any other thread of the program, because
 the library that opens the device raises it only when it is built to (the exclusive mode's thread was always
 raised). On the machine this was written on that thread was at the system's priority 0, an ordinary thread's,
-before it asked, and was granted the audio class when it did. A device that fails costs the buffer it failed
+before it asked, and was granted the audio class when it did. On macOS the class is a thread's time-constraint
+policy: the device's own thread has one from the system and keeps it, and every other thread that makes sound is
+given one as it starts, its period the buffer's length, its computation half of it and its deadline the period.
+On a MacBook Pro with every core kept busy by other work, the built-in song spread over eight threads from its
+first block had its worst buffer at 32 % of its time without it and 5 % with it (47 % and 7 % at 128 frames),
+and a thread of the team at work 1.5 ms after it was called at the latest without it and 78 µs with it; joining
+the device's audio workgroup as well was not needed for that. A device that fails costs the buffer it failed
 in, on whichever thread, and what was played by hand in that buffer is let go of, so that the key it failed on
 is not played to it again with every buffer after.
 

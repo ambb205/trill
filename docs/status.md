@@ -172,11 +172,14 @@ and the engine; what it has not got yet is [below](#macos). Linux has not been r
 
 What Windows has and macOS has not, yet. Each is said where it would be used, never a crash.
 
-- The audio threads in the class macOS keeps for audio. The device's own thread is the system's and plays in
-  time (a built-in song of 14 tracks, 30 seconds on a MacBook Pro's speakers: no buffer late); the threads
-  beside it, which a larger song is made on, are ordinary threads, and `keeps_up` says the class was refused.
 - Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
   `~/Library/Audio/Plug-Ins` and `/Library/Audio/Plug-Ins` are found, scanned and played.
+- Plugins whose framework posts work to the process's main thread (JUCE's do), played live by `trill-mcp`, which
+  runs no loop there: such work waits for good. One amplifier tried (Archetype Tim Henson X) is silent until it
+  has run; in the window, whose main thread runs one, and in a render, which a plugin is told is offline, it
+  sounds.
+- Joining a device's audio workgroup. The threads that make a song's sound have the class macOS keeps for audio,
+  which on what was measured is enough; a song that keeps more threads busy may want the workgroup as well.
 - A plugin that takes a render down named by its file. The render says that its process went down, at which
   stage, and the song is as it was.
 - How much room a disk has. Nothing is refused for want of it.
