@@ -16,7 +16,27 @@ use trill_plugins::first_thread::on_the_plugin_thread;
 
 const WAIT: Duration = Duration::from_secs(10);
 
+/// Set, this program is the second one the test of leaving starts: its work
+/// leaves a plugin job that never ends behind it.
+const LEAVES_A_JOB: &str = "TRILL_FIRST_THREAD_LEAVES_A_JOB";
+
 fn main() {
+    if std::env::var_os(LEAVES_A_JOB).is_some() {
+        #[cfg(target_os = "macos")]
+        trill_plugins::first_thread::lend(|| {
+            thread::spawn(|| {
+                on_the_plugin_thread(Duration::from_secs(3600), || {
+                    loop {
+                        thread::sleep(Duration::from_secs(3600));
+                    }
+                })
+            });
+            thread::sleep(Duration::from_millis(200));
+            7
+        });
+        #[cfg(not(target_os = "macos"))]
+        std::process::exit(7);
+    }
     let first = thread::current().id();
     #[cfg(target_os = "macos")]
     trill_plugins::first_thread::lend(move || run(first));
@@ -29,13 +49,14 @@ type Test = Box<dyn Fn() -> Result<(), String>>;
 
 /// Runs every test and says how each went, as libtest would.
 fn run(first: ThreadId) -> i32 {
-    let tests: [(&str, Test); 3] = [
+    let tests: [(&str, Test); 4] = [
         (
             "plugin_work_is_done_on_the_first_thread_where_the_program_lends_it",
             Box::new(move || where_work_is_done(first)),
         ),
         ("jobs_sent_while_one_runs_are_taken_in_the_order_they_came", Box::new(jobs_are_taken_in_order)),
         ("what_a_plugin_posts_to_the_first_threads_loop_is_served_between_two_jobs", Box::new(posted_work_is_served)),
+        ("a_program_ends_when_its_work_is_done_though_a_plugin_never_comes_back", Box::new(ends_though_a_plugin_hangs)),
     ];
     println!("\nrunning {} tests", tests.len());
     let mut failed = 0;
@@ -48,8 +69,31 @@ fn run(first: ThreadId) -> i32 {
             }
         }
     }
-    println!("\ntest result: {}. {} passed; {failed} failed\n", if failed == 0 { "ok" } else { "FAILED" }, 3 - failed);
+    println!("\ntest result: {}. {} passed; {failed} failed\n", if failed == 0 { "ok" } else { "FAILED" }, 4 - failed);
     i32::from(failed > 0)
+}
+
+fn ends_though_a_plugin_hangs() -> Result<(), String> {
+    let begun = std::time::Instant::now();
+    let mut child = std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+        .env(LEAVES_A_JOB, "1")
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            let took = begun.elapsed();
+            return match (status.code(), took < Duration::from_secs(6)) {
+                (Some(7), true) => Ok(()),
+                _ => Err(format!("it ended with {status} after {took:?}")),
+            };
+        }
+        if begun.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("it was still there after 20 s".into());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn where_work_is_done(first: ThreadId) -> Result<(), String> {

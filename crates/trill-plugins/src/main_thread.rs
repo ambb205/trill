@@ -860,6 +860,33 @@ mod tests {
         assert!(rested - after.1 < long, "{:?} more while it was waiting", rested - after.1);
     }
 
+    /// On macOS a plugin may run its thread's loop from inside a job (a
+    /// dialog, a wait of its own): the home cannot be served meanwhile, and
+    /// its timer must not turn the loop at full speed for as long as that
+    /// lasts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_loop_run_inside_a_job_does_not_turn_the_thread_at_full_speed() {
+        unsafe extern "C" {
+            static kCFRunLoopDefaultMode: *const std::ffi::c_void;
+            fn CFRunLoopRunInMode(mode: *const std::ffi::c_void, seconds: f64, after_one: u8) -> i32;
+        }
+        let main = MainThread::<Counter>::spawn("test-main").unwrap();
+        // A state that wants its idle, as one with plugins does.
+        main.call(WAIT, |state| state.busy = true).unwrap();
+        let turns = main
+            .call(WAIT, |_| {
+                let before = os_events::TURNS.load(Ordering::Relaxed);
+                // SAFETY: runs the thread's own loop for a while, inside a job.
+                unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.3, 0) };
+                os_events::TURNS.load(Ordering::Relaxed) - before
+            })
+            .unwrap();
+        // About one an idle's interval (15 ms); a spinning timer turns it
+        // thousands of times.
+        assert!(turns < 60, "{turns} turns in 300 ms");
+    }
+
     #[test]
     fn the_thread_is_behind_while_it_has_had_work_for_a_while_and_not_for_work_done_in_passing() {
         let main = MainThread::<Counter>::spawn("test-main").unwrap();

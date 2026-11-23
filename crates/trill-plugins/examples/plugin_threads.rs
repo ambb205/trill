@@ -24,7 +24,6 @@
 //! temporary folder. No window is opened, and nothing is heard. Which
 //! threads ran the plugin's code is said on macOS only, where `sample` is.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use trill_core::device::{DeviceFactory, DeviceInstance, Event, EventKind, ProcessInfo};
@@ -244,7 +243,6 @@ fn main() -> ExitCode {
     let how = args.get(1).filter(|how| !how.starts_with("--")).cloned().unwrap_or_else(|| "first".into());
     let seconds =
         args.iter().position(|arg| arg == "--seconds").and_then(|at| args.get(at + 1)?.parse().ok()).unwrap_or(6);
-    let _ = PathBuf::new();
     let run = move || match probe(device, seconds) {
         Ok(()) => 0,
         Err(error) => {

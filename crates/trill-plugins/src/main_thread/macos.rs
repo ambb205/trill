@@ -30,6 +30,10 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
+/// How many turns homes have been given, for tests.
+#[cfg(test)]
+pub(super) static TURNS: AtomicU64 = AtomicU64::new(0);
+
 /// Where the source that serves a home comes among a loop's sources.
 const JOBS_AFTER: CFIndex = 1000;
 
@@ -272,6 +276,8 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
     if driven.ended.get() {
         return;
     }
+    #[cfg(test)]
+    TURNS.fetch_add(1, Ordering::Relaxed);
     let nested = nested();
     if !nested && let Some(away) = driven.away.take() {
         driven.home.served(away);
@@ -299,7 +305,13 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
             CFRunLoopWakeUp(driven.run_loop);
         }
     }
+    // A job is further up this thread's stack, and a loop runs inside it (a
+    // plugin's dialog): nothing can be served until it is over, so the timer
+    // looks again an idle's interval later and does not turn the loop at full
+    // speed meanwhile.
+    let in_use = driven.home.state.try_borrow_mut().is_err();
     let wait = match (driven.home.until_idle(), waits) {
+        _ if in_use => Some(super::IDLE_INTERVAL),
         (idle, true) => Some(idle.unwrap_or(FRAME_OR_AFTER).min(FRAME_OR_AFTER.saturating_sub(last.elapsed()))),
         (idle, false) => idle,
     };
@@ -504,6 +516,12 @@ pub(crate) fn lend(body: Box<dyn FnOnce() -> i32 + Send>) -> ! {
         if let Some(done) = told.0.take() {
             done(value);
         }
+        // The first thread leaves when its loop next turns, which lets what
+        // it has in hand finish. A plugin that never comes back from a call
+        // there would keep the process for good: after a while this thread
+        // leaves by itself, as a job does.
+        std::thread::sleep(LEAVE_WITHIN);
+        leave(value);
     });
     if let Err(error) = started {
         eprintln!("the program's work could not be given a thread: {error}");
@@ -511,13 +529,18 @@ pub(crate) fn lend(body: Box<dyn FnOnce() -> i32 + Send>) -> ! {
     }
     loop {
         // SAFETY: the first thread's own loop, run until the program's work
-        // is done and stops it.
-        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 3600.0, 0) };
+        // is done and stops it. (A stop that lands in a loop a plugin runs
+        // stops that one: this one looks again every quarter of a second.)
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 0) };
         if let Some(value) = *code.lock().unwrap_or_else(PoisonError::into_inner) {
             leave(value);
         }
     }
 }
+
+/// How long the thread that did a program's work waits for the first thread
+/// to end the process before it ends it itself.
+const LEAVE_WITHIN: Duration = Duration::from_secs(2);
 
 /// Ends the process where it stands: what it wrote is put out, and nothing
 /// that is run at exit is (a plugin's library that is still loaded would
