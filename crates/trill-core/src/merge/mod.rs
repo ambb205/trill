@@ -76,7 +76,7 @@ pub use diff::diff;
 pub use doc::{Doc, Kept, Taken, Won};
 pub use props::{
     AudioSet, Blob, ClipSet, DeviceSet, FIRST_AUDIO, FIRST_MIDI, FIRST_SET, LaneSet, MarkerSet, MidiSet, NoteSet,
-    PointSet, SongSet, TrackSet, is_prop, path_prop,
+    PointSet, SongSet, TrackSet, is_prop, path_prop, rendition_at_prop, rendition_prop,
 };
 
 use crate::channel::Channel;
@@ -349,7 +349,10 @@ impl Key {
                 *prop == SongSet::Loop(crate::LoopRegion { enabled: false, start: 0.0, end: 1.0 }).prop()
             }
             Key::Track(_, prop) => {
-                *prop == LISTENING || *prop == TrackSet::Solo(false).prop() || *prop == TrackSet::Input(None).prop()
+                *prop == LISTENING
+                    || *prop == TrackSet::Solo(false).prop()
+                    || *prop == TrackSet::Input(None).prop()
+                    || *prop == props::rendition_at_prop()
             }
             // Where a clip's file lies is each machine's own: the song
             // says what the file is.

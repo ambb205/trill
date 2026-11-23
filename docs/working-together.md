@@ -271,11 +271,63 @@ once first, so that whoever joins is handed each plugin as it is running in your
 loads itself is the same: the others see its name at once, their own copy goes on playing what it had, and it is
 made again once, when the state has been read.
 
+## A plugin one of you has not got
+
+A song plays plugins, and your friend may not have yours. They have the track all the same, with its notes and
+the plugin's place and settings in it; what they have not got is the plugin to play it with. So your Trill plays
+it for them: it records what the track's devices make of the track, up to and including the last one that
+someone in the song has not got, and that recording goes to them like any audio of the song. Their Trill plays
+it in place of those devices. Nobody does anything for this, and nobody is asked.
+
+- **What comes after the plugin is still theirs.** The recording is of the track as it leaves that device: ahead
+  of the devices after it, the fader, the pan and the sends. Your friend moves the fader, or an equaliser that
+  follows the plugin, and hears it at once.
+- **A change to what was recorded is heard when it is recorded again.** A note written into the track, a setting
+  of the plugin, the tempo: until your Trill has recorded the track again, your friend hears it as it was, and
+  their window says so where the track is (a hollow mark on its header in place of a filled one: *heard as Ada's
+  Trill recorded it before the last change*). The recording that is there plays on meanwhile; nothing falls
+  silent. Your Trill records once what it depends on has stood still for two seconds, every track that is
+  wanted at that moment in one pass, and its status bar says which while it does (*Recording Bass for the
+  others*, *Recording Drums and 4 more tracks for the others*): it is a render, and takes what a render of
+  those tracks takes.
+- **Who records.** Whoever has every device the recording takes. Where two of you have, the one whose program
+  drew the lower number does, so that it is made once. A plugin none of you has is as it always was: in the song,
+  and silent.
+- **The recording is the song's.** It is saved with the song your friend saves, and plays when they open it alone
+  another day. It is of the song as it was then, and says so once something it depends on is changed with nobody
+  there to record it again.
+- **Not for a group, a return or the master.** What those play is what other tracks feed them, and a recording
+  of that would stand in for every fader on the way. A plugin that is missing there lets through what comes into
+  it, as it always did.
+
+What a computer has not got is said to the others who hold the song (the devices of this song, and nothing
+else), so that they know what to record. A recording is 16-bit audio at 48 kHz, about eleven megabytes a
+minute, from where its track first plays to where its sound ends, kept in Trill's own folder with the song's
+other files from other programs; the one before it is removed when the newer one is there. In the window of
+whoever hears by recordings, the status bar says how many tracks are heard so, and a plugin that is heard by a
+recording is not counted among what needs attention.
+
+**Measured** on two real windows on one machine, which was busy with other builds: the first with its plugins
+and a three-minute song that plays seven of them on six tracks (Superior Drummer 3, two Ample guitars through
+an amplifier, two Serum 2 and a reverb on a return), the second with no plugins at all.
+
+- The second had the song a tenth of a second after joining, and the first knew what it lacked 0.2 s later.
+- All five tracks that play clips were recorded in one pass and heard in the second window 170 s after it
+  joined: 168 MB of recordings. (Recorded a track a pass, which is how this was first built, it was 420 s.) The
+  return's reverb has no recording: the second window hears that return dry.
+- Each track measured alone in both windows, the plugin in the first and the recording in the second: the same
+  loudness and the same peak to a hundredth of a decibel on four of them, and 0.07 LU apart on the drums, whose
+  plugin does not play the same hits twice.
+- A note written into the drums in the first window: the second said within 6 ms that it heard the drums as
+  they were, and heard the note 34 s later.
+- The window without plugins held 0.6 GB, the one with them 3.7 GB.
+
 ## For an AI
 
 The `shared_song` tool shares (on this computer, its networks, or through the meeting point you have set),
 joins, leaves and says who is here and what they hold, with the notices and the edit that answers one, whether a
-meeting is open at its meeting point, and which connections are being asked for again
+meeting is open at its meeting point, which connections are being asked for again, which plugins of the song
+each person's computer has not got and which tracks are heard by a recording in their place
 ([AI and MCP](ai-and-mcp.md)). A client's edits are steps of the program it talks to, said to the others as they
 are made. No tool takes a meeting point or its key: what a tool is called with is in the journal and in the
 client's own record of the conversation, and a key is neither's to keep. The assistant in the window acts as you:
@@ -439,7 +491,16 @@ nearly nothing was). The file with least to go is asked for first, so that the m
   the keeper for more from inside Trill.
 - Giving way when its maker is not there: of two recordings put over one stretch at once, it is the program of
   whoever was earlier that makes room, so until that program is in the song again both play.
-- A plugin one of you has not got heard by them (a stem from whoever has it).
+- A plugin one of you has not got on a group, a return or the master heard by them: it lets through what comes
+  into it. On a track that plays clips it is heard by a recording (above).
+- A recording for a plugin one of you has not got made smaller than plain audio, or made again only where the
+  track changed: all of the track is recorded again, eleven megabytes a minute.
+- Such a recording brought beside the song at a save, or found again where the song's folder went: it stays in
+  Trill's own folder, and on another machine it is made again by whoever has the plugin.
+- Where three or more hold a song, everyone keeps the recording, also whoever has the plugin and did not make
+  it: the one who needs it may be connected to them alone.
+- A plugin that does not do the same thing twice (a drummer that draws its hits) is heard by whoever has not got
+  it as it was recorded, which is one of the ways it sounds.
 - A direct way between two programs that met through a meeting point, where there is one: everything they say
   goes through it for as long as they are in the song.
 - Taking one person's leave away from a meeting. Whoever has the invitation gets in for as long as it is shared;

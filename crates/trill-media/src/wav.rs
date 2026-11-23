@@ -187,6 +187,11 @@ impl WavWriter {
         })
     }
 
+    /// The rate the file is written at, in frames a second.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     /// Where the file will be.
     pub fn path(&self) -> &Path {
         &self.path

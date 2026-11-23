@@ -58,6 +58,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     if let Some(words) = super::opening::status_words(row.cx) {
         row.status(theme.info, &words);
     }
+    // A track this program is recording for the others, who have not got
+    // its plugin: the machine is busy with it.
+    let recording = row.cx.live.together.recording_for_others.as_deref();
+    if let Some(words) = super::renditions::status_words(recording) {
+        row.status(theme.info, &words);
+    }
+    // Tracks heard as someone else's Trill recorded them, because their
+    // plugins are not on this computer.
+    if let Some(words) = super::renditions::heard_words(&row.cx.snap.renditions) {
+        row.status(theme.info, &words);
+    }
     // Recordings on their way beside a song that was just saved, where
     // they have to be copied: how far that is.
     if let Some(coming) = row.cx.live.coming_beside {

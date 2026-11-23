@@ -67,6 +67,8 @@ fn intro(missing: &Missing) -> String {
         match used.place {
             FilePlace::Clip(_) => clips += 1,
             FilePlace::Sample { .. } => samples += 1,
+            // (No file the song is missing is one.)
+            FilePlace::Rendition(_) => {}
         }
     }
     let places = match (clips, samples) {
@@ -93,7 +95,7 @@ fn uses(file: &MissingFile) -> String {
         .iter()
         .filter_map(|used| match &used.place {
             FilePlace::Sample { slot, .. } => Some(slot.as_str()),
-            FilePlace::Clip(_) => None,
+            FilePlace::Clip(_) | FilePlace::Rendition(_) => None,
         })
         .collect();
     let mut said: Vec<String> = Vec::new();

@@ -51,6 +51,10 @@ pub struct Snapshot {
     /// The audio clips whose file is on its way from someone else who has
     /// the song: silent until it is here, and no problem.
     pub arriving: std::collections::HashSet<ClipId>,
+    /// The tracks with devices that are not on every computer that holds
+    /// the song, and what stands in for those where they are not: see
+    /// [`super::renditions`].
+    pub renditions: Vec<trill_engine::RenditionHere>,
     /// The files of the sample-playing devices `params` covers, with what
     /// is wrong with each.
     pub samples: HashMap<DeviceId, Vec<SampleFile>>,
@@ -208,14 +212,25 @@ impl Snapshot {
             modified: session.is_modified(),
             shared: session.shared_song().is_some(),
             path: session.path().map(PathBuf::from),
-            problems: session.problems().iter().map(ToString::to_string).collect(),
+            problems: {
+                // (A device that is not on this computer and is heard by
+                // a recording needs nobody's attention: its track says
+                // how it is heard.)
+                let renditions = session.renditions();
+                let stood_in =
+                    |device: &DeviceId| renditions.iter().any(|found| found.played && found.lacking.contains(device));
+                let needs_attention =
+                    |problem: &&Problem| !matches!(problem, Problem::Device { device, .. } if stood_in(device));
+                session.problems().iter().filter(needs_attention).map(ToString::to_string).collect()
+            },
             clip_problems,
             arriving: (session.files_arriving().iter())
                 .filter_map(|place| match place {
                     trill_core::FilePlace::Clip(clip) => Some(*clip),
-                    trill_core::FilePlace::Sample { .. } => None,
+                    trill_core::FilePlace::Sample { .. } | trill_core::FilePlace::Rendition(_) => None,
                 })
                 .collect(),
+            renditions: session.renditions(),
             samples,
             instruments,
             params_tracks: shown.iter().map(|track| track.id).collect(),
@@ -293,6 +308,7 @@ impl Snapshot {
             problems: Vec::new(),
             clip_problems: HashMap::new(),
             arriving: Default::default(),
+            renditions: Vec::new(),
             samples: HashMap::new(),
             instruments: HashMap::new(),
             params_tracks,

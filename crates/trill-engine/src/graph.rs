@@ -709,6 +709,23 @@ pub(crate) struct TrackNode {
     /// made, before anything else is done to it. Only in a render that
     /// was asked for it.
     pub source: Option<(usize, Box<Tap>)>,
+    /// A recording that stands in for the first devices of the track,
+    /// which this machine has not all got: see [`StoodIn`].
+    pub rendition: Option<Box<StoodIn>>,
+}
+
+/// What stands in for the first devices of a track where one of them is
+/// not on this machine: a recording of what they make of the track, by a
+/// program that has them (`trill_core::renditions`). None of those devices
+/// is run; where the last of them would have left the track's sound, the
+/// recording is, and the devices after it, the fader and the sends go on
+/// as on any track.
+pub(crate) struct StoodIn {
+    /// How many devices it stands in for, from the first.
+    pub devices: usize,
+    /// The recording, laid where in the song it was made from, as the
+    /// song's time has that beat.
+    pub audio: RegionAudio,
 }
 
 /// What a render listens with at one point of the graph: it measures what
@@ -720,7 +737,17 @@ pub(crate) struct Tap {
     /// How many frames go by before it begins to listen: what a render
     /// plays ahead of its start and keeps nothing of.
     pub unheard: u64,
+    /// How many frames it has listened to.
+    pub heard: u64,
+    /// How many of them there were with the last one that was not
+    /// silent, where that is to be found out: for a file that is to end
+    /// where its sound does, and not where the render does.
+    pub sounding: Option<u64>,
 }
+
+/// Below this a frame is silent, to a tap that finds out where its sound
+/// ends.
+const SILENT: f32 = 1e-5;
 
 impl Tap {
     pub fn push(&mut self, left: &[f32], right: &[f32]) {
@@ -730,6 +757,13 @@ impl Tap {
         if left.is_empty() {
             return;
         }
+        if let Some(sounding) = &mut self.sounding {
+            let sounds = |(left, right): (&f32, &f32)| left.abs() > SILENT || right.abs() > SILENT;
+            if let Some(last) = left.iter().zip(right).rposition(sounds) {
+                *sounding = self.heard + last as u64 + 1;
+            }
+        }
+        self.heard += left.len() as u64;
         self.analyzer.push(left, right);
         if let Some(file) = &mut self.file {
             file.write(left, right);

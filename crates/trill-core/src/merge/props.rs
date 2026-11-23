@@ -25,6 +25,7 @@ use crate::project::{
     AudioContent, AudioLoop, AutomationLane, AutomationPoint, Clip, Device, LoopRegion, Marker, MidiContent, Note,
     Project, Segment, SongKey, Track, WarpMode,
 };
+use crate::renditions::Rendition;
 use crate::takes::TrackInput;
 use crate::time::{Beats, TimeSignature};
 use crate::travel::Travel;
@@ -160,8 +161,26 @@ props! {
         // machine's audio device the track records, and how it is heard
         // meanwhile. See `Op::is_personal`.
         Input(Option<TrackInput>) = input,
+        // What stands in for its first devices where they are not: the
+        // song's, made by a program that has them.
+        Rendition(Option<Rendition>) = rendition,
+        // One's own, and never anyone else's: where this machine has that
+        // recording. See `Op::is_personal`.
+        RenditionAt(String) = rendition_at,
     }
     beside { id, kind, sends, devices, clips, reference, takes }
+}
+
+/// The number of the property that is a track's rendition.
+pub fn rendition_prop() -> u8 {
+    TrackSet::Rendition(None).prop()
+}
+
+/// The number of the property that says which recording a machine plays
+/// for a track's rendition: each machine's own, said to nobody and taken
+/// from nobody.
+pub fn rendition_at_prop() -> u8 {
+    TrackSet::RenditionAt(String::new()).prop()
 }
 
 props! {

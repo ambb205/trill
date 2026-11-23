@@ -1461,6 +1461,7 @@ fn target_holder(target: &AutomationTarget) -> Option<Thing> {
 pub(super) fn impersonal(mut track: Track) -> Track {
     track.solo = false;
     track.input = None;
+    track.rendition_at.clear();
     if let Some(reference) = &mut track.reference {
         reference.listening = false;
     }

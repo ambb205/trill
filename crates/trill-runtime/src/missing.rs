@@ -214,6 +214,8 @@ impl Missing {
             .map(|used| match &used.place {
                 FilePlace::Clip(clip) => format!("{clip}: "),
                 FilePlace::Sample { device, slot } => format!("{device}: {slot}: "),
+                // (No missing file of the song is one: nothing to match.)
+                FilePlace::Rendition(track) => format!("the rendition of {track}: "),
             })
             .collect();
         problems.into_iter().filter(|problem| !said.iter().any(|said| problem.starts_with(said))).collect()

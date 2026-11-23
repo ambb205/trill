@@ -41,6 +41,7 @@
 //! by [`Runtime::meeting_point`] either.
 
 use crate::files::{Files, Heard, OnItsWay, Tended};
+use crate::renditions::Renditions;
 use crate::{Runtime, SharedSession};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -50,7 +51,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use trill_core::merge::{Key, Replica, Said};
-use trill_core::{ClipId, TrackId};
+use trill_core::{ClipId, DeviceId, TrackId};
 use trill_together::meet::{No, Turned};
 use trill_together::{
     Event, Invitation, JoinId, LinkId, MeetingPoint, Message, Net, PROTOCOL, Person, Presence, Reach,
@@ -94,6 +95,8 @@ pub struct Here {
     pub notes: Vec<(ClipId, u64)>,
     /// What they have hold of right now, in words.
     pub holding: Option<String>,
+    /// The devices of the song their machine has not got.
+    pub lacks: Vec<DeviceId>,
 }
 
 /// What this program's own person holds: said to the others, and never
@@ -173,6 +176,9 @@ pub struct Together {
     /// the meeting point it is shared through has nearly passed what its
     /// keeper lets a key pass in a day. The song itself goes on.
     pub files_wait: Option<u64>,
+    /// The track this program is recording for the others, who have not
+    /// got all its devices, by its name: while it does.
+    pub recording_for_others: Option<String>,
 }
 
 impl Together {
@@ -385,6 +391,9 @@ struct Driver {
     allowance: Option<(u64, Instant, u64)>,
     /// Until when the song's files wait for the meeting point's next day.
     files_wait: Option<Instant>,
+    /// The tracks this program records for the others, where it has
+    /// devices they have not got.
+    renditions: Renditions,
 }
 
 impl Driver {
@@ -414,6 +423,7 @@ impl Driver {
         self.files.forget();
         self.held.clear();
         (self.allowance, self.files_wait) = (None, None);
+        self.renditions.leave(&self.session);
         self.session.lock().hear_changes(false);
     }
 
@@ -834,6 +844,17 @@ impl Driver {
         drop(kept);
     }
 
+    /// Looks after the tracks this program records for the others: what
+    /// was recorded is taken in, and the next is begun, away from here.
+    fn tend_renditions(&mut self) {
+        let others: Vec<(u64, Vec<DeviceId>)> =
+            self.people.iter().map(|(here, ..)| (here.person.id, here.lacks.clone())).collect();
+        let me = self.shared.lock().status.me.clone();
+        for sentence in self.renditions.tend(&self.session, &me, &others) {
+            self.say(sentence);
+        }
+    }
+
     fn say_to_synced(&mut self, message: &Message, except: Option<LinkId>) {
         let to: Vec<LinkId> = self
             .peers
@@ -1030,6 +1051,7 @@ impl Driver {
         let (floors, replica) = (session.floors(), session.replica());
         let transport = session.transport();
         let holding = session.holding();
+        let lacks = session.lacking();
         drop(session);
         if !said.is_empty() && self.peers.values().any(|peer| peer.synced) {
             let message = Message::Changes { said: thinned(said), floors, replica };
@@ -1044,6 +1066,7 @@ impl Driver {
         (presence.beat, presence.playing) = (transport.position_beats, transport.playing);
         (presence.tracks, presence.clips, presence.notes, presence.holding) =
             (mine.tracks, mine.clips, mine.notes, mine.holding.or(holding));
+        presence.lacks = lacks;
         let presence = presence.bounded();
         let due = match &self.presence_said {
             None => true,
@@ -1107,6 +1130,7 @@ impl Driver {
             // (To the minute: a count that ran would be news every tick.)
             files_wait: (self.files_wait)
                 .map(|over| over.saturating_duration_since(Instant::now()).as_secs().div_ceil(60) * 60),
+            recording_for_others: self.renditions.making(),
         };
         if status != shared.status {
             shared.status = Together { revision: shared.status.revision + 1, ..status };
@@ -1123,6 +1147,7 @@ impl Driver {
                 self.events();
                 self.ask_again();
                 self.tend_files();
+                self.tend_renditions();
                 if told.elapsed() >= TICK {
                     self.tell();
                     told = Instant::now();
@@ -1159,6 +1184,7 @@ fn here_of(presence: &Presence) -> Here {
         clips: presence.clips.clone(),
         notes: presence.notes.clone(),
         holding: presence.holding.clone(),
+        lacks: presence.lacks.clone(),
     }
 }
 
@@ -1174,6 +1200,7 @@ fn presence_of(here: &Here) -> Presence {
         clips: here.clips.clone(),
         notes: here.notes.clone(),
         holding: here.holding.clone(),
+        lacks: here.lacks.clone(),
     }
 }
 
@@ -1201,6 +1228,7 @@ impl Sharing {
             files: Vec::new(),
             held: Vec::new(),
             files_wait: None,
+            recording_for_others: None,
         };
         let shared =
             Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
@@ -1244,6 +1272,7 @@ impl Sharing {
                     held: Vec::new(),
                     allowance: None,
                     files_wait: None,
+                    renditions: Renditions::new(),
                 };
                 let stop = self.stop.clone();
                 let started = std::thread::Builder::new().name("trill-together".into()).spawn(move || driver.run(stop));

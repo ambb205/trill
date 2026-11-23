@@ -29,7 +29,8 @@ use crate::clock::thread_cycles;
 use crate::engine::RecordPhase;
 use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
 use crate::graph::{
-    AS_MADE, AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, Switch, TrackNode, TrackState, UNKNOWN,
+    AS_MADE, AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, StoodIn, Switch, TrackNode, TrackState,
+    UNKNOWN,
 };
 use crate::live::{AudioMark, Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
@@ -1814,8 +1815,21 @@ pub(crate) fn through(
     let Room { left, right, events, .. } = room;
     let (left, right) = (&mut left[..frames], &mut right[..frames]);
     let all = &mut track.chain.devices;
-    let (from, to) = (devices.start.min(all.len()), devices.end.min(all.len()));
+    let (mut from, to) = (devices.start.min(all.len()), devices.end.min(all.len()));
     let count = all.len();
+    // Where a recording stands in for the track's first devices, none of
+    // them is run: the recording is the track's sound from where the last
+    // of them would have left it, in whichever part that place is run.
+    if let Some(stood_in) = &track.rendition {
+        let end = stood_in.devices.min(count);
+        if to < end || (to == end && end < count) {
+            return;
+        }
+        if from <= end {
+            play_rendition(stood_in, common, left, right);
+            from = end;
+        }
+    }
     let part = &mut all[from..to.max(from)];
     match &mut track.source {
         Some((sources, tap)) if from <= *sources && *sources < to => {
@@ -1831,6 +1845,31 @@ pub(crate) fn through(
             tap.push(left, right);
         }
         _ => run_devices(part, common.info, events, left, right, keys),
+    }
+}
+
+/// Lays the recording that stands in for a track's first devices into
+/// the block, in place of whatever the track had made so far: the part of
+/// it the song is at. While the song stands still it is silent, as the
+/// devices it stands in for would be.
+fn play_rendition(stood_in: &StoodIn, common: &Common, left: &mut [f32], right: &mut [f32]) {
+    let ControlBlock { playing, start_beat, beats_per_frame, .. } = common.controls;
+    if !playing {
+        left.fill(0.0);
+        right.fill(0.0);
+        return;
+    }
+    let block = Block {
+        start_beat,
+        beats_per_frame,
+        anchor_frames: common.origin_frames,
+        elapsed: common.since_origin,
+        sample_rate: common.sample_rate,
+        tempo: common.tempo_map,
+    };
+    let reader = Reader::new(&stood_in.audio, &block);
+    for (i, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        (*left, *right) = reader.at(i);
     }
 }
 
@@ -2674,6 +2713,7 @@ mod tests {
             key_out: None,
             tap: None,
             source: None,
+            rendition: None,
         }
     }
 

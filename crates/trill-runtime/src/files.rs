@@ -261,9 +261,11 @@ fn read(looks: Receiver<Look>, looked: Sender<Looked>, media: Arc<MediaCache>) {
                 (Some(found), Some(is)) if found.len() == is.bytes => {
                     first.have.push((is.content(), Shelved { path: PathBuf::from(path), written: None }));
                 }
-                // (Under its name and not its length: not it.)
-                (Some(_), Some(is)) => first.lack.push(is.clone()),
-                (None, Some(is)) => first.lack.push(is.clone()),
+                // (Under its name and not its length: not it. And not
+                // here: wanted, unless it is a recording that stands in
+                // for devices this machine has.)
+                (_, Some(is)) if places.iter().any(|file| file.wanted) => first.lack.push(is.clone()),
+                (_, Some(_)) => {}
                 // A file of this machine's own. One that may not go is not
                 // read, whatever it is: nobody was shown it.
                 (Some(_), None) if places.iter().any(|file| !file.may_go) => {}

@@ -464,6 +464,8 @@ impl Session {
         let project = self.with_known_instruments(project);
         self.replace_song(project, Some(kept));
         self.path = None;
+        // (Each recording that stands in for devices has its place here.)
+        self.place_renditions();
         self.revision += 1;
         Ok(())
     }
@@ -684,6 +686,11 @@ impl Session {
             let mut over = Vec::new();
             for op in &change.ops {
                 let Some(key) = op.key() else { continue };
+                // (A rendition is a program's making and nobody's work:
+                // one that takes another's place is no clash.)
+                if matches!(key, Key::Track(_, prop) if prop == merge::rendition_prop()) {
+                    continue;
+                }
                 let held = self.doc.stamp(&key);
                 if held < stamp && mine.contains(&held.replica()) && held != Stamp::ZERO && !seen(held) {
                     over.push((key.clone(), self.doc.read(&key)));
@@ -751,6 +758,7 @@ impl Session {
         // What arrived is given this machine's own place for what it is,
         // and no place another program named is left in a device's state.
         self.give_places(&said_to_be, &slots_said, Some(&before));
+        self.place_renditions();
         if self.project == before {
             // Nothing of it is in the song as it stands (it is held in
             // something that was removed): there is nothing to play anew.

@@ -364,3 +364,74 @@ async fn a_song_is_shared_through_a_meeting_point_by_tools_and_no_tool_takes_or_
     assert!(!refused.contains(&key[10..]), "{refused}");
     drop((ada.runtime, ben.runtime));
 }
+
+/// A program whose computer has the scripted bass, which is a plugin as
+/// far as the song is concerned: [`program`] is one that has not.
+async fn program_with_the_bass() -> Program {
+    let extra: Vec<Box<dyn trill_core::device::DeviceFactory>> =
+        vec![Box::new(trill_engine::scripted::ScriptedFactory::new())];
+    let runtime = Arc::new(Runtime::start_with(RuntimeOptions::hermetic(), extra).unwrap());
+    let server = serve_http(runtime.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = ClientConfig::default().serve(transport).await.unwrap();
+    Program { client, runtime, _server: server }
+}
+
+/// 1 connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_is_told_which_plugins_someone_has_not_got_and_which_tracks_are_heard_as_recorded() {
+    use trill_core::merge::lot::note;
+    let (ada, ben) = (program_with_the_bass().await, program().await);
+    let (bass, line) = {
+        let mut session = ada.runtime.session.lock();
+        let bass = session.edit(|song| Ok(song.add_track("Bass"))).unwrap();
+        session.add_device(trill_core::ChainRef::Track(bass), trill_engine::scripted::BASS, None, None).unwrap();
+        let line = session.edit(|song| song.add_midi_clip(bass, "Line", 0.0, 8.0)).unwrap();
+        session.edit(|song| song.clip_mut(line)?.add_notes(&[note(40, 0.0), note(43, 2.0)])).unwrap();
+        (bass, line)
+    };
+    let shared = ok(&ada.client, "shared_song", json!({ "action": "share", "name": "Ada" })).await;
+    let invitation = shared["invitation"].as_str().unwrap().to_owned();
+    ok(&ben.client, "shared_song", json!({ "action": "join", "invitation": invitation, "name": "Ben" })).await;
+
+    // Ada's client is told what Ben's computer has not got, by its name
+    // and what it is.
+    let status = json!({ "action": "status" });
+    let plugin = json!(["Scripted Bass (scripted:bass)"]);
+    let here = until(&ada.client, "shared_song", status.clone(), "Ada is told what Ben lacks", |reply| {
+        reply["here"][0]["has_not_got"] == plugin
+    })
+    .await;
+    assert_eq!(names(&here), ["Ben"]);
+
+    // Ben's is told that the bass is heard as Ada's Trill recorded it,
+    // once it is, in place of what; and Ada's that nothing is played so
+    // on her computer.
+    let heard = |reply: &Value| reply["heard_as_recorded"][0].clone();
+    let at_bens = until(&ben.client, "shared_song", status.clone(), "Ben hears the bass", |reply| {
+        heard(reply)["played_here"] == json!(true) && heard(reply)["of_the_song_as_it_is"] == json!(true)
+    })
+    .await;
+    let said = heard(&at_bens);
+    assert_eq!((said["track"].clone(), said["recorded_by"].clone()), (json!("Bass"), json!("Ada")), "{said}");
+    assert_eq!((said["in_place_of"].clone(), said["not_on_this_computer"].clone()), (plugin.clone(), plugin), "{said}");
+    assert!(said.get("note").is_none(), "{said}");
+    assert!(at_bens["here"][0].get("has_not_got").is_none(), "Ada's computer lacks nothing: {at_bens}");
+    let at_adas = ok(&ada.client, "shared_song", status.clone()).await;
+    let said = heard(&at_adas);
+    assert_eq!((said["played_here"].clone(), said.get("not_on_this_computer")), (json!(false), None), "{said}");
+
+    // A note written at Ben's: until it is recorded again, what he hears
+    // is the bass as it was, and his client is told so and what to expect.
+    ben.runtime.session.lock().edit(|song| song.clip_mut(line)?.add_notes(&[note(47, 4.0)])).unwrap();
+    let before = heard(&ok(&ben.client, "shared_song", status.clone()).await);
+    assert_eq!((before["played_here"].clone(), before["of_the_song_as_it_is"].clone()), (json!(true), json!(false)));
+    let note_said = before["note"].as_str().unwrap_or_default();
+    assert!(note_said.contains("as it was before") && note_said.contains("records it again by itself"), "{before}");
+    until(&ben.client, "shared_song", status, "the bass is recorded again", |reply| {
+        heard(reply)["of_the_song_as_it_is"] == json!(true)
+    })
+    .await;
+    let _ = bass;
+}

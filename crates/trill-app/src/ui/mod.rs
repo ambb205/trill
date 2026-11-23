@@ -78,6 +78,7 @@ mod piano_roll;
 mod recording;
 mod recording_scene;
 mod recovery;
+mod renditions;
 mod response;
 mod sample_panels;
 mod setup;

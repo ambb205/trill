@@ -37,6 +37,7 @@ mod playing;
 mod presets;
 mod probing;
 mod recording;
+mod renditions;
 mod sounds;
 mod story;
 mod take;
@@ -58,6 +59,7 @@ pub use probing::ProbeTarget;
 pub use recording::{
     Correction, GrowingTake, InputClock, InputStatus, Measured, Measurement, Recorded, RecordedTake, RecordingLatency,
 };
+pub use renditions::{RenditionHere, RenditionWanted};
 pub use take::TakeClip;
 pub use together::{Notice, Remedy, Turned};
 
@@ -245,6 +247,12 @@ pub struct Session {
     /// Where this machine was found to have which bytes, as of the last
     /// time the song's files were looked at.
     read_here: std::collections::HashMap<trill_core::Content, String>,
+    /// The devices of the song that someone else who holds it has not
+    /// got, as whoever connects this session to the others last said.
+    lacked_elsewhere: std::collections::HashSet<trill_core::DeviceId>,
+    /// What each track's rendition would be made of now, as last worked
+    /// out: see [`Session::renditions`].
+    prints: parking_lot::Mutex<renditions::Prints>,
     /// What is kept of the song being one that others hold too.
     sharing: together::Sharing,
 }
@@ -327,6 +335,8 @@ impl Session {
             named_here: Default::default(),
             let_go: Default::default(),
             read_here: Default::default(),
+            lacked_elsewhere: Default::default(),
+            prints: Default::default(),
             sharing: together::Sharing::new(),
         };
         session.replace_project(Self::blank_project("Untitled"));

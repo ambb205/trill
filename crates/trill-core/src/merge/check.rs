@@ -259,9 +259,24 @@ fn track(mut track: Track) -> Result<Track, Refused> {
     if let Some(study) = track.reference.as_ref().and_then(|reference| reference.study.as_ref()) {
         text(study)?;
     }
+    if let Some(found) = &track.rendition {
+        rendition(found)?;
+    }
     // What a track holds is made apart, and what is one's own is not said.
     (track.clips, track.devices, track.takes) = (Vec::new(), Vec::new(), Vec::new());
     Ok(impersonal(track))
+}
+
+/// A rendition as it may be said: after a device, of a song that was, and
+/// of a file by what it is. (Whether that device is on the track is for
+/// whoever plays it to find: a device that went leaves its rendition
+/// standing in for nothing.)
+fn rendition(rendition: &crate::renditions::Rendition) -> Result<(), Refused> {
+    id(rendition.after.0)?;
+    text(&rendition.of)?;
+    text(&rendition.by)?;
+    position(rendition.from, "a rendition")?;
+    file_is(&rendition.is)
 }
 
 fn pan(pan: f32) -> Result<(), Refused> {
@@ -382,7 +397,14 @@ impl Op {
                             }
                             TrackSet::Input(input)
                         }
-                        set @ (TrackSet::Mute(_) | TrackSet::Solo(_)) => set,
+                        TrackSet::Rendition(found) => {
+                            if let Some(found) = &found {
+                                rendition(found)?;
+                            }
+                            TrackSet::Rendition(found)
+                        }
+                        // (One's own, and refused of anyone else above.)
+                        set @ (TrackSet::Mute(_) | TrackSet::Solo(_) | TrackSet::RenditionAt(_)) => set,
                     }),
                     part @ (TrackOp::Alive(_) | TrackOp::Listening(_)) => part,
                     TrackOp::Sends(order) => {

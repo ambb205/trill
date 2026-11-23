@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use trill_core::files::Content;
 use trill_core::merge::{Floors, Replica, Said, SongId};
-use trill_core::{ClipId, TrackId};
+use trill_core::{ClipId, DeviceId, TrackId};
 
 /// The version of what is said here. Two programs that speak different
 /// ones do not guess at each other: the one that hears the other's says
@@ -22,7 +22,11 @@ use trill_core::{ClipId, TrackId};
 /// 5: a connection that has nothing to say says that it is there
 /// ([`Message::Still`]), and one over which nothing is heard for a time is
 /// taken to be lost on the way.
-pub const PROTOCOL: u32 = 5;
+///
+/// 6: a track says what stands in for its first devices where a program
+/// has not got them (a rendition), and everyone says which devices of
+/// the song their machine has not got ([`Presence::lacks`]).
+pub const PROTOCOL: u32 = 6;
 
 /// The most one message may be: a whole song with its plugins' states.
 pub const MAX_MESSAGE: usize = 256 << 20;
@@ -78,6 +82,12 @@ pub struct Presence {
     /// What they have hold of right now, in words: "the volume of Bass".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holding: Option<String>,
+    /// The devices of the song that their machine has not got: a plugin
+    /// that is not installed there, or does not start. Whoever has them
+    /// records what they make of their tracks, for these to be heard
+    /// there (`trill_core::renditions`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lacks: Vec<DeviceId>,
 }
 
 impl Presence {
@@ -92,6 +102,7 @@ impl Presence {
             clips: Vec::new(),
             notes: Vec::new(),
             holding: None,
+            lacks: Vec::new(),
         }
     }
 
@@ -115,6 +126,7 @@ impl Presence {
         self.tracks.truncate(MAX_HELD);
         self.clips.truncate(MAX_HELD);
         self.notes.truncate(MAX_HELD);
+        self.lacks.truncate(MAX_HELD);
         self
     }
 }
