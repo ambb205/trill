@@ -19,6 +19,8 @@ const WAIT: Duration = Duration::from_secs(10);
 /// Set, this program is the second one the test of leaving starts: its work
 /// leaves a plugin job that never ends behind it.
 const LEAVES_A_JOB: &str = "TRILL_FIRST_THREAD_LEAVES_A_JOB";
+/// Set, the same, and its work panics.
+const PANICS: &str = "TRILL_FIRST_THREAD_PANICS";
 
 fn main() {
     if std::env::var_os(LEAVES_A_JOB).is_some() {
@@ -32,6 +34,9 @@ fn main() {
                 })
             });
             thread::sleep(Duration::from_millis(200));
+            if std::env::var_os(PANICS).is_some() {
+                panic!("the program's work panics, on purpose");
+            }
             7
         });
         #[cfg(not(target_os = "macos"))]
@@ -49,15 +54,18 @@ type Test = Box<dyn Fn() -> Result<(), String>>;
 
 /// Runs every test and says how each went, as libtest would.
 fn run(first: ThreadId) -> i32 {
-    let tests: [(&str, Test); 4] = [
+    let tests: [(&str, Test); 6] = [
         (
             "plugin_work_is_done_on_the_first_thread_where_the_program_lends_it",
             Box::new(move || where_work_is_done(first)),
         ),
         ("jobs_sent_while_one_runs_are_taken_in_the_order_they_came", Box::new(jobs_are_taken_in_order)),
         ("what_a_plugin_posts_to_the_first_threads_loop_is_served_between_two_jobs", Box::new(posted_work_is_served)),
-        ("a_program_ends_when_its_work_is_done_though_a_plugin_never_comes_back", Box::new(ends_though_a_plugin_hangs)),
+        ("a_program_ends_when_its_work_is_done_though_a_plugin_never_comes_back", Box::new(|| ends(false, 7))),
+        ("a_program_ends_when_its_work_panics_though_a_plugin_never_comes_back", Box::new(|| ends(true, 101))),
+        ("a_long_job_is_waited_for_where_no_window_shares_the_thread", Box::new(a_long_job_is_waited_for)),
     ];
+    let total = tests.len();
     println!("\nrunning {} tests", tests.len());
     let mut failed = 0;
     for (name, test) in tests {
@@ -69,21 +77,41 @@ fn run(first: ThreadId) -> i32 {
             }
         }
     }
-    println!("\ntest result: {}. {} passed; {failed} failed\n", if failed == 0 { "ok" } else { "FAILED" }, 4 - failed);
+    println!(
+        "\ntest result: {}. {} passed; {failed} failed\n",
+        if failed == 0 { "ok" } else { "FAILED" },
+        total - failed
+    );
     i32::from(failed > 0)
 }
 
-fn ends_though_a_plugin_hangs() -> Result<(), String> {
+fn a_long_job_is_waited_for() -> Result<(), String> {
+    // Where plugins share a thread with a window a job this long would count
+    // as one that hangs: here it is a plugin that is slow, and is waited for.
+    trill_plugins::first_thread::refuse_after(Duration::from_millis(200));
+    let long = thread::spawn(|| on_the_plugin_thread(WAIT, || thread::sleep(Duration::from_millis(700))));
+    thread::sleep(Duration::from_millis(400));
+    let answered = on_the_plugin_thread(WAIT, || ());
+    long.join().map_err(|_| "a sender panicked")?.ok_or("the long job was not done")?;
+    trill_plugins::first_thread::refuse_after(Duration::from_secs(10));
+    answered.ok_or_else(|| "the question was refused".to_string())
+}
+
+/// Starts this program to do work that leaves a plugin job that never ends
+/// behind it, and panics if `panics`: it ends all the same, with `code`.
+fn ends(panics: bool, code: i32) -> Result<(), String> {
     let begun = std::time::Instant::now();
-    let mut child = std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
-        .env(LEAVES_A_JOB, "1")
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    let mut program = std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
+    program.env(LEAVES_A_JOB, "1");
+    if panics {
+        program.env(PANICS, "1");
+    }
+    let mut child = program.stderr(std::process::Stdio::null()).spawn().map_err(|error| error.to_string())?;
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             let took = begun.elapsed();
             return match (status.code(), took < Duration::from_secs(6)) {
-                (Some(7), true) => Ok(()),
+                (Some(ended), true) if ended == code => Ok(()),
                 _ => Err(format!("it ended with {status} after {took:?}")),
             };
         }

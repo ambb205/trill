@@ -69,6 +69,13 @@ pub fn is_first() -> bool {
     false
 }
 
+/// Has a job count as one that hangs after `after` in place of ten seconds,
+/// where plugins share their thread with a window: for tests.
+#[doc(hidden)]
+pub fn refuse_after(after: std::time::Duration) {
+    crate::main_thread::hung_after(after)
+}
+
 /// Runs `job` on the plugin thread and waits for what it gives, for at most
 /// `timeout`. For tests and measurements of where plugin work runs.
 #[doc(hidden)]
