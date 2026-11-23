@@ -133,7 +133,7 @@ Only Windows has been run so far.
 - What was read of a song's files (their hashes) kept from one run to the next.
 - Hearing a plugin one has not got where it is on a group, a return or the master: it lets through what comes
   into it. On a track that plays clips, whoever has the plugin records the track and the others hear that.
-- A recording for a plugin someone has not got made smaller than plain audio (ten megabytes a minute), made
+- A recording for a plugin someone has not got made smaller than plain audio (eleven megabytes a minute), made
   again only where the track changed, or brought beside the song at a save: it stays in Trill's own folder.
 - A direct way between two programs that met through a meeting point, where there is one. Everything they say
   goes through it for as long as they are in the song.

@@ -1130,7 +1130,7 @@ impl Driver {
             // (To the minute: a count that ran would be news every tick.)
             files_wait: (self.files_wait)
                 .map(|over| over.saturating_duration_since(Instant::now()).as_secs().div_ceil(60) * 60),
-            recording_for_others: self.renditions.making().map(str::to_owned),
+            recording_for_others: self.renditions.making(),
         };
         if status != shared.status {
             shared.status = Together { revision: shared.status.revision + 1, ..status };

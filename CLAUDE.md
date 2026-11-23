@@ -255,10 +255,18 @@ on the samples.
   `Session::place_renditions` keeps it, and removes the recording that was let go of). **Making one is the
   runtime's** (`trill-runtime/src/renditions.rs`): everyone says which devices of the song their machine has
   not got (`Presence::lacks`), whoever has every device a recording takes and the lowest number makes it, once
-  what it depends on has stood still for two seconds, one at a time, by a render away from the session
-  (`RenderOptions::after`), into a folder beside the song's own folder of files and then into that folder under
-  the name of what it is. (Not into that folder while it is written: what is no file of the song and no part of
-  one on its way is cleared out of it.) While someone lacks a device, everyone who holds the song keeps the
+  what it depends on has stood still for two seconds, by a render away from the session. **Every track that is
+  wanted then is recorded in the one pass** (`RenderOptions::after`, a file a track, each beginning where its
+  track first plays and ending where its sound does): a render makes the song's plugins anew and waits for
+  them, which is most of what one track takes, and a pass a track took seven minutes for five tracks of the
+  owner's song. A pass of several that comes to nothing is tried again a track at a time, so that the one that
+  cannot be recorded is the only one that is not. The recordings are written into a folder beside the song's
+  own folder of files and then given, in that folder, the name of what they are. (Not into that folder while
+  they are written: what is no file of the song and no part of one on its way is cleared out of it.) After
+  touching any of it, try it on real plugins: two windows on profiles of their own joined in one song, one
+  started with `--real-plugins` and one without (which then has none), and what the second is told by
+  `shared_song` held beside the numbers in `docs/working-together.md`. While someone lacks a device, everyone
+  who holds the song keeps the
   recording (`Session::others_lack`): whoever needs it may be connected to them alone. Only a track of the song
   that plays clips has one (`Project::can_be_rendered`). `trill-engine/tests/renditions.rs` holds what a
   session does with one, `trill-runtime/tests/renditions.rs` two and three programs of which one was not

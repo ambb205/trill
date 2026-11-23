@@ -112,10 +112,11 @@ pub struct RenderOptions {
     /// [`Measured::draws`] names them.
     #[serde(default)]
     pub repeatable: bool,
-    /// A track as it leaves one of its devices, written to a file of its
-    /// own as the render goes: what a rendition is made with.
+    /// Tracks as they leave one of their devices, each written to a file
+    /// of its own as the render goes: what renditions are made with, all
+    /// that are wanted in the one pass.
     #[serde(default)]
-    pub after: Option<After>,
+    pub after: Vec<After>,
     /// Who watches the render: it is stopped through it, and says how far
     /// it has come. It stays with whoever asks: a render that is done in a
     /// process of its own is watched from here.
@@ -126,14 +127,19 @@ pub struct RenderOptions {
 /// What some of a track's devices make of it, to be written to a file as
 /// a render goes: the track's sound as it leaves the last of its first
 /// `devices` devices, ahead of every device after it, of its fader and of
-/// its pan. A 16-bit WAV file as long as the render, laid from where the
-/// render starts. (`trill_core::renditions` is what it is for: a recording
-/// that stands in for those devices where a machine has not got them.)
+/// its pan. A 16-bit WAV file that begins at `from_beat` of the song (or
+/// where the render starts, if that is later) and ends a moment after the
+/// last of its sound. (`trill_core::renditions` is what it is for: a
+/// recording that stands in for those devices where a machine has not got
+/// them.)
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct After {
     pub track: TrackId,
     /// How many of the track's devices, from the first.
     pub devices: usize,
+    /// Where in the song the file begins, in beats.
+    #[serde(default)]
+    pub from_beat: f64,
     /// The file. One of that name is replaced.
     pub file: PathBuf,
 }
@@ -293,7 +299,7 @@ impl Default for RenderOptions {
             threads: None,
             trusting: false,
             repeatable: false,
-            after: None,
+            after: Vec::new(),
             watch: None,
         }
     }
@@ -833,7 +839,7 @@ fn render_from(
     let listener = |file: Option<WavWriter>| {
         let analyzer = Analyzer::new(options.sample_rate);
         let analyzer = if file.is_some() { analyzer.with_true_peak() } else { analyzer };
-        Box::new(Tap { analyzer, file, unheard: lead_frames })
+        Box::new(Tap { analyzer, file, unheard: lead_frames, heard: 0, sounding: None })
     };
     // A track that is made only for what it feeds (a soloed return, a
     // device that listens to it) is not heard itself: it has no row and
@@ -858,9 +864,16 @@ fn render_from(
         }
         // What it is as it leaves one of its devices, where that is asked
         // for: heard at that device, in place of what goes into its effects.
-        if let Some(after) = options.after.as_ref().filter(|after| after.track == node.id) {
+        if let Some(after) = options.after.iter().find(|after| after.track == node.id) {
             let file = WavWriter::create(&after.file, sample_rate, WavFormat::Int16)?;
-            node.source = Some((after.devices, listener(Some(file))));
+            let mut tap = listener(Some(file));
+            // It begins where it was asked to, which may be later than
+            // the render does (a pass of several tracks begins with the
+            // first of them), and ends where its sound does.
+            let begins = frame_of_song(on_a_frame(after.from_beat.max(start)));
+            tap.unheard += (begins - frame_of_song(start)).max(0.0) as u64;
+            tap.sounding = Some(0);
+            node.source = Some((after.devices, tap));
         }
     }
     if let Some(stems) = stems.filter(|stems| stems.premaster) {
@@ -1279,6 +1292,9 @@ fn source_devices(track: &Track, node: &TrackNode, plugins: &ready::Plugins) -> 
 fn finished(what: StemKind, track: Option<&Track>, tap: &mut Tap, frames: u64) -> Option<Result<Stem, RenderError>> {
     let file = tap.file.take()?;
     let path = file.path().display().to_string();
+    // (A file that is to end where its sound does: a moment after it.)
+    let after_the_sound = (SILENCE_SECONDS * f64::from(file.sample_rate())) as u64;
+    let frames = tap.sounding.map_or(frames, |sounding| frames.min(sounding + after_the_sound));
     Some(file.finish(Some(frames)).map_err(RenderError::from).map(|_| Stem {
         path,
         what,

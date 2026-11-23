@@ -14,15 +14,23 @@
 //! **It is made of the song as it stands still.** While a track's notes or
 //! the devices in question are being worked on, nothing is recorded: one
 //! is begun once what it depends on has been the same for a couple of
-//! seconds, one at a time, and one that is being made of a song that has
-//! changed since is stopped. The others hear the track as it was
-//! meanwhile, which they are told.
+//! seconds, and one that is being made of a song that has changed since
+//! is stopped. The others hear the track as it was meanwhile, which they
+//! are told.
 //!
 //! **It is a render like any other**, away from the session: of a song
 //! with plugins in a process of its own (`trill_engine::apart`), so that a
-//! plugin that faults there costs a sentence. The recording is written
-//! into the song's own folder of the program's, hashed, and given the
-//! name of what it is there, where what arrives from others lies too.
+//! plugin that faults there costs a sentence. **Every track that is
+//! wanted at that moment is recorded in the one pass**, each into a file
+//! of its own: a render makes the song's plugins anew and waits for them,
+//! which is most of what recording one track takes, and is taken once for
+//! all of them. (Five tracks of a song, each recorded in a pass of its
+//! own, took seven minutes on a busy machine.) Where such a pass comes to
+//! nothing, each of its tracks is tried alone, so that the one that
+//! cannot be recorded is the only one that is not. A recording is written
+//! into a folder beside the song's own folder of the program's, hashed,
+//! and given the name of what it is in that folder, where what arrives
+//! from others lies too.
 //!
 //! None of it is done on the thread that connects the session to the
 //! wire, which only looks whether there is anything to make and takes in
@@ -36,7 +44,7 @@ use std::time::{Duration, Instant};
 use trill_core::files::FileIs;
 use trill_core::{DeviceId, Rendition, TrackId};
 use trill_engine::render::RenderError;
-use trill_engine::{After, RenderJob, RenderOptions, SharedSession, Watch};
+use trill_engine::{After, RenderOptions, SharedSession, Watch};
 use trill_together::Person;
 use trill_together::files::content_of;
 
@@ -76,24 +84,33 @@ struct Wanted {
     since: Instant,
 }
 
-/// The one that is being made.
-struct Making {
-    track: TrackId,
-    print: String,
-    /// The track's name, for whoever is shown what the program is doing.
-    name: String,
-    watch: Arc<Watch>,
-}
-
-/// What came of making one.
-struct Made {
+/// One track of a pass that is being made.
+#[derive(Clone)]
+struct One {
     track: TrackId,
     after: DeviceId,
-    /// Where in the song the recording begins, in beats.
+    /// How many of the track's devices that is, from the first.
+    devices: usize,
+    /// Where in the song its recording begins, in beats.
     from: f64,
     print: String,
     name: String,
-    came: Result<FileIs, String>,
+    /// Where it is written while it is made.
+    part: PathBuf,
+}
+
+/// The pass that is being made.
+struct Making {
+    /// Which pass, counted from the first.
+    number: u64,
+    tracks: Vec<One>,
+    watch: Arc<Watch>,
+}
+
+/// What came of a pass: of each of its tracks.
+struct Made {
+    number: u64,
+    tracks: Vec<(One, Result<FileIs, String>)>,
 }
 
 /// The renditions this program makes, as the thread that drives the song
@@ -105,8 +122,11 @@ pub(crate) struct Renditions {
     /// What could not be made, by its track, with what the song was then:
     /// not tried again while that is the song.
     failed: HashMap<TrackId, String>,
+    /// The tracks that are recorded in a pass of their own: a pass they
+    /// were in with others came to nothing.
+    alone: HashSet<TrackId>,
     looked: Instant,
-    /// Counts the recordings begun, for their names while they are made.
+    /// Counts the passes begun.
     begun: u64,
     /// The song and the others as they were when it was last looked what
     /// is wanted: while neither has changed, nothing else is wanted.
@@ -120,25 +140,34 @@ impl Renditions {
             making: None,
             made: channel(),
             failed: HashMap::new(),
+            alone: HashSet::new(),
             looked: Instant::now(),
             begun: 0,
             seen: None,
         }
     }
 
-    /// The track that is being recorded for the others, by its name.
-    pub fn making(&self) -> Option<&str> {
-        self.making.as_ref().map(|making| making.name.as_str())
+    /// What is being recorded for the others, in a few words: the track,
+    /// or the first of them and how many more.
+    pub fn making(&self) -> Option<String> {
+        let tracks = &self.making.as_ref()?.tracks;
+        let first = tracks.first()?.name.clone();
+        Some(match tracks.len() {
+            1 => first,
+            2 => format!("{first} and 1 more track"),
+            many => format!("{first} and {} more tracks", many - 1),
+        })
     }
 
     /// Nothing is made any more: nobody else holds the song, or it is
-    /// another song. One that is being made is stopped.
+    /// another song. What is being made is stopped.
     pub fn stop(&mut self) {
         if let Some(making) = self.making.take() {
             making.watch.stop();
         }
         self.wanted.clear();
         self.failed.clear();
+        self.alone.clear();
         self.seen = None;
     }
 
@@ -150,14 +179,14 @@ impl Renditions {
     }
 
     /// Looks after the renditions: takes in what was made, and begins the
-    /// next one where one is wanted of this program. `others` are the
+    /// next pass where one is wanted of this program. `others` are the
     /// people who hold the song with this one, each by their number with
     /// the devices their machine has not got. Returns what there is to
     /// say to the user.
     pub fn tend(&mut self, session: &SharedSession, me: &Person, others: &[(u64, Vec<DeviceId>)]) -> Vec<String> {
         let mut said = Vec::new();
         while let Ok(made) = self.made.1.try_recv() {
-            if self.making.as_ref().is_some_and(|making| making.track == made.track && making.print == made.print) {
+            if self.making.as_ref().is_some_and(|making| making.number == made.number) {
                 self.making = None;
             }
             self.took(session, me, made, &mut said);
@@ -177,20 +206,18 @@ impl Renditions {
             return said;
         }
         self.look(session, me, others, &lacked);
-        // One that is being made of the song as it was, or that is no
-        // longer this program's to make, is stopped: what comes of it
-        // then is nothing.
-        if let Some(making) = &self.making
-            && self.wanted.get(&making.track).is_none_or(|wanted| wanted.print != making.print)
-        {
-            making.watch.stop();
+        // A pass none of whose tracks is wanted any more as it is being
+        // made (the song has changed under all of them, or they are no
+        // longer this program's to make) is stopped. One of which some
+        // still are goes on: what the others come to is not taken.
+        if let Some(making) = &self.making {
+            let still = |one: &One| self.wanted.get(&one.track).is_some_and(|wanted| wanted.print == one.print);
+            if !making.tracks.iter().any(still) {
+                making.watch.stop();
+            }
         }
         if self.making.is_none() {
-            let ready = self.wanted.iter().filter(|(_, wanted)| wanted.since.elapsed() >= SETTLED);
-            let next = ready.min_by_key(|(track, wanted)| (wanted.since, **track)).map(|(track, _)| *track);
-            if let Some(track) = next {
-                self.begin(session, track);
-            }
+            self.begin(session);
         }
         said
     }
@@ -257,117 +284,155 @@ impl Renditions {
         self.wanted.retain(|track, _| still.contains(track));
     }
 
-    /// Begins to record `track`: the song is taken as it is this moment,
-    /// and recorded away from here.
-    fn begin(&mut self, session: &SharedSession, track: TrackId) {
-        let Some(wanted) = self.wanted.get_mut(&track) else { return };
-        let (after, devices, (from, to)) = (wanted.after, wanted.devices, wanted.stretch);
-        let (job, print, folder, name) = {
+    /// Begins a pass, where anything has stood still long enough to be
+    /// recorded: of every track that has, together; or of one alone, where
+    /// that one was in a pass that came to nothing. The song is taken as
+    /// it is this moment, and recorded away from here.
+    fn begin(&mut self, session: &SharedSession) {
+        let settled = |(_, wanted): &(&TrackId, &Wanted)| wanted.since.elapsed() >= SETTLED;
+        let mut ready: Vec<TrackId> = self.wanted.iter().filter(settled).map(|(track, _)| *track).collect();
+        ready.sort_by_key(|track| (self.wanted[track].since, *track));
+        if let Some(alone) = ready.iter().copied().find(|track| self.alone.contains(track)) {
+            ready = vec![alone];
+        }
+        if ready.is_empty() {
+            return;
+        }
+        self.begun += 1;
+        let number = self.begun;
+        let (job, tracks, folder) = {
             let mut session = session.lock();
             let Some(folder) = session.received_in() else { return };
             // (What the song's plugins have come to is read first: the
             // song that is recorded is the song the others have.)
             let job = session.render_job();
-            let print = session.rendition_prints(&[(track, after)]).pop().flatten();
-            let name = session.project().track(track).map(|track| track.name.clone()).unwrap_or_default();
-            (job, print, folder, name)
+            let of: Vec<(TrackId, DeviceId)> = ready.iter().map(|track| (*track, self.wanted[track].after)).collect();
+            let prints = session.rendition_prints(&of);
+            let making = folder.with_extension(MAKING);
+            let mut tracks = Vec::new();
+            for (track, print) in ready.iter().zip(prints) {
+                let (Some(print), Some(wanted)) = (print, self.wanted.get_mut(track)) else { continue };
+                // It is made of the song as it was taken, which is what
+                // is wanted from here on.
+                wanted.print.clone_from(&print);
+                let name = session.project().track(*track).map(|track| track.name.clone()).unwrap_or_default();
+                let part = making.join(format!("{} {number} {}.wav", std::process::id(), track.0));
+                let (after, devices, from) = (wanted.after, wanted.devices, wanted.stretch.0);
+                tracks.push(One { track: *track, after, devices, from, print, name, part });
+            }
+            (job, tracks, folder)
         };
-        let Some(print) = print else {
-            self.wanted.remove(&track);
+        if tracks.is_empty() {
             return;
-        };
-        // It is made of the song as it was taken, which is what is wanted
-        // from here on.
-        wanted.print.clone_from(&print);
+        }
+        clear_what_was_left(&folder.with_extension(MAKING));
+        let stretches = tracks.iter().map(|one| self.wanted[&one.track].stretch);
+        let (from, to) =
+            stretches.fold((f64::INFINITY, 0.0f64), |(from, to), (begins, ends)| (from.min(begins), to.max(ends)));
         let watch = Watch::new();
-        self.begun += 1;
-        let making = folder.with_extension(MAKING);
-        clear_what_was_left(&making);
-        let part = making.join(format!("{} {}.wav", std::process::id(), self.begun));
         let options = RenderOptions {
             sample_rate: RATE,
             start_beat: from,
             end_beat: Some(to),
-            only_tracks: Some(vec![track]),
-            after: Some(After { track, devices, file: part.clone() }),
+            only_tracks: Some(tracks.iter().map(|one| one.track).collect()),
+            after: (tracks.iter())
+                .map(|one| After {
+                    track: one.track,
+                    devices: one.devices,
+                    from_beat: one.from,
+                    file: one.part.clone(),
+                })
+                .collect(),
             watch: Some(watch.clone()),
             ..RenderOptions::default()
         };
-        let (send, watching) = (self.made.0.clone(), watch.clone());
-        let (made_of, called) = (print.clone(), name.clone());
+        let (send, watching, recorded) = (self.made.0.clone(), watch.clone(), tracks.clone());
         let recording = std::thread::Builder::new().name("trill-rendition".into()).spawn(move || {
-            let came = record(&job, &options, &part, &folder, &called, &watching);
-            if came.is_err() {
-                let _ = std::fs::remove_file(&part);
-            }
-            let _ = send.send(Made { track, after, from, print: made_of, name: called, came });
+            let rendered = job.measure(&options).map_err(|error| match error {
+                RenderError::Stopped => STOPPED.to_owned(),
+                other => sentence(&other.to_string()),
+            });
+            let tracks = (recorded.into_iter())
+                .map(|one| {
+                    let came = match &rendered {
+                        Ok(_) => named(&one, &folder, &watching),
+                        Err(why) => Err(why.clone()),
+                    };
+                    if came.is_err() {
+                        let _ = std::fs::remove_file(&one.part);
+                    }
+                    (one, came)
+                })
+                .collect();
+            let _ = send.send(Made { number, tracks });
         });
         match recording {
-            Ok(_) => self.making = Some(Making { track, print, name, watch }),
-            Err(error) => log::warn!("no thread could be started to record a track for the others: {error}"),
+            Ok(_) => self.making = Some(Making { number, tracks, watch }),
+            Err(error) => log::warn!("no thread could be started to record tracks for the others: {error}"),
         }
     }
 
-    /// What was made is taken in, where it is of the song as it is.
+    /// What a pass made is taken in, where it is of the song as it is.
     fn took(&mut self, session: &SharedSession, me: &Person, made: Made, said: &mut Vec<String>) {
-        let Made { track, after, from, print, name, came } = made;
-        match came {
-            Ok(is) => {
-                let mut session = session.lock();
-                let now = session.rendition_prints(&[(track, after)]).pop().flatten();
-                let home = session.home_of(&is);
-                let taken = match now.as_deref() == Some(print.as_str()) {
-                    true => {
-                        let by = me.name.clone();
-                        session.land_rendition(track, Rendition { after, of: print, is, by, from })
+        let together = made.tracks.len() > 1;
+        for (one, came) in made.tracks {
+            let One { track, after, from, print, name, .. } = one;
+            match came {
+                Ok(is) => {
+                    let mut session = session.lock();
+                    let now = session.rendition_prints(&[(track, after)]).pop().flatten();
+                    let home = session.home_of(&is);
+                    let taken = match now.as_deref() == Some(print.as_str()) {
+                        true => {
+                            let by = me.name.clone();
+                            session.land_rendition(track, Rendition { after, of: print, is, by, from })
+                        }
+                        false => Err("the song has changed since".to_owned()),
+                    };
+                    drop(session);
+                    if let Err(why) = taken {
+                        // Of the song as it was: nobody's, and made again.
+                        log::info!("a recording of '{name}' for the others was not taken: {why}");
+                        if let Some(home) = home {
+                            let _ = std::fs::remove_file(home);
+                        }
                     }
-                    false => Err("the song has changed since".to_owned()),
-                };
-                drop(session);
-                if let Err(why) = taken {
-                    // Of the song as it was: nobody's, and made again.
-                    log::info!("a recording of '{name}' for the others was not taken: {why}");
-                    if let Some(home) = home {
-                        let _ = std::fs::remove_file(home);
-                    }
+                    self.wanted.remove(&track);
+                    self.alone.remove(&track);
                 }
-                self.wanted.remove(&track);
-            }
-            Err(why) => {
-                self.failed.insert(track, print);
-                self.wanted.remove(&track);
-                said.push(format!(
-                    "'{name}' could not be recorded for the others, who have not got all its devices: {why} They \
-                     hear it as it was, or not at all, until something about it is changed."
-                ));
+                Err(why) if why == STOPPED => {}
+                // A pass of several came to nothing: each of them alone,
+                // so that the one that cannot be recorded is found.
+                Err(_) if together => drop(self.alone.insert(track)),
+                Err(why) => {
+                    self.failed.insert(track, print);
+                    self.wanted.remove(&track);
+                    self.alone.remove(&track);
+                    said.push(format!(
+                        "'{name}' could not be recorded for the others, who have not got all its devices: {why} \
+                         They hear it as it was, or not at all, until something about it is changed."
+                    ));
+                }
             }
         }
+        // (What was taken in changed the song: what is wanted is looked
+        // at again.)
+        self.seen = None;
     }
 }
 
-/// Records what `options` say, into `part`, says what the recording is
-/// and gives it the name of that in `folder`.
-fn record(
-    job: &RenderJob,
-    options: &RenderOptions,
-    part: &Path,
-    folder: &Path,
-    name: &str,
-    watch: &Watch,
-) -> Result<FileIs, String> {
-    job.measure(options).map_err(|error| match error {
-        RenderError::Stopped => STOPPED.to_owned(),
-        other => sentence(&other.to_string()),
-    })?;
-    let read = content_of(part, |_| !watch.stopped()).map_err(|error| sentence(&error.to_string()))?;
+/// Says what the recording of one track of a pass is, and gives it the
+/// name of that in `folder`.
+fn named(one: &One, folder: &Path, watch: &Watch) -> Result<FileIs, String> {
+    let read = content_of(&one.part, |_| !watch.stopped()).map_err(|error| sentence(&error.to_string()))?;
     let Some(content) = read else { return Err(STOPPED.to_owned()) };
-    let is = FileIs::new(content, &format!("{name} rendition.wav"));
+    let is = FileIs::new(content, &format!("{} rendition.wav", one.name));
     let home: PathBuf = folder.join(is.kept_as());
     // (Where nothing has arrived for the song yet, its folder is not there.)
     std::fs::create_dir_all(folder).map_err(|error| sentence(&error.to_string()))?;
     // (The same bytes under that name are the same recording.)
     let _ = std::fs::remove_file(&home);
-    std::fs::rename(part, &home).map_err(|error| sentence(&error.to_string()))?;
+    std::fs::rename(&one.part, &home).map_err(|error| sentence(&error.to_string()))?;
     Ok(is)
 }
 

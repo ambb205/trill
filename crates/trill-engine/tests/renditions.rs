@@ -115,7 +115,7 @@ fn make(session: &mut Session, track: TrackId, after: DeviceId, devices: usize, 
         start_beat: from,
         end_beat: Some(to),
         only_tracks: Some(vec![track]),
-        after: Some(After { track, devices, file: part.clone() }),
+        after: vec![After { track, devices, from_beat: from, file: part.clone() }],
         ..RenderOptions::default()
     };
     session.render_job().measure(&options).expect("the track is recorded");
@@ -282,10 +282,10 @@ fn a_recording_begins_where_the_track_first_plays_and_is_heard_there() {
 
     let (rendition, at_adas) = make(&mut ada, bass, plugin, 1, 1);
     assert_eq!(rendition.from, 16.0);
-    // Two bars at 120 and what rings on after them, not the four silent
-    // bars before: under three seconds of sound a second.
+    // What the two bars sound for and a moment after the last of it: not
+    // the four silent bars before, nor the silence a render ends with.
     let seconds = rendition.is.bytes as f64 / (48_000.0 * 4.0);
-    assert!((4.0..7.0).contains(&seconds), "{seconds} s were recorded");
+    assert!((1.5..4.5).contains(&seconds), "{seconds} s were recorded");
     pass(&mut ada, &mut ben, "Ada");
     arrives(&mut ben, &rendition, &at_adas);
     assert!(ben.renditions()[0].as_the_song_is());

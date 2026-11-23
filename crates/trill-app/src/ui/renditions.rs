@@ -113,6 +113,29 @@ pub fn device_words(renditions: &[RenditionHere], device: &Device, project: &Pro
     Some(words(found, track, project))
 }
 
+/// What the status bar says where tracks are heard by recordings because
+/// their plugins are not on this computer: how many, how many of those
+/// are being recorded again (they are heard as they were), and how many
+/// are still on their way.
+pub fn heard_words(renditions: &[RenditionHere]) -> Option<String> {
+    let needed: Vec<&RenditionHere> = renditions.iter().filter(|found| !found.lacking.is_empty()).collect();
+    let played = needed.iter().filter(|found| found.played).count();
+    let before = needed.iter().filter(|found| found.played && !found.as_the_song_is()).count();
+    let coming = needed.len() - played;
+    let tracks = |count: usize| if count == 1 { "1 track".to_owned() } else { format!("{count} tracks") };
+    let mut words = Vec::new();
+    if played > 0 {
+        words.push(format!("{} heard as recorded", tracks(played)));
+    }
+    if before > 0 {
+        words.push(format!("{before} being recorded again"));
+    }
+    if coming > 0 {
+        words.push(format!("{} on {} way", tracks(coming), if coming == 1 { "its" } else { "their" }));
+    }
+    (!words.is_empty()).then(|| words.join(" \u{00B7} "))
+}
+
 /// What the status bar says while this program records a track for the
 /// others.
 pub fn status_words(recording: Option<&str>) -> Option<String> {
@@ -180,5 +203,14 @@ mod tests {
         assert!(device_words(&renditions, &track.devices[0], &song).is_some());
         assert_eq!(status_words(Some("Bass")).as_deref(), Some("Recording Bass for the others"));
         assert_eq!(status_words(None), None);
+
+        // The status bar counts them: as recorded, of those the ones that
+        // are being recorded again, and the ones still on their way.
+        let one = |played: bool, current: bool| RenditionHere { played, current, ..renditions[0].clone() };
+        assert_eq!(heard_words(&renditions).as_deref(), Some("1 track heard as recorded"));
+        let three = [one(true, true), one(true, false), one(false, true)];
+        let said = heard_words(&three).unwrap();
+        assert_eq!(said, "2 tracks heard as recorded \u{00B7} 1 being recorded again \u{00B7} 1 track on its way");
+        assert_eq!(heard_words(&has_it), None, "nothing is said to whoever has the plugins");
     }
 }

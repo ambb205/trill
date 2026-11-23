@@ -64,6 +64,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     if let Some(words) = super::renditions::status_words(recording) {
         row.status(theme.info, &words);
     }
+    // Tracks heard as someone else's Trill recorded them, because their
+    // plugins are not on this computer.
+    if let Some(words) = super::renditions::heard_words(&row.cx.snap.renditions) {
+        row.status(theme.info, &words);
+    }
     // Recordings on their way beside a song that was just saved, where
     // they have to be copied: how far that is.
     if let Some(coming) = row.cx.live.coming_beside {

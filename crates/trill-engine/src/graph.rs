@@ -737,7 +737,17 @@ pub(crate) struct Tap {
     /// How many frames go by before it begins to listen: what a render
     /// plays ahead of its start and keeps nothing of.
     pub unheard: u64,
+    /// How many frames it has listened to.
+    pub heard: u64,
+    /// How many of them there were with the last one that was not
+    /// silent, where that is to be found out: for a file that is to end
+    /// where its sound does, and not where the render does.
+    pub sounding: Option<u64>,
 }
+
+/// Below this a frame is silent, to a tap that finds out where its sound
+/// ends.
+const SILENT: f32 = 1e-5;
 
 impl Tap {
     pub fn push(&mut self, left: &[f32], right: &[f32]) {
@@ -747,6 +757,13 @@ impl Tap {
         if left.is_empty() {
             return;
         }
+        if let Some(sounding) = &mut self.sounding {
+            let sounds = |(left, right): (&f32, &f32)| left.abs() > SILENT || right.abs() > SILENT;
+            if let Some(last) = left.iter().zip(right).rposition(sounds) {
+                *sounding = self.heard + last as u64 + 1;
+            }
+        }
+        self.heard += left.len() as u64;
         self.analyzer.push(left, right);
         if let Some(file) = &mut self.file {
             file.write(left, right);
