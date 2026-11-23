@@ -193,8 +193,13 @@ impl Release {
         if !self.page.is_empty() && !self.page.starts_with("https://") {
             return Err(format!("the announcement of {version} names a page that is no https address"));
         }
+        let mut kinds = std::collections::HashSet::new();
         for build in &self.builds {
             let of = &build.runs_on;
+            // One build a kind of machine: a program takes the first that is for it.
+            if of.is_empty() || !kinds.insert(of.as_str()) {
+                return Err(format!("the announcement of {version} has two builds for one kind of machine ('{of}')"));
+            }
             // (A build made for a trial of the updater takes one from this machine itself, too: what
             // is fetched is held to the checksum that was signed, wherever it comes from.)
             let on_this_machine = made_for_a_trial() && build.url.starts_with("http://127.0.0.1:");
@@ -444,6 +449,29 @@ pub(crate) mod tests {
         let mut plain = release("0.3.0");
         plain.builds[0].url = "http://example.org/trill.zip".to_owned();
         assert!(plain.check().unwrap_err().contains("https"));
+    }
+
+    #[test]
+    fn a_release_has_a_build_for_each_kind_of_machine_and_no_kind_twice() {
+        let key = SecretKey::make().unwrap();
+        let mut three = release("0.3.0");
+        for kind in ["macos-aarch64", "linux-x86_64"] {
+            let mut build = three.builds[0].clone();
+            build.runs_on = kind.to_owned();
+            build.url = format!("https://example.org/trill/v0.3.0/trill-{kind}.zip");
+            three.builds.push(build);
+        }
+        let read = read(&announce(&three, &key).unwrap(), &[key.public()]).unwrap();
+        for kind in ["windows-x86_64", "macos-aarch64", "linux-x86_64"] {
+            assert_eq!(read.build_for(kind).map(|build| build.runs_on.as_str()), Some(kind));
+        }
+        assert!(read.build_for("macos-aarch64").unwrap().url.ends_with("trill-macos-aarch64.zip"));
+        assert!(read.build_for("freebsd-x86_64").is_none());
+        // Two for one kind is a mistake of its makers', and is not announced.
+        let mut twice = three.clone();
+        twice.builds[2].runs_on = "macos-aarch64".to_owned();
+        assert!(twice.check().unwrap_err().contains("two builds for one kind of machine"));
+        assert!(announce(&twice, &key).is_err());
     }
 
     #[test]

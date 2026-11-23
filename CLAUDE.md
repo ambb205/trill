@@ -39,7 +39,7 @@ cargo run -p trill-runtime --example together -- SONG.trill      # two programs 
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build -p trill-meet --release --target x86_64-unknown-linux-musl   # the meeting point as one static file for a Linux server (the `load` example beside it holds many meetings open, to see what that takes)
 sh scripts/friend-bundle.sh                         # a release build gathered into target/friend/Trill to hand to a friend: the programs, the licences, a page of what their computer needs
 sh scripts/release.sh --key FILE --notes NOTES.txt  # a release into target/release-out/<version>: the installer, the archive an installed Trill updates from, the signed announcement (publishes nothing; `--trial KEYFILE` is a build to try the updater out with, never to publish; see docs/development.md)
-cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack and announce (see the example)
+cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack, describe (a build worked out from its archive alone) and announce (one or several builds, signed) (see the example)
 ```
 
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine
@@ -57,6 +57,8 @@ cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an ann
   `a_hundred_and_twenty_eight_voices_of_a_sampled_instrument_cost_less_than_the_time_they_play`, `trill-dsp`
   `eight_notes_of_eight_voices_leave_most_of_a_core`, `trill-mcp`
   `an_agent_arms_a_track_plays_it_and_records_a_take`, `trill-assistant`'s `pipeline`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
+- The compiler is the one `rust-toolchain.toml` names, on every machine: "clippy is clean" is judged on it, and a
+  newer compiler's new lints are not chased until it is raised there, on all three systems at once.
 - Development builds are optimized (`[profile.dev]` in `Cargo.toml`) because unoptimized audio code cannot keep
   up; what only runs while building is not, and debug info is line tables only.
 - Do not rename or move a `target` folder: tests of `trill-assistant` and `trill-plugins` have its path built in.

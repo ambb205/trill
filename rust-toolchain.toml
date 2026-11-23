@@ -1,0 +1,6 @@
+# Every machine builds Trill with the same compiler: the same lints on Windows,
+# macOS and Linux, and the same samples from the same song. `rustup` reads this
+# and fetches the compiler the first time `cargo` is run here.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

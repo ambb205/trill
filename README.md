@@ -53,9 +53,9 @@ repository, and some of it is not there yet ([what](docs/status.md#macos)). Linu
 no administrator, and an installed Trill says when a newer version is out. The build is not signed yet, so Windows
 asks before it runs the installer. ([Installing and updating](docs/installing-and-updating.md))
 
-**Or build it.** You need [Rust](https://rustup.rs) 1.90 or newer: on Windows with the MSVC toolchain, which needs
-the "Desktop development with C++" workload of the Visual Studio Build Tools; on macOS with Xcode's command-line
-tools (`xcode-select --install`). Then, from the repository:
+**Or build it.** You need [Rust](https://rustup.rs), which fetches the compiler the repository names by itself: on
+Windows with the MSVC toolchain, which needs the "Desktop development with C++" workload of the Visual Studio Build
+Tools; on macOS with Xcode's command-line tools (`xcode-select --install`). Then, from the repository:
 
 ```sh
 git clone https://github.com/ambb205/trill.git
