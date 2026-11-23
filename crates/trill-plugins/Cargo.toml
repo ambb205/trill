@@ -64,6 +64,36 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# On macOS the windows of plugin editors are AppKit's, made and used on the
+# first thread. The versions are the ones the tree has already (eframe's
+# audio and graphics bring them), with only what is used of them.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDate",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSRunLoop",
+    "NSString",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImageRep",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
+
 [dev-dependencies]
 trill-dsp.workspace = true
 trill-engine.workspace = true

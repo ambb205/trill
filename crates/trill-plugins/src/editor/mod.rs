@@ -17,23 +17,27 @@
 //! * [`EditorStatus`]: what a device's controller knows about its editor
 //!   without asking the plugin thread, because views ask on every frame.
 //!
-//! Editors are hosted on Windows. Elsewhere [`Window`] cannot be created
-//! and opening an editor reports that it is not supported yet.
+//! Editors are hosted on Windows and macOS. Elsewhere [`Window`] cannot be
+//! created and opening an editor reports that it is not supported yet.
 
 #[cfg(windows)]
 #[path = "window.rs"]
 mod window;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod window;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 #[path = "unsupported.rs"]
 mod window;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::device::{EditorImage, EditorOptions};
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 pub(crate) use window::simulate;
-pub(crate) use window::{SUPPORTED, Window};
+pub(crate) use window::{SUPPORTED, TELLS_SCALE, Window};
 
 /// How long a plugin may take to open or close its editor before the
 /// caller stops waiting. Generous: an editor may load its graphics, or its
@@ -195,7 +199,9 @@ impl HostedEditor {
         // The order is the one both formats document: scale first, since
         // every size that follows is in pixels of that scale.
         let scale = window.scale();
-        view.set_scale(scale);
+        if TELLS_SCALE {
+            view.set_scale(scale);
+        }
         let resizable = view.can_resize();
         window.set_resizable(resizable);
         let mut size = view.size().filter(|size| !size.is_empty()).unwrap_or_else(|| {

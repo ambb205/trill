@@ -100,3 +100,44 @@ pub(crate) fn unique_title(what: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     format!("{what} #{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
 }
+
+/// On macOS this crate's unit tests drive their plugins from the process's
+/// first thread, as every program of Trill's does there
+/// ([`crate::first_thread`]): an editor's window is AppKit's, which is used
+/// on that thread alone. libtest runs every test on a thread of its own and
+/// leaves the first thread waiting for them, so the test program lends its
+/// first thread before libtest's `main` begins: a function the loader runs
+/// before `main` hands `main` to a thread of its own and keeps the first
+/// thread for the plugins, until the tests are done and the process ends
+/// with what they came to.
+#[cfg(target_os = "macos")]
+mod first_thread {
+    use std::ffi::{c_char, c_int, c_void};
+
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    /// `RTLD_DEFAULT`: every image of the process, the program first.
+    const EVERY_IMAGE: *mut c_void = -2isize as *mut c_void;
+
+    type Main = unsafe extern "C" fn(c_int, *const *const c_char) -> c_int;
+
+    extern "C" fn before_main(argc: c_int, argv: *const *const c_char) {
+        // SAFETY: the program's own `main`, which libtest's harness is.
+        let main = unsafe { dlsym(EVERY_IMAGE, c"main".as_ptr()) };
+        if main.is_null() {
+            return;
+        }
+        let (main, argv) = (main as usize, argv as usize);
+        crate::main_thread::lend(Box::new(move || {
+            // SAFETY: `main` with the arguments the loader gave the program.
+            unsafe { std::mem::transmute::<usize, Main>(main)(argc, argv as *const *const c_char) }
+        }));
+    }
+
+    /// Run by the loader before `main`, with the program's arguments.
+    #[used]
+    #[unsafe(link_section = "__DATA,__mod_init_func")]
+    static BEFORE_MAIN: extern "C" fn(c_int, *const *const c_char) = before_main;
+}

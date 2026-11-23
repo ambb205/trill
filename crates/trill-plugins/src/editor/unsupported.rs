@@ -22,6 +22,9 @@ use trill_core::device::EditorImage;
 /// Whether this platform hosts plugin editors.
 pub(crate) const SUPPORTED: bool = false;
 
+/// Whether a view is told how many of the monitor's pixels one of its own is.
+pub(crate) const TELLS_SCALE: bool = false;
+
 /// Never exists: see the module documentation.
 pub(crate) struct Window(Infallible);
 

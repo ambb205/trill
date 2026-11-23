@@ -8,7 +8,7 @@
 
 use super::Vst3Factory;
 use super::scripted::{self, Action, ViewSeen, kind};
-use crate::editor::{Size, simulate};
+use crate::editor::{Size, TELLS_SCALE, simulate};
 use crate::plugin_thread::plugin_thread;
 use crate::test_support::{eventually, unique_title, within};
 use std::time::Duration;
@@ -78,10 +78,20 @@ fn view_size(serial: u64) -> Size {
     Size::new(width as u32, height as u32)
 }
 
-/// The view's natural size at the scale the host gave it.
+/// The view's natural size at the scale the host gave it (none, where the
+/// host tells no scale).
 fn scaled_size(serial: u64) -> Size {
-    let scaled = |length: i32| (length as f32 * view(serial).scale).round() as u32;
+    let scale = view(serial).scale;
+    let scale = if scale == 0.0 { 1.0 } else { scale };
+    let scaled = |length: i32| (length as f32 * scale).round() as u32;
     Size::new(scaled(scripted::VIEW_SIZE.0), scaled(scripted::VIEW_SIZE.1))
+}
+
+/// The steps of a view's opening: where the host tells a view its
+/// monitor's scale (Windows), it does so before it attaches it.
+fn opening() -> Vec<&'static str> {
+    let steps = ["create", "frame set", "scale", "attached"];
+    steps.into_iter().filter(|step| TELLS_SCALE || *step != "scale").collect()
 }
 
 /// Processes one block of `fill` on both sides and returns the left one.
@@ -116,9 +126,13 @@ fn an_editor_opens_in_a_window_of_the_views_size_and_closes_again() {
     // The view was given a frame and the scale of the window's monitor
     // before it was asked for its size, and the window is exactly that
     // size.
-    assert_eq!(scripted::view_steps(serial), ["create", "frame set", "scale", "attached"]);
+    assert_eq!(scripted::view_steps(serial), opening());
     let seen = view(serial);
-    assert!(seen.scale >= 1.0, "the scale of a monitor, not {}", seen.scale);
+    if TELLS_SCALE {
+        assert!(seen.scale >= 1.0, "the scale of a monitor, not {}", seen.scale);
+    } else {
+        assert_eq!(seen.scale, 0.0, "no scale is told");
+    }
     assert_eq!(simulate::client_size(window), scaled_size(serial));
     assert_eq!(seen.parent, window as usize, "the view was put into that window");
     assert!(!simulate::is_visible(window), "unit tests put no window on screen");
@@ -127,12 +141,13 @@ fn an_editor_opens_in_a_window_of_the_views_size_and_closes_again() {
     assert!(!is_open(&instance));
     assert!(!simulate::exists(window));
     // Taken out of its window, relieved of the frame, and released.
-    assert_eq!(scripted::view_steps(serial)[4..], ["removed", "frame cleared", "destroy"]);
+    let opened = opening().len();
+    assert_eq!(scripted::view_steps(serial)[opened..], ["removed", "frame cleared", "destroy"]);
 
     // The plugin is none the worse for it, and closing again is nothing.
     instance.controller.as_mut().unwrap().close_editor();
     assert_eq!(block(&mut instance, 0.5), vec![0.5; BLOCK]);
-    assert_eq!(scripted::view_steps(serial).len(), 7);
+    assert_eq!(scripted::view_steps(serial).len(), opened + 3);
 }
 
 #[test]
@@ -161,13 +176,14 @@ fn the_user_closing_the_window_detaches_the_view_and_the_window_remembers_its_pl
     simulate::close(window);
     assert!(eventually(WAIT, || !is_open(&instance)), "the editor closes when its window is closed");
     assert!(!simulate::exists(window));
-    assert_eq!(scripted::view_steps(serial)[4..], ["removed", "frame cleared", "destroy"]);
+    let opened = opening().len();
+    assert_eq!(scripted::view_steps(serial)[opened..], ["removed", "frame cleared", "destroy"]);
 
     // Opened again without saying where, it is where it was, with a view
     // made afresh.
     let again = open(&mut instance, &options("again"));
     assert_eq!(simulate::position(again), (260, 150));
-    assert_eq!(scripted::view_steps(serial)[7..], ["create", "frame set", "scale", "attached"]);
+    assert_eq!(scripted::view_steps(serial)[opened + 3..], opening());
 }
 
 #[test]
@@ -181,7 +197,7 @@ fn an_editor_goes_with_its_controller_and_with_its_device() {
     let window = open(&mut instance, &options("controller goes"));
     instance.controller = None;
     assert!(!simulate::exists(window));
-    assert_eq!(scripted::view_steps(first)[4..], ["removed", "frame cleared", "destroy"]);
+    assert_eq!(scripted::view_steps(first)[opening().len()..], ["removed", "frame cleared", "destroy"]);
     assert_eq!(block(&mut instance, 0.5), vec![0.5; BLOCK], "the plugin itself is still there");
 
     // The other way around: the plugin goes while its editor is open. The
@@ -193,7 +209,7 @@ fn an_editor_goes_with_its_controller_and_with_its_device() {
     drop(processor);
     assert!(!simulate::exists(window));
     assert!(!controller.as_ref().unwrap().is_editor_open());
-    assert_eq!(scripted::view_steps(second)[4..], ["removed", "frame cleared", "destroy"]);
+    assert_eq!(scripted::view_steps(second)[opening().len()..], ["removed", "frame cleared", "destroy"]);
     let component = scripted::lifecycle(second);
     assert_eq!(component[component.len() - 2..], ["terminate", "destroy"]);
     // The controller that is left has nothing to open or close.
@@ -235,7 +251,8 @@ fn a_view_that_cannot_be_attached_is_an_error_and_leaves_no_window() {
     assert_eq!(simulate::find(&options.title), None, "the window made for it is gone again");
     // The view was never in a window, so it is not taken out of one; it is
     // relieved of the frame and released.
-    assert_eq!(scripted::view_steps(serial), ["create", "frame set", "scale", "frame cleared", "destroy"]);
+    let made: Vec<_> = opening().into_iter().take_while(|step| *step != "attached").collect();
+    assert_eq!(scripted::view_steps(serial), [made, vec!["frame cleared", "destroy"]].concat());
     // It can be asked again, and still processes.
     assert!(failing.controller.as_ref().unwrap().has_editor());
     assert!(failing.controller.as_mut().unwrap().open_editor(&options).is_err());
@@ -369,6 +386,9 @@ fn a_view_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
     assert_eq!(given.width % 10 + given.height % 10, 0, "a size the view itself accepts");
 }
 
+/// (A monitor's scale is told to a view on Windows; on macOS AppKit draws
+/// a view at its screen's resolution.)
+#[cfg(windows)]
 #[test]
 fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
     let factory = factory();

@@ -85,3 +85,14 @@ pub fn on_the_plugin_thread<R: Send + 'static>(
 ) -> Option<R> {
     crate::plugin_thread::plugin_thread().ok()?.call(timeout, move |_| job()).ok()
 }
+
+/// [`on_the_plugin_thread`] for a job that takes something away from a
+/// plugin, which waits until the thread is back in its own loop: for tests
+/// of which loops are someone else's.
+#[doc(hidden)]
+pub fn at_rest_on_the_plugin_thread<R: Send + 'static>(
+    timeout: std::time::Duration,
+    job: impl FnOnce() -> R + Send + 'static,
+) -> Option<R> {
+    crate::plugin_thread::plugin_thread().ok()?.call_at_rest(timeout, move |_| job()).ok()
+}

@@ -93,6 +93,11 @@ thread_local! {
     /// How deep in run loops this thread is: 1 in its own, more inside a
     /// loop that was entered from inside another.
     static DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// Of the loops this thread is in, from the outermost a bit each:
+    /// whether it is someone else's (see [`observe_loops`]).
+    static FOREIGN: Cell<u64> = const { Cell::new(0) };
+    /// How many calls of the application's `sendEvent:` this thread is in.
+    static IN_EVENT: Cell<usize> = const { Cell::new(0) };
     /// Whether this thread has its observer of loops.
     static OBSERVED: Cell<bool> = const { Cell::new(false) };
     /// What ends the home served on this thread, with what it is given.
@@ -117,10 +122,13 @@ pub(super) fn is_first_thread() -> bool {
     unsafe { pthread_main_np() == 1 }
 }
 
-/// Whether the calling thread is inside a loop that was entered from
-/// inside another (a menu, a plugin's dialog).
+/// Whether the calling thread is inside a loop that is not its own: one
+/// that was entered from inside another, or from inside an event's handler
+/// (a menu, a plugin's dialog, a window's edge dragged).
 pub(super) fn nested() -> bool {
-    DEPTH.get() > 1
+    let depth = DEPTH.get().min(64);
+    let within = if depth == 64 { u64::MAX } else { (1u64 << depth) - 1 };
+    FOREIGN.get() & within != 0
 }
 
 /// Ends the calling thread's own next wait: its home is served at the
@@ -159,14 +167,41 @@ pub(super) struct Announcer;
 
 /// Counts the loops this thread is in, so that a turn can tell whether it
 /// was taken inside someone else's.
+///
+/// A loop is the thread's own when it is entered from no other loop and from
+/// no event's handler: the loop a program runs, or the one AppKit runs inside
+/// `nextEventMatchingMask:` while a window waits for its next event. Every
+/// other is someone else's. Under AppKit depth alone does not tell them apart:
+/// an event is handled after the loop it was fetched in has been left, so a
+/// loop that a handler enters (a menu's, a plugin's dialog's, the one a
+/// window's edge is dragged in) is as deep as the program's own. So the
+/// application's `sendEvent:` is counted in and out as well
+/// ([`count_events`]).
 fn observe_loops(run_loop: CFRunLoopRef) {
     if OBSERVED.replace(true) {
         return;
     }
     extern "C" fn seen(_observer: CFRunLoopObserverRef, activity: CFOptionFlags, _info: *mut c_void) {
         match activity {
-            ENTRY => DEPTH.set(DEPTH.get() + 1),
-            EXIT => DEPTH.set(DEPTH.get().saturating_sub(1)),
+            ENTRY => {
+                let depth = DEPTH.get();
+                if depth < 64 {
+                    let foreign = depth > 0 || IN_EVENT.get() > 0;
+                    let bit = 1u64 << depth;
+                    FOREIGN.set(if foreign { FOREIGN.get() | bit } else { FOREIGN.get() & !bit });
+                }
+                DEPTH.set(depth + 1);
+            }
+            EXIT => {
+                let depth = DEPTH.get().saturating_sub(1);
+                DEPTH.set(depth);
+                // Leaving someone else's loop: what was held back while it
+                // ran is served at the next turn of whatever loop follows,
+                // which may have nothing else to wake it.
+                if depth < 64 && FOREIGN.get() & (1u64 << depth) != 0 {
+                    wake_current();
+                }
+            }
             _ => {}
         }
     }
@@ -271,7 +306,14 @@ extern "C" fn due<S: ThreadState>(_timer: CFRunLoopTimerRef, info: *mut c_void) 
 /// One turn of a home: what the state is owed from the thread's own loop,
 /// one job, the idle round if it is due, and another turn asked for if
 /// there may be more.
+///
+/// Each turn has a pool of its own for what AppKit and the plugins
+/// autorelease: a loop that is not an application's drains none.
 extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
+    objc2::rc::autoreleasepool(|_| turn::<S>(info));
+}
+
+fn turn<S: ThreadState>(info: *mut c_void) {
     // SAFETY: `info` is the `Driven` the source and timer were made for,
     // which lives until both are invalidated (below), on this thread.
     let driven = unsafe { &*info.cast::<Driven<S>>() };
@@ -280,6 +322,9 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
     }
     #[cfg(test)]
     TURNS.set(TURNS.get() + 1);
+    if steps_a_turn() {
+        count_events();
+    }
     let nested = nested();
     if !nested && let Some(away) = driven.away.take() {
         driven.home.served(away);
@@ -342,9 +387,15 @@ fn end<S: ThreadState>(info: *mut c_void) {
         OWN_SOURCE.set(None);
         OWN_END.set(None);
         super::unregister();
+        if is_first_thread() {
+            FIRST_HOME.store(false, Ordering::Release);
+        }
         drop(Box::from_raw(info.cast::<Driven<S>>()));
     }
 }
+
+/// Whether a home is served on the first thread.
+static FIRST_HOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Starts the home of a plugin thread: on the first thread where it is
 /// lent and `first` is asked for, on a thread of its own otherwise.
@@ -362,7 +413,13 @@ pub(super) fn start<S: ThreadState>(
         let _ = ready.send((waker, thread::current().id()));
         ended
     };
-    if first && let Some(host) = HOST.get() {
+    // The first thread holds one home at a time: a thread's calls about its
+    // home (`with_current`) know of one. Only the plugin thread is asked
+    // for there; any other gets a thread of its own, as anywhere else.
+    if first
+        && let Some(host) = HOST.get()
+        && !FIRST_HOME.swap(true, Ordering::AcqRel)
+    {
         // SAFETY: asks of the calling thread only.
         if unsafe { pthread_main_np() } == 1 {
             // Asked on the first thread itself (a window that starts before
@@ -411,7 +468,28 @@ impl Host {
 }
 
 extern "C" fn host_perform(_info: *mut c_void) {
-    run_posted();
+    objc2::rc::autoreleasepool(|_| run_posted());
+}
+
+/// Runs `work` on the first thread from its own loop, outside any job of
+/// the plugins' (where AppKit calls a window's delegate), and waits for
+/// what it gives. `None` where the first thread drives no plugins. For
+/// tests that do to a window what a user would.
+#[cfg(test)]
+pub(crate) fn from_the_first_threads_loop<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+    let host = HOST.get()?;
+    let (given, taken) = mpsc::sync_channel(1);
+    host.post(Box::new(move || {
+        let _ = given.send(work());
+    }));
+    taken.recv_timeout(Duration::from_secs(30)).ok()
+}
+
+/// Whether the program has made its application (a window does; a program
+/// without one has none until an editor makes it).
+pub(crate) fn has_application() -> bool {
+    // SAFETY: a pointer AppKit sets once, read as it is.
+    unsafe { !NSApp.is_null() }
 }
 
 /// Runs what was posted to the first thread. Called on it.
@@ -482,7 +560,88 @@ static STEPS_A_TURN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub(crate) fn serve_here() -> bool {
     let served = install_host();
     STEPS_A_TURN.store(served, std::sync::atomic::Ordering::Relaxed);
+    if served {
+        count_events();
+    }
     served
+}
+
+// ---- the application's events, counted in and out -----------------------
+
+/// Whether the application's `sendEvent:` is counted ([`count_events`]).
+static EVENTS_COUNTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What the application's class did for `sendEvent:` before it was counted.
+static SEND_EVENT: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+type SendEvent = unsafe extern "C-unwind" fn(*mut c_void, *const c_void, *mut c_void);
+
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn sel_registerName(name: *const std::ffi::c_char) -> *const c_void;
+    fn object_getClass(object: *mut c_void) -> *mut c_void;
+    fn class_getInstanceMethod(class: *mut c_void, selector: *const c_void) -> *mut c_void;
+    fn method_getImplementation(method: *mut c_void) -> *mut c_void;
+    fn method_getTypeEncoding(method: *mut c_void) -> *const std::ffi::c_char;
+    fn class_replaceMethod(
+        class: *mut c_void,
+        selector: *const c_void,
+        implementation: *mut c_void,
+        types: *const std::ffi::c_char,
+    ) -> *mut c_void;
+}
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    /// The application, once a program has made one.
+    static NSApp: *mut c_void;
+}
+
+/// Has every call of the application's `sendEvent:` counted on the first
+/// thread, so that a loop entered from an event's handler is known to be
+/// someone else's ([`observe_loops`]). Done once, on the first thread, and
+/// only once a program has made its application (a window does before its
+/// loop runs, so this is looked at again at a turn until it has).
+///
+/// The method is replaced on the application's own class by one that counts
+/// and calls what was there, which is how winit itself takes the method, in
+/// either order.
+pub(crate) fn count_events() {
+    if EVENTS_COUNTED.load(Ordering::Relaxed) || !is_first_thread() {
+        return;
+    }
+    // SAFETY: read on the first thread, where the application is made.
+    let app = unsafe { NSApp };
+    if app.is_null() {
+        return;
+    }
+    // SAFETY: the runtime's own calls, on a live object, on the first thread;
+    // the implementation put in has `sendEvent:`'s signature.
+    unsafe {
+        let selector = sel_registerName(c"sendEvent:".as_ptr());
+        let class = object_getClass(app);
+        let method = class_getInstanceMethod(class, selector);
+        if method.is_null() {
+            return;
+        }
+        SEND_EVENT.store(method_getImplementation(method), Ordering::Relaxed);
+        class_replaceMethod(class, selector, counted as SendEvent as *mut c_void, method_getTypeEncoding(method));
+    }
+    EVENTS_COUNTED.store(true, Ordering::Relaxed);
+}
+
+/// The application's `sendEvent:`, counted.
+unsafe extern "C-unwind" fn counted(app: *mut c_void, selector: *const c_void, event: *mut c_void) {
+    struct Out;
+    impl Drop for Out {
+        fn drop(&mut self) {
+            IN_EVENT.set(IN_EVENT.get().saturating_sub(1));
+        }
+    }
+    IN_EVENT.set(IN_EVENT.get() + 1);
+    let _out = Out;
+    let original = SEND_EVENT.load(Ordering::Relaxed);
+    // SAFETY: what the class did for `sendEvent:` before, called as it was.
+    unsafe { std::mem::transmute::<*mut c_void, SendEvent>(original)(app, selector, event) };
 }
 
 /// Whether plugins are made a step a job: see [`STEPS_A_TURN`].

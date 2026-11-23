@@ -8,7 +8,7 @@
 
 use super::ClapFactory;
 use super::scripted::{self, Action, kind};
-use crate::editor::{Size, simulate};
+use crate::editor::{Size, TELLS_SCALE, simulate};
 use crate::test_support::{eventually, unique_title, within};
 use std::time::Duration;
 use trill_core::device::{
@@ -75,11 +75,20 @@ fn is_open(instance: &DeviceInstance) -> bool {
     instance.controller.as_ref().unwrap().is_editor_open()
 }
 
-/// The editor's natural size at the scale the host gave it.
+/// The editor's natural size at the scale the host gave it (none, where
+/// the host tells no scale).
 fn scaled_size(instance: &mut DeviceInstance) -> Size {
     let scale = value(instance, scripted::SEEN_SCALE);
+    let scale = if scale == 0.0 { 1.0 } else { scale };
     let scaled = |length: u32| (f64::from(length) * scale).round() as u32;
     Size::new(scaled(scripted::EDITOR_SIZE.0), scaled(scripted::EDITOR_SIZE.1))
+}
+
+/// The steps of an editor's opening: where the host tells a view its
+/// monitor's scale (Windows), it does so first.
+fn opening() -> Vec<&'static str> {
+    let steps = ["gui create", "gui scale", "gui parent", "gui show"];
+    steps.into_iter().filter(|step| TELLS_SCALE || *step != "gui scale").collect()
 }
 
 /// Processes one block of `fill` on both sides and returns the left one.
@@ -112,23 +121,29 @@ fn an_editor_opens_in_a_window_of_the_plugins_size_and_closes_again() {
     let window = open(&mut instance, &options("opens"));
     assert!(is_open(&instance));
     // The plugin was told the scale of the window's monitor before it was
-    // asked for its size, and the window is exactly that size.
+    // asked for its size, where a host tells it, and the window is exactly
+    // that size.
     let scale = value(&mut instance, scripted::SEEN_SCALE);
-    assert!(scale >= 1.0, "the scale of a monitor, not {scale}");
+    if TELLS_SCALE {
+        assert!(scale >= 1.0, "the scale of a monitor, not {scale}");
+    } else {
+        assert_eq!(scale, 0.0, "no scale is told");
+    }
     assert_eq!(simulate::client_size(window), scaled_size(&mut instance));
     assert_eq!(value(&mut instance, scripted::SEEN_PARENT), window as f64, "the view was put into that window");
-    assert_eq!(editor_steps(serial), ["gui create", "gui scale", "gui parent", "gui show"]);
+    assert_eq!(editor_steps(serial), opening());
     assert!(!simulate::is_visible(window), "unit tests put no window on screen");
 
     instance.controller.as_mut().unwrap().close_editor();
     assert!(!is_open(&instance));
     assert!(!simulate::exists(window));
-    assert_eq!(editor_steps(serial)[4..], ["gui hide", "gui destroy"]);
+    let opened = opening().len();
+    assert_eq!(editor_steps(serial)[opened..], ["gui hide", "gui destroy"]);
 
     // The plugin is none the worse for it, and closing again is nothing.
     instance.controller.as_mut().unwrap().close_editor();
     assert_eq!(block(&mut instance, 0.5), vec![0.5; BLOCK]);
-    assert_eq!(editor_steps(serial).len(), 6);
+    assert_eq!(editor_steps(serial).len(), opened + 2);
 }
 
 #[test]
@@ -159,13 +174,14 @@ fn the_user_closing_the_window_detaches_the_view_and_the_window_remembers_its_pl
     simulate::close(window);
     assert!(eventually(WAIT, || !is_open(&instance)), "the editor closes when its window is closed");
     assert!(!simulate::exists(window));
-    assert_eq!(editor_steps(serial)[4..], ["gui hide", "gui destroy"], "the plugin took its view down");
+    let opened = opening().len();
+    assert_eq!(editor_steps(serial)[opened..], ["gui hide", "gui destroy"], "the plugin took its view down");
 
     // Opened again without saying where, it is where it was.
     let again = open(&mut instance, &options("again"));
     assert_ne!(again, 0);
     assert_eq!(simulate::position(again), (180, 140));
-    assert_eq!(editor_steps(serial)[6..], ["gui create", "gui scale", "gui parent", "gui show"]);
+    assert_eq!(editor_steps(serial)[opened + 2..], opening());
     // A caller that says where is obeyed.
     instance.controller.as_mut().unwrap().close_editor();
     let moved = open(&mut instance, &EditorOptions { position: Some((220, 160)), ..options("moved") });
@@ -183,7 +199,7 @@ fn an_editor_goes_with_its_controller_and_with_its_device() {
     let window = open(&mut instance, &options("controller goes"));
     instance.controller = None;
     assert!(!simulate::exists(window));
-    assert_eq!(editor_steps(first)[4..], ["gui hide", "gui destroy"]);
+    assert_eq!(editor_steps(first)[opening().len()..], ["gui hide", "gui destroy"]);
     assert_eq!(block(&mut instance, 0.5), vec![0.5; BLOCK], "the plugin itself is still there");
 
     // The other way around: the plugin goes while its editor is open. The
@@ -242,7 +258,8 @@ fn a_plugin_that_cannot_create_or_attach_its_editor_is_an_error_and_leaves_no_wi
     assert!(!is_open(&failing));
     assert_eq!(simulate::find(&options.title), None, "the window made for it is gone again");
     // What the plugin had created was taken down, not left half open.
-    assert_eq!(editor_steps(serial), ["gui create", "gui scale", "gui hide", "gui destroy"]);
+    let made: Vec<_> = opening().into_iter().take_while(|step| *step != "gui parent").collect();
+    assert_eq!(editor_steps(serial), [made, vec!["gui hide", "gui destroy"]].concat());
     // It can be asked again, and still processes.
     assert!(failing.controller.as_mut().unwrap().open_editor(&options).is_err());
     assert_eq!(block(&mut failing, 0.5), vec![0.5; BLOCK]);
@@ -341,6 +358,9 @@ fn a_plugin_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
     assert_eq!(value(&mut instance, scripted::EDITOR_HEIGHT), f64::from(given.height));
 }
 
+/// (A monitor's scale is told to a view on Windows; on macOS AppKit draws
+/// a view at its screen's resolution.)
+#[cfg(windows)]
 #[test]
 fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
     let factory = factory();
