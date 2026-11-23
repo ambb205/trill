@@ -198,9 +198,10 @@ there and how it was checked is in [Building and testing](development.md#on-linu
 
 - All of plugin editors. An editor opens in an X window of its own (through Xwayland on a Wayland desktop), which
   goes behind Trill's window as any other window does; Surge XT's open in both formats and what is done in them
-  reaches the song. Not yet: what a CLAP plugin asks of the host to hear of its own connections
-  (`posix-fd-support`) and what a VST3 plugin asks for its timers and connections (`IRunLoop`), which plugins
-  built on Steinberg's own interface library need to draw at all; the scale an editor is told (1: Surge XT reads
+  reaches the song. A VST3 plugin's view is given the run loop it asks the frame for its timers and connections
+  (`IRunLoop`), which plugins built on Steinberg's own interface library need to draw at all; none of those has
+  been tried yet. Not yet: what a CLAP plugin asks of the host to hear of its own connections
+  (`posix-fd-support`); the scale an editor is told (1: Surge XT reads
   the display's resolution itself); and, where there is no X server, more than the sentence opening one gives.
   The plugins installed in `~/.clap`, `/usr/lib/clap`, `~/.vst3` and `/usr/lib/vst3` are found, scanned,
   played, rendered and given their presets (tried on Surge XT in both formats).
