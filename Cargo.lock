@@ -4968,6 +4968,7 @@ dependencies = [
  "trill-stage",
  "trill-study",
  "trill-update",
+ "winit",
  "winresource",
 ]
 
@@ -5037,6 +5038,7 @@ name = "trill-fetch"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "libc",
  "log",
  "parking_lot",
  "serde",

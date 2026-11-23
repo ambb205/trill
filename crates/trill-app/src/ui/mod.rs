@@ -98,6 +98,8 @@ mod toast;
 mod together;
 mod top_bar;
 mod units;
+#[cfg(target_os = "linux")]
+mod unseen;
 mod wavetable_panel;
 mod widgets;
 mod work;
@@ -307,7 +309,13 @@ pub fn run(runtime: Arc<Runtime>, options: UiOptions) -> anyhow::Result<()> {
         // simpler, but a hidden window is never asked to paint.)
         viewport = viewport.with_position(OFF_SCREEN).with_active(false).with_taskbar(false);
     }
-    let native = eframe::NativeOptions { viewport, ..Default::default() };
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut native = eframe::NativeOptions { viewport, ..Default::default() };
+    // Where the desktop does not let a window put itself off the screen.
+    #[cfg(target_os = "linux")]
+    if options.screenshot.is_some() {
+        unseen::keep_out_of_sight(&mut native);
+    }
     // Failures inside the event loop (a screenshot that could not be saved)
     // have no way to return a value, so they are left here.
     let failure = Arc::new(Mutex::new(None));

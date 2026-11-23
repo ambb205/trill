@@ -514,10 +514,12 @@ mod tests {
         let place = |server: &TrillServer, asked: Option<&str>| {
             server.write_path_or(&runtime.session.lock(), asked, "a film", &["mp4"], "films", usual)
         };
+        // A place of the machine's outside the assistant's folder: on another drive, or at the root.
+        let elsewhere = if cfg!(windows) { "D:/films/night.mp4" } else { "/films/night.mp4" };
         // A client trusted as the user is: where it says, or where films go.
         let trusted = TrillServer::new(runtime.clone());
         assert_eq!(place(&trusted, None), Ok(usual()));
-        assert_eq!(place(&trusted, Some("D:/films/night.mp4")), Ok(PathBuf::from("D:/films/night.mp4")));
+        assert_eq!(place(&trusted, Some(elsewhere)), Ok(PathBuf::from(elsewhere)));
         // The assistant: under the same name, in `films` in its working folder.
         let guarded = TrillServer::guarded(runtime.clone(), work.clone());
         let kept = place(&guarded, None).unwrap();
@@ -526,7 +528,7 @@ mod tests {
         assert_eq!(films.file_name().and_then(|name| name.to_str()), Some("films"));
         assert_eq!(films.parent().unwrap().canonicalize().unwrap(), work.canonicalize().unwrap());
         // And where it does say, only there.
-        let refusal = place(&guarded, Some("D:/films/night.mp4")).unwrap_err();
+        let refusal = place(&guarded, Some(elsewhere)).unwrap_err();
         assert!(refusal.contains("a film can only be written inside"), "{refusal}");
     }
 

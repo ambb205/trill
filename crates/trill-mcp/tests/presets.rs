@@ -1474,7 +1474,13 @@ async fn the_assistant_is_given_preset_files_of_this_machine_and_no_other() {
     // A file on another machine is not opened: the path alone is refused,
     // before anything looks at it.
     let tracks = ok(assistant, "get_project", json!({})).await["tracks"].as_array().unwrap().len();
-    for share in [r"\\files.example\presets\Lead.vstpreset", "//files.example/presets/Lead.vstpreset"] {
+    // Backslashes name a share on Windows only: elsewhere they are one file's name, which no tool takes for a path.
+    let shares: &[&str] = if cfg!(windows) {
+        &[r"\\files.example\presets\Lead.vstpreset", "//files.example/presets/Lead.vstpreset"]
+    } else {
+        &["//files.example/presets/Lead.vstpreset"]
+    };
+    for &share in shares {
         let refused = format!("'{share}' is not on one of this machine's own disks");
         let arguments = json!({ "name": "x", "instrument": SYNTH, "preset": share });
         let error = call(assistant, "create_track", arguments).await.unwrap_err();

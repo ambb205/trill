@@ -45,6 +45,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # owner. The version eframe itself is built on.
 raw-window-handle = "0.6"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# A window that only has its picture taken is made through X, where the
+# window manager can be told to leave it alone (see `ui::unseen`). The
+# version eframe itself is built on.
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
 [dev-dependencies]
 # Sample packs for the interaction tests, away from the user's own.
 tempfile = "3"

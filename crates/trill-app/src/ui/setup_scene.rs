@@ -292,6 +292,7 @@ impl SetupScene {
             look_at_start: true,
             quiet_about: None,
         };
+        let runtime_offered = lists[0].parts.iter().any(|status| status.part.id == "runtime");
         Staged {
             program: made_up,
             on_program,
@@ -327,9 +328,11 @@ impl SetupScene {
                 _ => (folder.join("studies"), 0, 0),
             },
             on_machine: self == SetupScene::Machine,
+            // The runtime is offered for Windows alone so far; elsewhere the first part.
             selected: match self {
                 SetupScene::Fetching => "stems",
-                _ => "runtime",
+                _ if runtime_offered => "runtime",
+                _ => "stems",
             },
             instruments,
             here,

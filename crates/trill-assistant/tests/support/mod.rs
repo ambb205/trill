@@ -28,7 +28,15 @@ impl Stage {
         let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("stage-{name}"));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).expect("the stage directory");
-        fs::copy(env!("CARGO_BIN_EXE_trill-assistant-fake-cli"), Self::program_in(&directory)).expect("the fake CLI");
+        let (built, program) = (env!("CARGO_BIN_EXE_trill-assistant-fake-cli"), Self::program_in(&directory));
+        // On Unix a program that is written can be run only once no process holds it open for writing, and a
+        // process that another test forks meanwhile holds whatever was open then until it starts its own program
+        // ("Text file busy"). A second name for the same file is never open for writing.
+        #[cfg(unix)]
+        let placed = fs::hard_link(built, &program).or_else(|_| fs::copy(built, &program).map(|_| ()));
+        #[cfg(not(unix))]
+        let placed = fs::copy(built, &program).map(|_| ());
+        placed.expect("the fake CLI");
         Self { directory }
     }
 
