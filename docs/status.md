@@ -184,8 +184,8 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
 - Where files dragged in from the Finder will land, shown while they are dragged. The window is not told where
   the pointer is during such a drag; it places what was dropped when the pointer next moves (not yet tried with a
   real mouse).
-- Paths compared as the disk has them. macOS disks are usually blind to case, and two spellings of one file
-  that differ only in case are taken for two files.
+- A name written in two Unicode forms (an accented letter as one character, or as a letter and its accent) taken
+  for one name, as macOS's disks take it. Two spellings that differ in case are one, as there.
 - An installer, a release and updates. A build of one's own neither looks for a newer Trill nor is replaced.
 - A picture of the window (`--screenshot`) is taken in a window without a title bar, off every screen, by a
   program that has no Dock icon and never comes to the front.
