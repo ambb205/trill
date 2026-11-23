@@ -211,7 +211,7 @@ impl Team {
             .map_while(|index| {
                 let shared = shared.clone();
                 let run = move || {
-                    let _priority = AudioPriority::raise();
+                    let _priority = AudioPriority::raise_beside();
                     let _denormals = DenormalGuard::new();
                     settle();
                     shared.serve(index + 1);

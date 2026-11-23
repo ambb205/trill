@@ -19,7 +19,7 @@ bench = false
 serde_json.workspace = true
 thiserror.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 # Says so where the CLI could be given no keeper (see `process.rs`).
 log.workspace = true
 

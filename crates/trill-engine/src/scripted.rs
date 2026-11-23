@@ -88,31 +88,14 @@ pub enum Dies {
 
 /// The fault itself.
 fn die() -> ! {
-    #[cfg(target_os = "macos")]
-    unreported();
+    // No system writes a report of this one (a test makes it on purpose).
+    #[cfg(unix)]
+    trill_fetch::end_unreported_on_a_fault();
     // SAFETY: there is none, on purpose: the address is not one that may
     // be written to, and the system ends the process for it. Only a test
     // asks for this, of a process it started for the purpose.
     unsafe { std::ptr::write_volatile(std::hint::black_box(8usize) as *mut u8, 1) };
     std::process::abort()
-}
-
-/// Has a fatal signal end this process by SIGKILL, of which macOS writes no
-/// crash report: for a process a test takes down on purpose, so that a test
-/// leaves nothing in the user's reports. The fault that follows is real,
-/// and whoever started the process sees it ended by a signal. Nothing that
-/// really crashes comes here.
-#[cfg(target_os = "macos")]
-fn unreported() {
-    extern "C" fn end(_signal: libc::c_int) {
-        // SAFETY: ends this process, which may be called from a handler.
-        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
-    }
-    for signal in [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT, libc::SIGFPE, libc::SIGBUS, libc::SIGSEGV, libc::SIGSYS]
-    {
-        // SAFETY: a handler that only ends the process.
-        unsafe { libc::signal(signal, end as extern "C" fn(libc::c_int) as libc::sighandler_t) };
-    }
 }
 
 /// When the instruments a factory hands out are ready to play.

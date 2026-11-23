@@ -2,13 +2,16 @@
 //!
 //! A recording is somebody's voice, and what says it is unused is a list a
 //! program made. So a recording that is removed is **never unlinked**. It
-//! goes to the system's Recycle Bin (on macOS its Trash), from where the
+//! goes to the system's Recycle Bin (on macOS its Trash, on Linux the
+//! desktop's trash), from where the
 //! system gives it back; and where there is no bin for it (a system without
 //! one, a drive whose files the bin does not take, a file too big for it),
 //! into a folder called `removed` beside the takes, from where anybody does.
 //!
 //! On macOS the Trash is asked through the file manager, which moves a file
 //! into the Trash of its own disk or says it cannot, and never deletes it.
+//! On Linux a file goes to the trash as the freedesktop.org specification
+//! has it (`bin/trash.rs`), by a rename and never a copy or a deletion.
 //!
 //! On Windows the bin is asked through the shell's own file operation, with undo
 //! allowed. The shell deletes for good what it cannot recycle unless it is
@@ -23,7 +26,13 @@ use std::path::{Path, PathBuf};
 pub const REMOVED_FOLDER: &str = "removed";
 
 /// What the system's bin is called where people read it.
-const SYSTEMS_BIN: &str = if cfg!(target_os = "macos") { "the Trash" } else { "the Recycle Bin" };
+const SYSTEMS_BIN: &str = if cfg!(target_os = "macos") {
+    "the Trash"
+} else if cfg!(target_os = "linux") {
+    "the trash"
+} else {
+    "the Recycle Bin"
+};
 
 /// Where recordings that are removed go.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -68,7 +77,7 @@ impl Bin {
     /// asked before one does.
     pub fn goes(self, folder: &Path) -> String {
         match self {
-            Bin::System if cfg!(any(windows, target_os = "macos")) => format!("to {SYSTEMS_BIN}"),
+            Bin::System if cfg!(any(windows, target_os = "macos", target_os = "linux")) => format!("to {SYSTEMS_BIN}"),
             _ => format!("to {}", folder.join(REMOVED_FOLDER).display()),
         }
     }
@@ -119,9 +128,25 @@ fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Asks the system to take `paths` into its Recycle Bin, and returns how
 /// many it says it took. What it did not take is where it was.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn recycle(_paths: &[PathBuf]) -> usize {
     0
+}
+
+#[cfg(target_os = "linux")]
+#[path = "bin/trash.rs"]
+mod trash;
+
+#[cfg(target_os = "linux")]
+fn recycle(paths: &[PathBuf]) -> usize {
+    let mut taken = 0;
+    for path in paths {
+        match trash::trash(path) {
+            Ok(_) => taken += 1,
+            Err(error) => log::warn!("the trash did not take '{}': {error}", path.display()),
+        }
+    }
+    taken
 }
 
 #[cfg(target_os = "macos")]
@@ -368,11 +393,18 @@ mod tests {
     }
 
     /// Puts two small files of this test's own into the Recycle Bin (on
-    /// macOS the Trash) of whoever runs it, and leaves them there.
+    /// macOS the Trash, on Linux the desktop's trash) of whoever runs it,
+    /// and leaves them there.
     #[test]
-    #[cfg(any(windows, target_os = "macos"))]
-    #[ignore = "puts two small files in this machine's Recycle Bin or Trash, and leaves them there; run with `cargo test -p trill-engine --lib the_systems_bin -- --ignored --nocapture`"]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[ignore = "puts two small files in this machine's Recycle Bin or trash, and leaves them there; run with `cargo test -p trill-engine --lib the_systems_bin -- --ignored --nocapture`"]
     fn the_systems_bin_takes_a_recording_and_says_so() {
+        // On Linux in a folder on the disk the home folder is on, whose
+        // trash the desktop shows: the temporary folder is often a disk in
+        // memory, whose own trash it does not.
+        #[cfg(target_os = "linux")]
+        let folder = tempfile::tempdir_in(std::env::var_os("HOME").expect("a home folder")).unwrap();
+        #[cfg(not(target_os = "linux"))]
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("trill test recording (safe to delete).wav");
         std::fs::write(&path, vec![0u8; 2048]).unwrap();

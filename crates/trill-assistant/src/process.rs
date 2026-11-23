@@ -4,8 +4,8 @@
 //! would leave the rest running. Every child is therefore placed in a
 //! [`ProcessTree`] before it executes a single instruction: on Windows a job
 //! object that the kernel empties when its last handle closes, which also
-//! covers Trill crashing; elsewhere a process group, which on macOS has a
-//! keeper beside it that ends it when Trill is gone.
+//! covers Trill crashing; on Unix a process group, which has a keeper
+//! beside it that ends it when Trill is gone.
 
 use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
@@ -25,9 +25,8 @@ impl ProcessTree {
         self.inner.kill();
     }
 
-    /// Gives the tree up once its child has exited. On Windows and macOS
-    /// this kills whatever the child left running; elsewhere there is no
-    /// safe way to (see the Unix `Tree`), and leftovers are left alone.
+    /// Gives the tree up once its child has exited, and kills whatever the
+    /// child left running (on Unix, where its keeper could be started).
     pub(crate) fn close(self) {}
 }
 
@@ -218,55 +217,14 @@ mod imp {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-mod imp {
-    use std::io;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command};
-
-    unsafe extern "C" {
-        /// POSIX `kill(2)`. Declared here to avoid a dependency for one call.
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-
-    const SIGKILL: i32 = 9;
-
-    /// A process group led by the child.
-    ///
-    /// Weaker than a Windows job in two ways. Nothing kills the group when
-    /// Trill crashes; the CLI then exits on its own once its output pipe is
-    /// gone. And dropping the tree does not kill: a group id can be reused
-    /// once the group is empty, so only an explicit [`Tree::kill`], made while
-    /// the child has not been waited for, is safe.
-    pub(super) struct Tree {
-        group: i32,
-    }
-
-    impl Tree {
-        pub(super) fn kill(&self) {
-            // SAFETY: `kill` has no memory-safety requirements. A negative
-            // pid addresses the group; if the group is already gone the call
-            // fails with ESRCH, which is fine.
-            unsafe { kill(-self.group, SIGKILL) };
-        }
-    }
-
-    pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Tree)> {
-        command.process_group(0);
-        let child = command.spawn()?;
-        let group = i32::try_from(child.id()).map_err(io::Error::other)?;
-        Ok((child, Tree { group }))
-    }
-}
-
-/// On macOS the group has a keeper: a shell in the group, which reads a pipe
+/// On Unix the group has a keeper: a shell in the group, which reads a pipe
 /// that only Trill holds the other end of. However Trill ends (a crash, a
 /// kill), the system closes that end, and the keeper ends the group and
 /// itself with it. And as long as the keeper lives the group is not empty,
 /// so its id is not given to another: killing it is safe at any time, and
 /// closing or dropping the tree kills what the CLI left running, as on
 /// Windows. Without a keeper (none could be started) it is the group alone.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 mod imp {
     use std::io;
     use std::os::unix::process::CommandExt;
@@ -280,7 +238,9 @@ mod imp {
     const SIGKILL: i32 = 9;
     /// What the keeper does: waits for its input to end, which it does only
     /// when Trill is gone, and then ends its group. (Trill never writes.)
-    const KEEPER: &str = "read _; kill -KILL -- -\"$1\"";
+    /// (`-s KILL`, as POSIX spells it: dash, Linux's usual `sh`, takes no
+    /// `-KILL` before `--`.)
+    const KEEPER: &str = "read _; kill -s KILL -- -\"$1\"";
 
     pub(super) struct Tree {
         group: i32,
