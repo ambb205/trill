@@ -1,8 +1,9 @@
 # Installing and updating
 
-Trill runs on Windows. A release is two programs and their licences: `trill.exe`, which is Trill, and
-`trill-mcp.exe`, the same program without the window for an AI client that speaks MCP. Nothing else is installed
-with them, and nothing they need has to be installed first.
+Trill runs on Windows and on Macs with Apple silicon. A release is two programs and their licences: `trill.exe`
+(on a Mac `Trill.app`), which is Trill, and `trill-mcp.exe` (on a Mac `Trill.app/Contents/MacOS/trill-mcp`), the
+same program without the window for an AI client that speaks MCP. Nothing else is installed with them, and nothing
+they need has to be installed first.
 
 ## Installing
 
@@ -29,6 +30,31 @@ place in File > Setup. Your songs are wherever you saved them. Trill changes not
 deleting its folder. Either way your songs, your settings and what was fetched stay where they are: delete those
 two folders yourself if you want them gone.
 
+## On a Mac
+
+Each release has **`Trill-<version>-macos.zip`**: `Trill.app` and a page to read. Unpack it (a double-click in the
+Finder does), drag `Trill.app` into your Applications folder, or any folder of yours, and start it from there. It
+updates itself only where it can write: started where it was unpacked, macOS runs it from a copy that cannot be
+written to, and it says so.
+
+Trill is not signed with a developer's certificate nor notarised by Apple, so the first time you open it macOS
+says that it could not check it, and opens nothing. Then, once:
+
+1. Open **System Settings**, then **Privacy & Security**.
+2. Scroll down to **Security**, where it says that Trill was blocked, and click **Open Anyway**.
+3. macOS asks once more: click **Open Anyway** again, and give your password if it asks for it.
+
+From then on Trill opens like any other application. This is Apple's own way for an application of a developer it
+does not know ([Open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac));
+it changes nothing for any other application. `SHA256SUMS.txt` beside each release has the checksum of every file
+of it.
+
+**What Trill keeps, and where.** Its settings, what it fetches when you ask it to and your studies are in
+`~/Library/Application Support/trill`, and what it can make again (the index of your sound library) in
+`~/Library/Caches/trill`. Your songs are wherever you saved them. **Taking Trill off again** is moving `Trill.app`
+to the Bin (and, where Trill has updated itself, the folder `.Trill.app.update` beside it, which the Finder shows
+with Command-Shift-full stop); those two folders and your songs stay where they are.
+
 ## A newer Trill
 
 File > Setup has a tab, **Trill**, that says which Trill this is and what it knows of a newer one.
@@ -46,7 +72,7 @@ line away for that version; a version after it is said again.
 machine (it can be stopped, and goes on from what had come), checks it against what its makers announced, and
 keeps it ready beside the programs. Nothing has changed at that point, and "Put it away" discards it.
 
-**When it goes in.** The next time you start `trill.exe` while no other Trill is running, the newer one takes the
+**When it goes in.** The next time you start `trill.exe` (on a Mac `Trill.app`) while no other Trill is running, the newer one takes the
 old one's place and starts, with whatever you started Trill with (a song you double-clicked opens in the new one).
 It never goes in under a Trill that is running: Trill starts itself a second time to scan plugins, to render and
 to study, and a program that changed under a running one would pair it with helpers of another version. So close
@@ -59,7 +85,13 @@ swapped, the next start puts back whatever had been moved, and Trill is as it wa
 
 **Where Trill cannot update itself.** A copy that lies where it cannot write (a folder that needs an
 administrator), and a kind of machine a release has no build for, are told so in a sentence that names the page
-with the installer. Run the installer of the newer version over the old one: it keeps everything of yours.
+with the installer. Run the installer of the newer version over the old one: it keeps everything of yours. On a
+Mac the sentence says to move `Trill.app` into a folder of yours (a copy started where it was unpacked is run by
+macOS from one that cannot be written to), or to put the newer one in its place by hand.
+
+**On a Mac** an update replaces files inside `Trill.app`, its seal with them, and keeps what it needs meanwhile
+beside it (`.Trill.app.update`, a folder the Finder does not show): nothing of it is ever left inside the
+application, whose files are only those its seal holds.
 
 **What makes this safe.** The announcement is signed by Trill's makers with a key whose secret half is kept off the
 network, and a Trill takes an announcement only under the keys it was built with. So whoever comes to control the

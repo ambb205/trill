@@ -99,7 +99,7 @@ first one has already built, and the first build compiles only Trill's own crate
 
 ## Making a release
 
-A release is made on Windows by one script, which publishes nothing:
+A release is made on Windows by one script, which publishes nothing (the Mac's build is made on a Mac, below):
 
 ```sh
 sh scripts/release.sh --key FILE --notes NOTES.txt    # into target/release-out/<version>
@@ -141,6 +141,50 @@ installed as "Trill trial" under an id of its own, never as the Trill a machine 
 into a folder under `target`, make a second with a higher `--trial-version`, serve its folder on the loopback
 (`python -m http.server --bind 127.0.0.1 8765`), and let the first one look, fetch and start again. A trial's
 build is never published: the script names its folder `-trial` and says so.
+
+### On macOS
+
+Trill for Macs with Apple silicon is made on such a Mac, by a script beside Windows' one, and announced with the
+other systems' builds by the machine that has the key:
+
+```sh
+sh scripts/release-macos.sh                       # into target/release-out/<version>
+sh scripts/update-trial-macos.sh                  # the updater tried out on the real programs (see below)
+```
+
+It builds `trill` and `trill-mcp` as a release in `target/dist`, with the commit and with the folders of this
+machine written as names, and refuses a program that is not Apple silicon's alone, asks for a library that is not
+the system's, does not say that it is this version at this commit, or still names this machine's home or the
+repository. It writes:
+
+- **`Trill.app`**: `Contents/MacOS/trill` and `trill-mcp`, `Contents/Info.plist` (the version, the oldest macOS the
+  programs say they run on, the sentence macOS shows when Trill first asks for a microphone; no kind of file is said
+  to open with it), `Contents/Resources/Trill.icns` (from `assets/trill-256.png`, by `sips` and `iconutil`) and the
+  licences in `Contents/Resources/licences`. The bundle is **signed ad hoc as a whole** (`codesign --sign -`): no
+  developer's identity and no notarisation, as the owner chose, but a seal over its files. A bundle whose programs
+  carry only their linker's signature fails `codesign --verify` ("code has no resources but signature indicates
+  they must be present"), and a quarantined copy of it fails Gatekeeper's assessment the same way, which macOS
+  shows as a damaged application that only a command in Terminal opens; signed as a whole, it is rejected as an
+  unknown developer's, which Privacy & Security opens (measured with `spctl --assess` on quarantined copies under
+  `target/`, which asks nothing).
+- **`trill-<version>-macos-aarch64.zip`**: the files of the bundle, below it, the seal among them: what an installed
+  Trill fetches to update itself. An update keeps everything of its own beside the bundle (`.Trill.app.update`):
+  a file the seal does not hold, anywhere in the bundle, breaks it ("unsealed contents present in the bundle root",
+  "a sealed resource is missing or invalid").
+- **`build-macos-aarch64.json`**: what that archive is (`describe`), unsigned. The machine with the key describes the
+  archive itself and announces it with the others (`announce --build ...`); this file is what the Mac worked out,
+  to hold that against.
+- **`Trill-<version>-macos.zip`**: `Trill.app` and its READ ME, packed by `ditto`, for people to download.
+
+The script signs no announcement and publishes nothing; the release key is never on the Mac.
+
+**Trying the updater out on macOS**: `sh scripts/update-trial-macos.sh` makes two trial builds (`--trial`, as on
+Windows: "Trill trial.app" under an identifier of its own), installs the first under `target/trial-macos` from the
+zip people download, serves the second on the loopback, has the installed `trill-mcp` look and fetch, starts the
+window, which puts the newer one in and comes up as it (the bundle's seal whole, nothing of the update in it), then
+publishes a version whose window does not come up and sees the one before put back. Its windows take their own
+pictures, off every screen and out of the Dock, and it ends by deleting the bundle and having Launch Services forget
+it.
 
 ## Architecture
 

@@ -189,7 +189,15 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
   from where the system says the pointer is, as on Windows.
 - A name written in two Unicode forms (an accented letter as one character, or as a letter and its accent) taken
   for one name, as macOS's disks take it. Two spellings that differ in case are one, as there.
-- An installer, a release and updates. A build of one's own neither looks for a newer Trill nor is replaced.
+- A Trill signed with a developer's certificate and notarised by Apple. A release is signed ad hoc, so the first
+  time it is opened macOS has to be told, once, in Privacy & Security, to open it. That way of opening it was not
+  tried on this machine, since it changes a setting; Apple's page says it.
+- Songs opened from the Finder by a double-click. `Trill.app` says no kind of file opens with it; a song opens from
+  File, Open.
+- Whether an update keeps what macOS let Trill do (its microphone). A program signed ad hoc is known to macOS by
+  what its file is, so a newer one may be asked again. Not measured: asking would open a microphone.
+- A file a release no longer has is left in `Trill.app` by an update, and breaks its seal: no release has dropped a
+  file yet.
 - A picture of the window (`--screenshot`) is taken in a window without a title bar, off every screen, by a
   program that has no Dock icon and never comes to the front.
 
