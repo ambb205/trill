@@ -130,7 +130,6 @@ Only Windows has been run so far.
   catalogue an instrument is from: they have its place, and a sentence that its file is not there.
 - A list of the audio that arrived for shared songs and was never saved with one, with a way to remove it. It
   stays in Trill's own folder (`received`).
-- What was read of a song's files (their hashes) kept from one run to the next.
 - Hearing a plugin one has not got where it is on a group, a return or the master: it lets through what comes
   into it. On a track that plays clips, whoever has the plugin records the track and the others hear that.
 - A recording for a plugin someone has not got made smaller than plain audio (eleven megabytes a minute), made

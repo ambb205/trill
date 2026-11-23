@@ -1455,7 +1455,11 @@ impl Sharing {
             None => {
                 let net = Net::new();
                 let bounds = trill_together::files::Bounds { unasked: self.unasked, ..Default::default() };
-                let files = Files::new(net.pieces(), self.media.clone(), bounds, trill_fetch::disk_free)
+                // What is read of this machine's files is kept beside the
+                // folder of files from other programs; a program that
+                // keeps nothing keeps none of that either.
+                let kept = (!self.for_the_run).then(|| self.received.with_file_name(crate::files::READ_FILE));
+                let files = Files::new(net.pieces(), self.media.clone(), bounds, trill_fetch::disk_free, kept)
                     .map_err(|error| format!("no thread could be started for the song's files: {error}"))?;
                 let driver = Driver {
                     session: self.session.clone(),

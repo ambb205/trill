@@ -214,7 +214,10 @@ on the samples.
   is read to be said or handed out, and only what its user let go**: the runtime's reader (`trill-runtime/src/
   files.rs`, a thread of its own) says a file only if the media cache reads it as audio, and only if it may go
   (`FileHere::may_go`): what the song brought, what the user's hand named (`hand::by_hand`), what was recorded,
-  and what the user was shown and let go (`Session::let_files_go`, which sharing is). A song file is a
+  and what the user was shown and let go (`Session::let_files_go`, which sharing is). What was read as audio is
+  kept from one run to the next (`files-read.json`, beside the folder of what arrived): a file as long as it was
+  and written when it was is not read again. That a file was none is found out again by every run, and what is
+  kept lets nothing go: a file that may not go is not looked up. A song file is a
   stranger: what it names is held until then (`Session::files_held`, `Together::held`). **An edit never waits
   for a file**: a connection has a second queue for pieces, taken only when nothing else waits (`net.rs`); and
   since what a program's system and the line have taken is ahead of whatever it says next, no more is asked of
