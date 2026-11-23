@@ -132,7 +132,7 @@ impl Harness {
 
 #[test]
 fn the_workspace_lays_a_study_out_and_a_stretch_is_selected_heard_and_sent_to_the_song() {
-    let Fixture { mut harness, id, folder } = opened(|session| {
+    let Fixture { folder, mut harness, id } = opened(|session| {
         session.edit(|project| project.set_tempo(120.0)).unwrap();
     });
     // What it is, and what was found in it.
@@ -214,7 +214,7 @@ fn the_workspace_lays_a_study_out_and_a_stretch_is_selected_heard_and_sent_to_th
 #[test]
 fn what_is_found_in_a_study_is_dragged_onto_the_lanes_of_the_song() {
     let mut made = None;
-    let Fixture { mut harness, folder: _kept, .. } = opened(|session| made = Some(two_tracks(session)));
+    let Fixture { folder: _kept, mut harness, .. } = opened(|session| made = Some(two_tracks(session)));
     let (first, second, _) = made.unwrap();
     let bars = harness.app.studies().open().unwrap().bars.clone();
 
@@ -289,7 +289,7 @@ fn what_is_found_in_a_study_is_dragged_onto_the_lanes_of_the_song() {
 #[test]
 fn the_workspace_in_a_window_of_its_own_is_the_same_view_and_drags_into_the_song() {
     let mut made = None;
-    let Fixture { mut harness, folder: _kept, .. } = opened(|session| made = Some(two_tracks(session)));
+    let Fixture { folder: _kept, mut harness, .. } = opened(|session| made = Some(two_tracks(session)));
     let (first, _, _) = made.unwrap();
     let bars = harness.app.studies().open().unwrap().bars.clone();
     harness.click_label("In a window of its own");
@@ -321,7 +321,7 @@ fn the_workspace_in_a_window_of_its_own_is_the_same_view_and_drags_into_the_song
 
 #[test]
 fn a_word_is_put_right_by_hand_and_keeps_its_time() {
-    let Fixture { mut harness, id, folder } = opened(|_| {});
+    let Fixture { folder, mut harness, id } = opened(|_| {});
     let lyrics_file = folder.path().join("config").join("studies").join(&id).join("lyrics.json");
     let before: trill_study::Lyrics = serde_json::from_str(&std::fs::read_to_string(&lyrics_file).unwrap()).unwrap();
     let word = harness.all_labeled("Word: two")[0].center();
@@ -346,7 +346,7 @@ fn a_word_is_put_right_by_hand_and_keeps_its_time() {
 
 #[test]
 fn the_studies_place_lists_studies_and_a_study_that_the_song_plays_says_so_before_it_goes() {
-    let Fixture { mut harness, id, folder } =
+    let Fixture { folder, mut harness, id } =
         fixture(|_| UiOptions { browser_tab: Some(BrowserTab::Studies), ..UiOptions::default() }, |_| {});
     let study_folder = folder.path().join("config").join("studies").join(&id);
     harness.wait_until("the studies to be listed", |harness| !harness.app.studies().list().is_empty());
@@ -403,7 +403,7 @@ fn the_studies_place_lists_studies_and_a_study_that_the_song_plays_says_so_befor
 
 #[test]
 fn the_dialog_asks_for_a_file_or_a_link_and_says_why_nothing_was_studied() {
-    let Fixture { mut harness, folder: _kept, .. } =
+    let Fixture { folder: _kept, mut harness, .. } =
         fixture(|_| UiOptions { browser_tab: Some(BrowserTab::Studies), ..UiOptions::default() }, |_| {});
     harness.click_label("Study a recording");
     harness.idle(3);
@@ -439,7 +439,9 @@ fn this_program_studies_when_it_is_started_for_that() {
 }
 
 /// The window on a runtime that can study: by this test program, started again.
-fn studying(options: UiOptions, slow: f64) -> (Harness, tempfile::TempDir) {
+/// The folder comes first, so that it is let go of after the window, which
+/// writes into it until it has gone.
+fn studying(options: UiOptions, slow: f64) -> (tempfile::TempDir, Harness) {
     trill_study::helper::serve_by_test("ui::tests::study::this_program_studies_when_it_is_started_for_that");
     let folder = tempfile::tempdir().unwrap();
     recording(&folder.path().join("refs").join("small song.wav"));
@@ -452,13 +454,13 @@ fn studying(options: UiOptions, slow: f64) -> (Harness, tempfile::TempDir) {
     let storage = Storage::At { settings: folder.path().join("config").join("settings.json"), library_index: None };
     let runtime_options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
     let runtime = Arc::new(Runtime::start_custom(runtime_options, Parts { studying, ..Parts::default() }).unwrap());
-    (Harness::on(runtime, options, |_| {}), folder)
+    (folder, Harness::on(runtime, options, |_| {}))
 }
 
 #[test]
 fn a_recording_is_studied_from_the_dialog_stopped_taken_up_and_opens_when_it_is_done() {
     let options = UiOptions { browser_tab: Some(BrowserTab::Studies), ..UiOptions::default() };
-    let (mut harness, folder) = studying(options, 0.5);
+    let (folder, mut harness) = studying(options, 0.5);
     let recorded = folder.path().join("refs").join("small song.wav");
     harness.click_label("Study a recording");
     harness.idle(3);
@@ -495,7 +497,7 @@ fn a_recording_is_studied_from_the_dialog_stopped_taken_up_and_opens_when_it_is_
 
 #[test]
 fn the_timed_test_is_run_from_the_setup_panel_and_says_what_it_chose() {
-    let (mut harness, _folder) = studying(UiOptions::default(), 0.0);
+    let (_folder, mut harness) = studying(UiOptions::default(), 0.0);
     harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Comma);
     harness.wait_until("the panel to read", |harness| !harness.app.setup().is_busy());
     harness.idle(3);
@@ -520,7 +522,7 @@ fn the_timed_test_is_run_from_the_setup_panel_and_says_what_it_chose() {
 
 #[test]
 fn the_recording_is_put_beside_the_song_as_a_reference_and_what_it_is_as_a_whole_is_taken() {
-    let Fixture { mut harness, id, folder: _kept } = opened(|session| {
+    let Fixture { folder: _kept, mut harness, id } = opened(|session| {
         session.edit(|project| project.set_tempo(120.0)).unwrap();
     });
     harness.click_label("NOTES");
