@@ -399,6 +399,12 @@ mod tests {
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[ignore = "puts two small files in this machine's Recycle Bin or trash, and leaves them there; run with `cargo test -p trill-engine --lib the_systems_bin -- --ignored --nocapture`"]
     fn the_systems_bin_takes_a_recording_and_says_so() {
+        // On Linux in a folder on the disk the home folder is on, whose
+        // trash the desktop shows: the temporary folder is often a disk in
+        // memory, whose own trash it does not.
+        #[cfg(target_os = "linux")]
+        let folder = tempfile::tempdir_in(std::env::var_os("HOME").expect("a home folder")).unwrap();
+        #[cfg(not(target_os = "linux"))]
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("trill test recording (safe to delete).wav");
         std::fs::write(&path, vec![0u8; 2048]).unwrap();
