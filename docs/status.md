@@ -205,7 +205,7 @@ there and how it was checked is in [Building and testing](development.md#on-linu
   (`IRunLoop`), which plugins built on Steinberg's own interface library need to draw at all, and a CLAP plugin
   the descriptors it asks the host to hear of (`posix-fd-support`); no plugin that uses either has been tried
   yet (Surge XT uses neither). Not yet: the scale an editor is told (1: Surge XT reads the display's resolution
-  itself); and, where there is no X server, more than the sentence opening one gives.
+  itself). Where there is no X server, no plugin offers its window, and Trill says so once as it starts.
   The plugins installed in `~/.clap`, `/usr/lib/clap`, `~/.vst3` and `/usr/lib/vst3` are found, scanned,
   played, rendered and given their presets (tried on Surge XT in both formats).
 - Real-time scheduling where neither the user's limit nor RealtimeKit gives it. The threads then run at an

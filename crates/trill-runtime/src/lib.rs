@@ -638,6 +638,21 @@ impl Runtime {
         self.plugins.as_ref()
     }
 
+    /// Why plugins' own windows cannot be shown in this run, where plugins
+    /// are on and that is so (on Linux, no X server could be reached): for
+    /// a front end to say once as it starts. No device then has a window to
+    /// offer.
+    pub fn plugin_windows_unavailable(&self) -> Option<String> {
+        self.plugins.as_ref()?;
+        trill_plugins::editors_cannot_be_shown().map(|reason| {
+            let mut said = reason.to_string();
+            if let Some(first) = said.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            said
+        })
+    }
+
     /// The user's settings as they stand, with the library's part taken
     /// from the library as it is now.
     pub fn settings(&self) -> Settings {
