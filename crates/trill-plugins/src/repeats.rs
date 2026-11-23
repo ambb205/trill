@@ -36,7 +36,6 @@
 //!   or no faster than one, two or four times the song), the threads, and
 //!   the rest of the song (the drums alone do it). With nothing asked of
 //!   it at all before the song, it does it too.
-
 //!
 //! - Surge XT (1.3.4, as a CLAP and as a VST3; measured on Linux, November
 //!   2026, by rendering one song twice, each render in a process that had
@@ -45,8 +44,9 @@
 //!   starting patch (Init Saw) and on a factory pad (Pad Another warm) the
 //!   two renders differ from the first note on (their difference within 10
 //!   dB of what the tracks peak at), while a factory bass (Attacky) was the
-//!   same samples. Switching its oscillators' Retrigger on (`A Osc 1
-//!   Retrigger` to 3, and B's) made the starting patch the same samples;
+//!   same samples. Switching the Retrigger of its scene A's three
+//!   oscillators on (`A Osc 1 Retrigger` and the two after it) made the
+//!   starting patch the same samples;
 //!   the pad still differed (by 29 dB under its peak), since it draws more
 //!   than the phase. So nothing is known that stops it for every patch, and
 //!   none is claimed: a render names it.

@@ -251,8 +251,9 @@ fn open_shared_input(found: &Named, on_failure: FailureCallback) -> Result<OpenI
     let supported = device.default_input_config().map_err(failed)?;
     let (channels, rate, format) = (supported.channels() as usize, supported.sample_rate(), supported.sample_format());
     let config: cpal::StreamConfig = supported.config();
-    // Off the input's thread, before its first buffer, as for the output.
-    super::priority::stream_opens(0, f64::from(rate), true);
+    // Off the input's thread, before its first buffer, as for the output;
+    // what happened to the output's threads stays as it was.
+    super::priority::input_opens(true);
     let (sink, link) = crate::capture::link(rate as f64, channels);
     let measured = Arc::new(Measured::default());
     let broke = Arc::new(AtomicBool::new(false));

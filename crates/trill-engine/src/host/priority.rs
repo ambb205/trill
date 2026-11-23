@@ -57,6 +57,23 @@ pub fn stream_opens(frames: u32, sample_rate: f64, real: bool) {
     expect_period(frames, sample_rate);
 }
 
+/// An input stream opens: its thread may ask for the class as the
+/// output's does (`real`: from a device a person plays into). Unlike
+/// [`stream_opens`] it forgets nothing of what happened to the output's
+/// threads, which an input's opening does not give the class back to. May
+/// be called from any thread but an audio one.
+pub fn input_opens(real: bool) {
+    #[cfg(target_os = "linux")]
+    {
+        if real {
+            linux::ask_the_desktop();
+        }
+        linux::prepare();
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = real;
+}
+
 /// Lets the desktop's service be asked for the class (on Linux), for a
 /// program that measures its threads as the window's are: it is otherwise
 /// asked only for a real device's stream. Nothing elsewhere.
@@ -263,8 +280,11 @@ impl Drop for AudioPriority {
             mac::lower();
         }
         #[cfg(target_os = "linux")]
-        if matches!(self.standing, linux::Standing::Given | linux::Standing::Asked) {
-            linux::lower();
+        match self.standing {
+            linux::Standing::Given | linux::Standing::Asked => linux::lower(),
+            // Its host's class stays; only the registry lets go of it.
+            linux::Standing::Had => linux::release(),
+            linux::Standing::Refused => {}
         }
     }
 }

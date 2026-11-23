@@ -46,10 +46,12 @@ use std::time::Duration;
 /// kernel's own handlers of interrupts run at 50), and lowered to what the
 /// user's limit or the service allows.
 const PRIORITY: i32 = 70;
-/// The hard limit on how long a real-time thread may run without a pause,
-/// in microseconds, where none lower is set: RealtimeKit's own default.
-/// The soft limit, at which the threads are taken out of real time, is half
-/// of it.
+/// RealtimeKit's own default for the hard limit on how long a real-time
+/// thread may run without a pause, in microseconds. The soft limit, at
+/// which the threads are taken out of real time, is half the hard limit
+/// where one is set, and half of this where none is: a hard limit is put in
+/// place only where the service asks for one ([`Service::connect`]), since
+/// it is what ends a program, cannot be raised again, and is inherited.
 const RTTIME_HARD_US: u64 = 200_000;
 
 /// How a thread came to be in the class, or not.
@@ -90,8 +92,10 @@ static BROKER: OnceLock<Option<Thread>> = OnceLock::new();
 static DESKTOP: AtomicBool = AtomicBool::new(false);
 /// Whether the threads were taken out of real time since a stream opened.
 static TAKEN_DOWN: AtomicBool = AtomicBool::new(false);
-/// How many threads the handler took out of real time, the last time.
+/// How many threads the handler took out of real time, the last time, and
+/// how many ids it acted on at all (each one a thread of this process).
 static TAKEN: AtomicU32 = AtomicU32::new(0);
+static ACTED_ON: AtomicU32 = AtomicU32::new(0);
 /// The soft limit the kernel says SIGXCPU at, in microseconds.
 static SOFT_US: AtomicU64 = AtomicU64::new(0);
 /// Whether the handler for SIGXCPU is in place.
@@ -118,6 +122,7 @@ pub(super) fn stream_opens() {
     TAKEN_DOWN.store(false, Ordering::Relaxed);
     GIVEN.store(0, Ordering::Relaxed);
     REFUSED.store(0, Ordering::Relaxed);
+    sweep(&RAISED);
     prepare();
 }
 
@@ -167,9 +172,33 @@ fn this_thread() -> i32 {
     unsafe { libc::gettid() }
 }
 
-/// Puts `tid` in the first free slot of `slots`.
+/// Whether `tid` is a thread of this process. The kernel gives ids out
+/// again, to any process: one of a thread that is gone may be another
+/// program's. A plain system call: fit for a signal's handler.
+fn alive(tid: i32) -> bool {
+    // SAFETY: signal 0 sends nothing: it only asks whether the thread is
+    // there, in this process.
+    unsafe { libc::syscall(libc::SYS_tgkill, libc::getpid(), tid, 0) == 0 }
+}
+
+/// Frees the slots of `slots` held by threads that are gone.
+fn sweep(slots: &[AtomicI32]) {
+    for slot in slots {
+        let tid = slot.load(Ordering::Acquire);
+        if tid != 0 && !alive(tid) {
+            let _ = slot.compare_exchange(tid, 0, Ordering::AcqRel, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Puts `tid` in the first free slot of `slots`, freeing the slots of
+/// threads that are gone where none is free.
 fn hold(slots: &[AtomicI32], tid: i32) -> bool {
-    slots.iter().any(|slot| slot.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Relaxed).is_ok())
+    let take = || slots.iter().any(|slot| slot.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Relaxed).is_ok());
+    take() || {
+        sweep(slots);
+        take()
+    }
 }
 
 /// Takes `tid` out of `slots`.
@@ -228,11 +257,17 @@ pub(super) fn raise(rank: Rank) -> Standing {
 /// takes back what it asked the broker for, if the broker has not got to
 /// it yet.
 pub(super) fn lower() {
+    release();
+    ordinary(0);
+}
+
+/// Lets go of the calling thread in every registry, leaving its
+/// scheduling as it is: for a thread that had the class from its host.
+pub(super) fn release() {
     let tid = this_thread();
     let_go(&WANTED_FIRST, tid);
     let_go(&WANTED_BESIDE, tid);
     let_go(&RAISED, tid);
-    ordinary(0);
 }
 
 /// Makes the thread `tid` (0: the calling one) an ordinary thread. A plain
@@ -246,18 +281,21 @@ fn ordinary(tid: i32) -> bool {
 }
 
 /// Keeps the soft limit on how long a real-time thread may run without a
-/// pause at half the hard one, with the hard one no higher than
-/// [`RTTIME_HARD_US`] (or `most`, the service's), and SIGXCPU's handler in
-/// place. System calls only: an audio thread may call it before it raises
+/// pause at half the hard one (half of [`RTTIME_HARD_US`] where there is no
+/// hard one), lowering the hard one only to `most` where that is asked
+/// (the service's), and SIGXCPU's handler in place. With no hard limit the
+/// kernel says SIGXCPU at the soft one, once a second after, and ends
+/// nothing. System calls only: an audio thread may call it before it raises
 /// itself through the kernel.
-fn guard_under(most: u64) {
+fn guard_under(most: Option<u64>) {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: fills in a local, and sets the process's own limit (lowering
     // it, which any process may).
     unsafe {
         if libc::getrlimit(libc::RLIMIT_RTTIME, &mut limit) == 0 {
-            let hard = limit.rlim_max.min(most);
-            let soft = limit.rlim_cur.min(hard / 2);
+            let hard = most.map_or(limit.rlim_max, |most| limit.rlim_max.min(most));
+            let half = if hard == libc::RLIM_INFINITY { RTTIME_HARD_US / 2 } else { hard / 2 };
+            let soft = limit.rlim_cur.min(half);
             if (soft, hard) != (limit.rlim_cur, limit.rlim_max) {
                 libc::setrlimit(libc::RLIMIT_RTTIME, &libc::rlimit { rlim_cur: soft, rlim_max: hard });
             }
@@ -270,7 +308,7 @@ fn guard_under(most: u64) {
 }
 
 fn guard() {
-    guard_under(RTTIME_HARD_US);
+    guard_under(None);
 }
 
 /// Puts [`on_sigxcpu`] in place for SIGXCPU, where nothing else of the
@@ -301,14 +339,20 @@ extern "C" fn on_sigxcpu(_signal: libc::c_int) {
     for slot in WANTED_FIRST.iter().chain(&WANTED_BESIDE) {
         slot.store(0, Ordering::Relaxed);
     }
-    let mut taken = 0;
+    let (mut taken, mut acted_on) = (0, 0);
     for slot in &RAISED {
         let tid = slot.swap(0, Ordering::AcqRel);
-        if tid != 0 && ordinary(tid) {
-            taken += 1;
+        // Only a thread of this process: the id of one that is gone may be
+        // another program's by now.
+        if tid != 0 && alive(tid) {
+            acted_on += 1;
+            if ordinary(tid) {
+                taken += 1;
+            }
         }
     }
     TAKEN.store(taken, Ordering::Relaxed);
+    ACTED_ON.store(acted_on, Ordering::Relaxed);
 }
 
 /// How many of the threads that make sound were given the class since a
@@ -370,6 +414,14 @@ fn broker() {
                     service = Service::connect().map_err(said_no).ok();
                 }
                 match service.as_ref().map(|connected| connected.raise(tid)) {
+                    // The threads were taken down while the service was asked:
+                    // this one too, and it is not counted as given.
+                    Some(Ok(())) if TAKEN_DOWN.load(Ordering::Relaxed) => {
+                        if alive(tid) {
+                            ordinary(tid);
+                        }
+                        let_go(&RAISED, tid);
+                    }
                     Some(Ok(())) => {
                         GIVEN.fetch_add(1, Ordering::Relaxed);
                     }
@@ -409,7 +461,7 @@ impl Service {
         let rttime = Self::property(&bus, "RTTimeUSecMax").unwrap_or(RTTIME_HARD_US as i64);
         // The service gives real time only to a program whose hard limit is
         // no higher than its own.
-        guard_under(u64::try_from(rttime).unwrap_or(RTTIME_HARD_US));
+        guard_under(Some(u64::try_from(rttime).unwrap_or(RTTIME_HARD_US)));
         let priority = PRIORITY.min(i32::try_from(most).unwrap_or(1)).max(1) as u32;
         Ok(Self { bus, priority })
     }
@@ -509,6 +561,106 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    /// Threads that register and end, more of them than there are slots:
+    /// a new thread still finds one, and the handler acts on no id of a
+    /// thread that is gone, only on the ones that are there.
+    #[test]
+    fn threads_that_ended_free_their_slots_and_the_handler_touches_none_of_them() {
+        let (said, status, _) = child("threads_that_ended");
+        assert!(status.success(), "{status:?}: {said}");
+        assert!(said.contains("CHILD every one held true, a new one held true, acted on 2, taken 2"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "run by threads_that_ended_free_their_slots_and_the_handler_touches_none_of_them, in a process of its own"]
+    fn threads_that_ended() {
+        if !in_the_child() {
+            return;
+        }
+        guard();
+        // Each registers as a device's thread does with ManuallyDrop, and ends without letting go.
+        let every_one_held = (0..RAISED.len() + 20)
+            .map(|_| std::thread::spawn(|| hold(&RAISED, this_thread())).join().unwrap())
+            .all(|held| held);
+        // Two that are there when the signal comes.
+        let (stop, waiting) = (std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(AtomicU32::new(0)));
+        let there: Vec<_> = (0..2)
+            .map(|_| {
+                let (stop, waiting) = (stop.clone(), waiting.clone());
+                std::thread::spawn(move || {
+                    let held = hold(&RAISED, this_thread());
+                    waiting.fetch_add(u32::from(held), Ordering::Relaxed);
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                })
+            })
+            .collect();
+        while waiting.load(Ordering::Relaxed) < 2 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let a_new_one_held = waiting.load(Ordering::Relaxed) == 2;
+        // SAFETY: sends a signal to this process.
+        unsafe { libc::kill(libc::getpid(), libc::SIGXCPU) };
+        let began = Instant::now();
+        while !taken_down() && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!(
+            "CHILD every one held {every_one_held}, a new one held {a_new_one_held}, acted on {}, taken {}",
+            ACTED_ON.load(Ordering::Relaxed),
+            TAKEN.load(Ordering::Relaxed)
+        );
+        stop.store(true, Ordering::Relaxed);
+        for thread in there {
+            thread.join().unwrap();
+        }
+    }
+
+    /// The soft limit is put at half the hard one, and half the service's
+    /// default where there is no hard one; a hard one is never put in place
+    /// where there was none, nor lowered.
+    #[test]
+    fn the_soft_limit_is_set_and_no_hard_one_is_put_in_place() {
+        let (said, status, _) = child("limits");
+        assert!(status.success(), "{status:?}: {said}");
+        assert!(said.contains("CHILD as it should be"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "run by the_soft_limit_is_set_and_no_hard_one_is_put_in_place, in a process of its own"]
+    fn limits() {
+        if !in_the_child() {
+            return;
+        }
+        let set = |soft, hard| {
+            // SAFETY: sets this process's own limit, from a test process of its own.
+            unsafe { libc::setrlimit(libc::RLIMIT_RTTIME, &libc::rlimit { rlim_cur: soft, rlim_max: hard }) == 0 }
+        };
+        let now = || {
+            let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            // SAFETY: fills in a local.
+            unsafe { libc::getrlimit(libc::RLIMIT_RTTIME, &mut limit) };
+            (limit.rlim_cur, limit.rlim_max)
+        };
+        let mut wrong = Vec::new();
+        // With no hard limit (where this process has none: one cannot be raised).
+        if now().1 == libc::RLIM_INFINITY && set(libc::RLIM_INFINITY, libc::RLIM_INFINITY) {
+            guard();
+            if now() != (RTTIME_HARD_US / 2, libc::RLIM_INFINITY) {
+                wrong.push(format!("with none: {:?}", now()));
+            }
+        }
+        // With one, at or under what this process has.
+        let hard = now().1.min(300_000);
+        assert!(set(hard, hard), "a limit can be lowered");
+        guard();
+        if now() != (hard / 2, hard) {
+            wrong.push(format!("with {hard}: {:?}", now()));
+        }
+        println!("CHILD {}", if wrong.is_empty() { "as it should be".to_string() } else { wrong.join("; ") });
     }
 
     /// On this machine's RealtimeKit: a thread that is given real time and
