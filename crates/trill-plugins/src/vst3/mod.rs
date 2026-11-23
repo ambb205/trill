@@ -56,6 +56,8 @@ mod presets;
 mod probe;
 mod processor;
 mod quirks;
+#[cfg(target_os = "linux")]
+mod run_loop;
 #[cfg(test)]
 pub(crate) mod scripted;
 pub(crate) mod state;

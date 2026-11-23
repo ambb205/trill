@@ -13,7 +13,9 @@
 //! Some of the plugins have an editor. It draws nothing; what it does is
 //! everything an editor does to its host: it negotiates a size, runs a
 //! timer while it exists, and has a "user" ([`act`]) who turns its knob,
-//! resizes it and closes it.
+//! resizes it and closes it. On Linux they also hand the host a pipe of
+//! their own to hear of (`posix-fd-support`), which a test writes into
+//! ([`say_to_pipe`]).
 
 use crate::notes::{Told, said};
 use clack_extensions::audio_ports::{
@@ -268,6 +270,8 @@ pub(crate) const SEEN_PARENT: u32 = 27;
 /// Flushes that came the way CLAP has them for an active plugin: on a
 /// thread the host calls audio and not main.
 pub(crate) const AUDIO_FLUSHES: u32 = 28;
+/// The bytes read from the pipe the plugin had the host hear of (Linux).
+pub(crate) const PIPE_BYTES: u32 = 29;
 
 /// The editor's size at a scale of 1.
 pub(crate) const EDITOR_SIZE: (u32, u32) = (400, 300);
@@ -280,7 +284,7 @@ const TIMER_PERIOD_MS: u32 = 5;
 pub(crate) const UNSETTLED: f64 = 20.0;
 pub(crate) const SETTLED_CUTOFF: f64 = 1_000.0;
 
-const PARAMS: [Param; 25] = [
+const PARAMS: [Param; 26] = [
     param(GAIN, "Gain", (0.0, 2.0, 1.0)),
     // Declares a default that is not what it starts with, as a plugin with
     // a patch loaded does.
@@ -310,6 +314,7 @@ const PARAMS: [Param; 25] = [
     seen(EDITOR_HEIGHT, "Editor Height"),
     seen(SEEN_PARENT, "Seen Parent"),
     seen(AUDIO_FLUSHES, "Audio Flushes"),
+    seen(PIPE_BYTES, "Pipe Bytes"),
 ];
 
 /// How many parameters a host should end up listing.
@@ -358,7 +363,7 @@ static ACTIONS: Mutex<Vec<(u64, Action)>> = Mutex::new(Vec::new());
 /// Has the user of the editor of the instance with this serial do
 /// `action`. The editor carries it out on its next timer tick, which only
 /// comes while the editor is open.
-#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
+#[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))] // Where editors are hosted.
 pub(crate) fn act(serial: u64, action: Action) {
     ACTIONS.lock().unwrap().push((serial, action));
 }
@@ -498,6 +503,8 @@ impl<const KIND: u8> Plugin for Scripted<KIND> {
         }
         if has_editor(KIND) {
             builder.register::<PluginGui>().register::<PluginTimer>();
+            #[cfg(target_os = "linux")]
+            builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
         }
         if has_presets(KIND) {
             builder.register::<clack_extensions::preset_discovery::PluginPresetLoad>();
@@ -530,7 +537,12 @@ impl<const KIND: u8> DefaultPluginFactory for Scripted<KIND> {
         }
         INSTANCES.lock().unwrap().push((shared.serial, KIND));
         log(shared.serial, "init");
-        Ok(MainThread { shared, host })
+        Ok(MainThread {
+            shared,
+            #[cfg(target_os = "linux")]
+            pipe: if has_editor(KIND) { pipe::open(&host, shared.serial) } else { None },
+            host,
+        })
     }
 }
 
@@ -539,6 +551,9 @@ impl<const KIND: u8> DefaultPluginFactory for Scripted<KIND> {
 pub(crate) struct MainThread<'a, const KIND: u8> {
     shared: &'a Shared<'a>,
     host: HostMainThreadHandle<'a>,
+    /// The end of its pipe it reads, where the host hears of it for it.
+    #[cfg(target_os = "linux")]
+    pipe: Option<std::os::fd::OwnedFd>,
 }
 
 impl<'a, const KIND: u8> PluginMainThread<'a, Shared<'a>> for MainThread<'a, KIND> {
@@ -553,6 +568,75 @@ impl<'a, const KIND: u8> PluginMainThread<'a, Shared<'a>> for MainThread<'a, KIN
 impl<const KIND: u8> Drop for MainThread<'_, KIND> {
     fn drop(&mut self) {
         log(self.shared.serial, "destroy");
+        #[cfg(target_os = "linux")]
+        if let Some(read) = self.pipe.take() {
+            pipe::close(&self.host, read, self.shared.serial);
+        }
+    }
+}
+
+/// Writes a byte into the pipe of the instance with this serial, which the
+/// plugin reads when the host tells it to. Whether it has one.
+#[cfg(target_os = "linux")]
+pub(crate) fn say_to_pipe(serial: u64) -> bool {
+    use std::os::fd::AsRawFd;
+    let Some(write) = pipe::WRITERS.lock().unwrap().as_ref().and_then(|writers| writers.get(&serial).cloned()) else {
+        return false;
+    };
+    // SAFETY: writes one byte from a constant; the descriptor is held open.
+    unsafe { libc::write(write.as_raw_fd(), [1u8].as_ptr().cast(), 1) == 1 }
+}
+
+#[cfg(target_os = "linux")]
+mod pipe {
+    use super::*;
+    use clack_extensions::posix_fd::{FdFlags, HostPosixFd, PluginPosixFdImpl};
+    use std::collections::HashMap;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::Arc;
+
+    /// The end each instance's test writes into, by serial.
+    pub(super) static WRITERS: Mutex<Option<HashMap<u64, Arc<OwnedFd>>>> = Mutex::new(None);
+
+    /// Makes a pipe and has the host hear of its reading end.
+    pub(super) fn open(host: &HostMainThreadHandle, serial: u64) -> Option<OwnedFd> {
+        let fds = host.get_extension::<HostPosixFd>()?;
+        let mut ends = [0; 2];
+        // SAFETY: fills in two descriptors, then owned.
+        if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+            return None;
+        }
+        // SAFETY: both were just made, and nothing else owns them.
+        let (read, write) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+        fds.register_fd(host, read.as_raw_fd(), FdFlags::READ).ok()?;
+        WRITERS.lock().unwrap().get_or_insert_default().insert(serial, Arc::new(write));
+        Some(read)
+    }
+
+    /// Has the host stop hearing of it, as a plugin does when it goes.
+    pub(super) fn close(host: &HostMainThreadHandle, read: OwnedFd, serial: u64) {
+        if let Some(fds) = host.get_extension::<HostPosixFd>() {
+            let _ = fds.unregister_fd(host, read.as_raw_fd());
+        }
+        if let Some(writers) = WRITERS.lock().unwrap().as_mut() {
+            writers.remove(&serial);
+        }
+    }
+
+    impl<const KIND: u8> PluginPosixFdImpl for MainThread<'_, KIND> {
+        /// Reads what is there, and counts it: only if the host kept its
+        /// word about the thread.
+        fn on_fd(&self, fd: RawFd, flags: FdFlags) {
+            if !flags.contains(FdFlags::READ) || self.pipe.as_ref().map(AsRawFd::as_raw_fd) != Some(fd) {
+                return;
+            }
+            let mut bytes = [0u8; 64];
+            // SAFETY: reads into a local of that many bytes; the pipe does not block.
+            let read = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+            if read > 0 && self.shared.threads().0 {
+                self.shared.add(PIPE_BYTES, read as f64);
+            }
+        }
     }
 }
 

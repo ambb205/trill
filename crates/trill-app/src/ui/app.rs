@@ -166,6 +166,10 @@ impl TrillApp {
 
         let mut state = UiState::new(options.detail_tab);
         state.browser.open = options.browser;
+        // Said once, as the window opens: no plugin offers a window of its own in this run.
+        if let Some(said) = runtime.plugin_windows_unavailable() {
+            state.toasts.lasting(super::toast::ToastKind::Info, said, Duration::from_secs(15));
+        }
         // The settings are in memory already; nothing is read here.
         let saved_browser_width =
             runtime.settings().ui.browser_width.clamp(BrowserState::MIN_WIDTH, BrowserState::MAX_WIDTH);

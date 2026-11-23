@@ -29,11 +29,13 @@
 //! the window follows what it makes of it.
 
 use super::{Events, Size};
+use crate::main_thread::{Wanted, Watcher};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::device::EditorImage;
 use x11rb::connection::Connection;
@@ -125,6 +127,34 @@ thread_local! {
     static DISPLAY: RefCell<Option<Rc<Display>>> = const { RefCell::new(None) };
 }
 
+/// Why no editor can be shown in this run of the program: no X server could
+/// be reached when it was first asked. Asked once, by connecting and letting
+/// go; a server that comes later is not looked for.
+pub(crate) fn cannot_show() -> Option<&'static str> {
+    static ASKED: OnceLock<Option<String>> = OnceLock::new();
+    ASKED.get_or_init(|| reach(None)).as_deref()
+}
+
+/// Why the X server of `display` (the one `DISPLAY` names where `None`)
+/// cannot be reached, if it cannot.
+fn reach(display: Option<&str>) -> Option<String> {
+    match x11rb::connect(display) {
+        Ok(_) => None,
+        Err(error) => {
+            let said = no_server(&error);
+            log::warn!("{said}");
+            Some(said)
+        }
+    }
+}
+
+fn no_server(error: &dyn std::fmt::Display) -> String {
+    format!(
+        "plugins' own windows are shown through an X server, and none could be reached ({error}). A Wayland \
+         desktop has one beside it for older programs (Xwayland), where it is set up"
+    )
+}
+
 impl Display {
     /// The calling thread's connection, made where it has none or the one
     /// it had broke.
@@ -132,12 +162,7 @@ impl Display {
         if let Some(display) = DISPLAY.with_borrow(|display| display.clone()).filter(|display| !display.broken.get()) {
             return Ok(display);
         }
-        let (conn, screen) = x11rb::connect(None).map_err(|error| {
-            format!(
-                "a plugin's editor is shown through an X server, and none could be reached ({error}). A Wayland \
-                 desktop has one beside it for older programs (Xwayland), where it is set up"
-            )
-        })?;
+        let (conn, screen) = x11rb::connect(None).map_err(|error| no_server(&error))?;
         let (root, black) = (conn.setup().roots[screen].root, conn.setup().roots[screen].black_pixel);
         let atoms = Atoms::of(&conn)?;
         let fd = conn.stream().as_raw_fd();
@@ -153,7 +178,12 @@ impl Display {
         // Read whenever it has something, whether a window is open or not:
         // what is not read leaves it ready, and the thread turning.
         let weak = Rc::downgrade(&display);
-        crate::main_thread::watch(fd, Rc::new(move || weak.upgrade().is_some_and(|display| display.read())));
+        crate::main_thread::watch(
+            Watcher::Editors,
+            fd,
+            Wanted::READ,
+            Rc::new(move |_| weak.upgrade().is_some_and(|display| display.read())),
+        );
         DISPLAY.set(Some(display.clone()));
         Ok(display)
     }
@@ -188,7 +218,7 @@ impl Display {
                 // A connection that broke is every window gone.
                 Err(_) => {
                     self.broken.set(true);
-                    crate::main_thread::unwatch(self.conn.stream().as_raw_fd());
+                    crate::main_thread::unwatch(Watcher::Editors, self.conn.stream().as_raw_fd());
                     // Every window there is learns it at its next look.
                     news |= !windows.is_empty();
                     break;
@@ -645,5 +675,17 @@ pub(crate) mod simulate {
             let attributes = conn.get_window_attributes(window as u32).ok().and_then(|cookie| cookie.reply().ok());
             attributes.is_some_and(|attributes| attributes.map_state == x11rb::protocol::xproto::MapState::VIEWABLE)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_display_with_no_x_server_is_a_sentence_that_says_where_one_is_had() {
+        // A display number nobody has: its socket is not there.
+        let said = reach(Some(":7391")).expect("no X server is at :7391");
+        assert!(said.contains("none could be reached") && said.contains("Xwayland"), "{said}");
     }
 }

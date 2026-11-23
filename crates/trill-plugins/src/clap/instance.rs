@@ -16,6 +16,8 @@ use clack_extensions::gui::PluginGui;
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
+#[cfg(target_os = "linux")]
+use clack_extensions::posix_fd::{FdFlags, PluginPosixFd};
 use clack_extensions::preset_discovery::PluginPresetLoad;
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
@@ -45,7 +47,7 @@ const FLUSH_GRACE: Duration = Duration::from_secs(1);
 
 /// The standard CLAP extensions a plugin may implement that this host
 /// makes no use of yet, by their identifiers.
-const UNUSED_EXTENSIONS: [&CStr; 15] = [
+const UNUSED_EXTENSIONS: &[&CStr] = &[
     c"clap.ambisonic/3",
     c"clap.audio-ports-activation/2",
     c"clap.audio-ports-config",
@@ -53,6 +55,7 @@ const UNUSED_EXTENSIONS: [&CStr; 15] = [
     c"clap.context-menu/1",
     c"clap.note-name",
     c"clap.param-indication/4",
+    #[cfg(not(target_os = "linux"))]
     c"clap.posix-fd-support",
     c"clap.remote-controls/2",
     c"clap.state-context/2",
@@ -175,6 +178,10 @@ pub(super) struct Instance {
     latency: Option<PluginLatency>,
     pub(super) gui: Option<PluginGui>,
     timer: Option<PluginTimer>,
+    /// What tells the plugin of its descriptors, and room for those that
+    /// are ready, so that idling does not allocate.
+    #[cfg(target_os = "linux")]
+    descriptors: (Option<PluginPosixFd>, Vec<(std::os::fd::RawFd, FdFlags)>),
     preset_load: Option<PluginPresetLoad>,
     /// In parameter-list order.
     param_ids: Vec<ClapId>,
@@ -210,6 +217,8 @@ impl Instance {
             );
         }
         self.tick_timers(now, due_timers);
+        #[cfg(target_os = "linux")]
+        self.tell_of_descriptors();
         self.flush_if_unanswered(now);
         self.service_editor(nested);
     }
@@ -224,6 +233,32 @@ impl Instance {
             // The tick of one timer may have unregistered the next.
             if self.plugin.access_handler(|handler| handler.has_timer(id)) {
                 timer.on_timer(&self.plugin.plugin_handle(), id);
+            }
+        }
+    }
+
+    /// Tells the plugin of each of its descriptors that was found ready.
+    #[cfg(target_os = "linux")]
+    fn tell_of_descriptors(&mut self) {
+        let (extension, ready) = &mut self.descriptors;
+        self.plugin.access_handler(|handler| handler.take_ready_descriptors(ready));
+        if ready.is_empty() {
+            return;
+        }
+        let Some(extension) = *extension else {
+            // Told of nothing, it would be ready for good.
+            if self.plugin.access_handler(|handler| handler.forget_descriptors()) {
+                log::warn!(
+                    "[{}] registered descriptors without the means to be told of them; let go of",
+                    self.plugin_id
+                );
+            }
+            return;
+        };
+        for &(fd, flags) in ready.iter() {
+            // Being told of one may have had it let go of the next.
+            if self.plugin.access_handler(|handler| handler.has_descriptor(fd)) {
+                extension.on_fd(&self.plugin.plugin_handle(), fd, flags);
             }
         }
     }
@@ -504,6 +539,8 @@ impl ClapThread {
         let latency: Option<PluginLatency> = handle.get_extension();
         let gui: Option<PluginGui> = handle.get_extension();
         let timer: Option<PluginTimer> = handle.get_extension();
+        #[cfg(target_os = "linux")]
+        let posix_fd: Option<PluginPosixFd> = handle.get_extension();
         let preset_load: Option<PluginPresetLoad> = handle.get_extension();
         let mut activated = activate(&mut plugin, latency, request.sample_rate, request.max_block)?;
         if let Some(params) = params {
@@ -551,6 +588,8 @@ impl ClapThread {
             latency,
             gui,
             timer,
+            #[cfg(target_os = "linux")]
+            descriptors: (posix_fd, Vec::new()),
             preset_load,
             param_ids,
             param_values,

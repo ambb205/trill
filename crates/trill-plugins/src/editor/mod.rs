@@ -43,9 +43,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::device::{EditorImage, EditorOptions};
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use window::THROWN;
+#[cfg(target_os = "linux")]
+pub(crate) use window::cannot_show;
 #[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) use window::simulate;
 pub(crate) use window::{SUPPORTED, TELLS_SCALE, Window, keep_out_of_sight};
+
+/// Why no editor can be shown in this run of the program, where that is so:
+/// on Linux, no X server. Elsewhere the system's own windows are always there.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn cannot_show() -> Option<&'static str> {
+    None
+}
 
 /// How long a plugin may take to open or close its editor before the
 /// caller stops waiting. Generous: an editor may load its graphics, or its
@@ -98,10 +107,13 @@ pub(crate) struct EditorStatus {
 
 impl EditorStatus {
     pub(crate) fn new(available: bool) -> Arc<Self> {
-        Arc::new(Self { available: AtomicBool::new(available), open: AtomicBool::new(false) })
+        let status = Arc::new(Self::default());
+        status.set_available(available);
+        status
     }
 
-    /// Whether the plugin has an editor this host can open.
+    /// Whether the plugin has an editor this host can open: never where no
+    /// editor can be shown ([`cannot_show`]), so that none is offered.
     pub(crate) fn is_available(&self) -> bool {
         self.available.load(Ordering::Acquire)
     }
@@ -109,6 +121,7 @@ impl EditorStatus {
     /// Corrects the answer where it only becomes known later: a VST3
     /// plugin shows whether it has an editor when it is asked for one.
     pub(crate) fn set_available(&self, available: bool) {
+        let available = available && cannot_show().is_none();
         self.available.store(available, Ordering::Release);
     }
 

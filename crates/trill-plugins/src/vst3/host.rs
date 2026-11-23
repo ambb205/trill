@@ -192,8 +192,45 @@ pub(crate) struct PlugFrame {
     request: AtomicU64,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Class for PlugFrame {
     type Interfaces = (IPlugFrame,);
+}
+
+/// On Linux the frame is also the run loop a view hangs its connections and
+/// timers off (`run_loop.rs`).
+#[cfg(target_os = "linux")]
+impl Class for PlugFrame {
+    type Interfaces = (IPlugFrame, vst3::Steinberg::Linux::IRunLoop);
+}
+
+#[cfg(target_os = "linux")]
+impl vst3::Steinberg::Linux::IRunLoopTrait for PlugFrame {
+    unsafe fn registerEventHandler(
+        &self,
+        handler: *mut vst3::Steinberg::Linux::IEventHandler,
+        fd: vst3::Steinberg::Linux::FileDescriptor,
+    ) -> tresult {
+        // SAFETY: the view passes a live handler, or null.
+        unsafe { super::run_loop::register_handler(self.instance, handler, fd) }
+    }
+
+    unsafe fn unregisterEventHandler(&self, handler: *mut vst3::Steinberg::Linux::IEventHandler) -> tresult {
+        super::run_loop::unregister_handler(handler)
+    }
+
+    unsafe fn registerTimer(
+        &self,
+        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+        milliseconds: vst3::Steinberg::Linux::TimerInterval,
+    ) -> tresult {
+        // SAFETY: the view passes a live handler, or null.
+        unsafe { super::run_loop::register_timer(self.instance, handler, milliseconds) }
+    }
+
+    unsafe fn unregisterTimer(&self, handler: *mut vst3::Steinberg::Linux::ITimerHandler) -> tresult {
+        super::run_loop::unregister_timer(handler)
+    }
 }
 
 impl PlugFrame {
@@ -203,6 +240,12 @@ impl PlugFrame {
 
     /// The size the view asked for since the last call, if that is still
     /// to be acted on.
+    /// Whose editor the view belongs to.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn instance(&self) -> InstanceId {
+        self.instance
+    }
+
     pub(crate) fn take_request(&self) -> Option<Size> {
         let packed = self.request.swap(0, Ordering::AcqRel);
         (packed != 0).then(|| Size::new(packed as u32, (packed >> 32) as u32))
