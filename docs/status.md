@@ -179,8 +179,7 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
   `~/Library/Audio/Plug-Ins` and `/Library/Audio/Plug-Ins` are found, scanned and played.
 - A plugin that takes a render down named by its file. The render says that its process went down, at which
   stage, and the song is as it was.
-- How much memory the machine has free, and how much room a disk has. No render or study is refused for want of
-  either; a study's own process is measured, and ended when it takes more than it was given.
+- How much room a disk has. Nothing is refused for want of it.
 - A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
 - Where files dragged in from the Finder will land, shown while they are dragged. The window is not told where
   the pointer is during such a drag; it places what was dropped when the pointer next moves (not yet tried with a
