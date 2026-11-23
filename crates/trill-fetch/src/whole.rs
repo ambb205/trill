@@ -182,7 +182,9 @@ mod tests {
     #[test]
     fn a_program_ended_by_a_signal_says_which_and_one_that_ended_by_itself_says_none() {
         let ended = |script: &str| Command::new("sh").args(["-c", script]).status().unwrap();
-        assert_eq!(ended_by_signal(&ended("kill -ABRT $$")), Some(format!("signal {}, SIGABRT", libc::SIGABRT)));
+        // Signals that end a program without a core: one that makes a core has the system write a crash report
+        // of `sh`, which a test does not leave behind.
+        assert_eq!(ended_by_signal(&ended("kill -TERM $$")), Some(format!("signal {}, SIGTERM", libc::SIGTERM)));
         assert_eq!(ended_by_signal(&ended("kill -USR1 $$")), Some(format!("signal {}", libc::SIGUSR1)));
         assert_eq!(ended_by_signal(&ended("exit 3")), None);
     }
