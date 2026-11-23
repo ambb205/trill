@@ -31,7 +31,10 @@ mod macos {
     use std::thread::{self, ThreadId};
     use std::time::{Duration, Instant};
     use trill_engine::{AudioBackend, Session, SessionLock};
-    use trill_plugins::first_thread::{on_the_plugin_thread, serve_here, serve_while_waiting};
+    use trill_plugins::first_thread::{on_the_plugin_thread, refuse_after, serve_here, serve_while_waiting};
+
+    /// How long a job keeps the thread before the thread counts as hung, here.
+    const HUNG_AFTER: Duration = Duration::from_millis(300);
 
     const WAIT: Duration = Duration::from_secs(10);
 
@@ -62,6 +65,7 @@ mod macos {
     pub fn main() {
         let first = thread::current().id();
         assert!(serve_here(), "this is the first thread");
+        refuse_after(HUNG_AFTER);
         SessionLock::serve_while_waiting(serve_while_waiting);
         let done = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(Mutex::new(0));
@@ -83,7 +87,7 @@ mod macos {
     type Test = Box<dyn Fn() -> Result<(), String>>;
 
     fn run(first: ThreadId) -> usize {
-        let tests: [(&str, Test); 4] = [
+        let tests: [(&str, Test); 7] = [
             ("plugin_work_is_done_on_the_first_thread_that_runs_the_window", Box::new(move || work_is_first(first))),
             ("a_question_asked_on_the_first_thread_is_answered_there_after_the_jobs_before_it", Box::new(asked_there)),
             ("with_no_frame_drawn_jobs_are_taken_one_in_fifty_milliseconds", Box::new(paced)),
@@ -91,7 +95,14 @@ mod macos {
                 "a_wait_for_the_session_on_the_first_thread_serves_the_plugins_that_its_holder_waits_for",
                 Box::new(no_deadlock),
             ),
+            ("a_question_waits_for_a_long_job_and_is_refused_at_once_once_it_has_hung", Box::new(refused_once_hung)),
+            ("a_job_that_panics_does_not_have_every_question_after_it_refused", Box::new(after_a_panic)),
+            (
+                "a_question_asked_on_the_first_thread_that_panics_costs_the_question_and_not_the_window",
+                Box::new(panics_here),
+            ),
         ];
+        let total = tests.len();
         println!("\nrunning {} tests", tests.len());
         let mut failed = 0;
         for (name, test) in tests {
@@ -106,9 +117,62 @@ mod macos {
         println!(
             "\ntest result: {}. {} passed; {failed} failed\n",
             if failed == 0 { "ok" } else { "FAILED" },
-            4 - failed
+            total - failed
         );
         failed
+    }
+
+    fn refused_once_hung() -> Result<(), String> {
+        // A job that keeps the thread for longer than the bound ...
+        let long = thread::spawn(|| on_the_plugin_thread(WAIT, || thread::sleep(Duration::from_millis(900))));
+        thread::sleep(Duration::from_millis(50));
+        // ... a question asked before the bound is waited for ...
+        let early = thread::spawn(|| on_the_plugin_thread(WAIT, || ()));
+        thread::sleep(Duration::from_millis(400));
+        // ... and one asked after it is refused at once.
+        let asked = Instant::now();
+        let late = on_the_plugin_thread(WAIT, || ());
+        let refused_in = asked.elapsed();
+        long.join().map_err(|_| "a sender panicked")?.ok_or("the long job was not done")?;
+        let early = early.join().map_err(|_| "a sender panicked")?;
+        match (early, late, refused_in < Duration::from_millis(100)) {
+            (Some(()), None, true) => Ok(()),
+            other => Err(format!("early answered, late refused, at once: {other:?} ({refused_in:?})")),
+        }
+    }
+
+    fn after_a_panic() -> Result<(), String> {
+        // The plugin thread is kept from one question to the next, as a
+        // program's factories keep it: one over no plugins, which scans
+        // nothing and keeps nothing.
+        let _kept = trill_plugins::Vst3Factory::new(trill_plugins::Vst3Config {
+            search_paths: Vec::new(),
+            cache_path: None,
+            preset_paths: Vec::new(),
+            vendor_places: trill_plugins::VendorPlaces::default(),
+            ..trill_plugins::Vst3Config::default()
+        })
+        .map_err(|error| error.to_string())?;
+        let panicked: Option<()> = on_the_plugin_thread(WAIT, || panic!("a job that panics, on purpose"));
+        thread::sleep(HUNG_AFTER + Duration::from_millis(200));
+        let after = on_the_plugin_thread(WAIT, || 5);
+        match (panicked, after) {
+            (None, Some(5)) => Ok(()),
+            other => Err(format!("{other:?}")),
+        }
+    }
+
+    fn panics_here() -> Result<(), String> {
+        let (answer, answered) = std::sync::mpsc::channel();
+        on_the_first_thread(Box::new(move || {
+            let panicked: Option<()> = on_the_plugin_thread(WAIT, || panic!("a question that panics, on purpose"));
+            let next = on_the_plugin_thread(WAIT, || 6);
+            let _ = answer.send((panicked, next));
+        }));
+        match answered.recv_timeout(WAIT).map_err(|_| "the first thread never answered")? {
+            (None, Some(6)) => Ok(()),
+            other => Err(format!("{other:?}")),
+        }
     }
 
     fn work_is_first(first: ThreadId) -> Result<(), String> {

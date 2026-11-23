@@ -565,15 +565,16 @@ pub(crate) struct Vst3Thread {
     /// they were let go of. They are as they were then: active, and no
     /// longer processed. [`served`](ThreadState::served) takes them down.
     leaving: Vec<(Instant, Instance)>,
+    /// Plugins being made a step at a time, between two of their steps.
+    /// Declared before the modules: what is half made goes before its
+    /// library is unloaded.
+    makings: HashMap<u64, Making>,
     /// Modules stay loaded once used: reloading one for every instance is
     /// slow, and plugins are rarely tested against repeated unloading.
     modules: HashMap<PathBuf, Module>,
     /// The context every plugin object is initialized with.
     host: ComWrapper<HostApplication>,
     next_id: u64,
-    /// Plugins being made a step at a time, between two of their steps.
-    /// Declared last: what is half made goes before the modules.
-    makings: HashMap<u64, Making>,
 }
 
 impl ThreadState for Vst3Thread {
@@ -581,10 +582,10 @@ impl ThreadState for Vst3Thread {
         Self {
             instances: HashMap::new(),
             leaving: Vec::new(),
+            makings: HashMap::new(),
             modules: HashMap::new(),
             host: HostApplication::new(),
             next_id: 1,
-            makings: HashMap::new(),
         }
     }
 

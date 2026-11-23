@@ -186,6 +186,32 @@ impl Drop for SignalOnDrop {
 /// measured to take (a second).
 const HUNG_AFTER: Duration = Duration::from_secs(10);
 
+/// [`HUNG_AFTER`], in nanoseconds, unless a test shortened it.
+static HUNG_AFTER_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(HUNG_AFTER.as_nanos() as u64);
+
+/// Has a job count as hung after `after` in place of [`HUNG_AFTER`]: for
+/// tests, which need not wait ten seconds.
+pub(crate) fn hung_after(after: Duration) {
+    HUNG_AFTER_NANOS.store(after.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Says that a job is running, from when it is made until it is dropped:
+/// when the job ends, and when it panics.
+struct Running(Arc<std::sync::atomic::AtomicU64>);
+
+impl Running {
+    fn began(running: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        running.store(since_start().max(1), std::sync::atomic::Ordering::Relaxed);
+        Self(running)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Nanoseconds since the first time this was asked: a clock for atomics.
 fn since_start() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -342,7 +368,7 @@ impl<S: ThreadState> MainThread<S> {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn hung(&self) -> bool {
         let began = self.inner.running.load(std::sync::atomic::Ordering::Relaxed);
-        began != 0 && since_start().saturating_sub(began) > HUNG_AFTER.as_nanos() as u64
+        began != 0 && since_start().saturating_sub(began) > HUNG_AFTER_NANOS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether the thread is behind: it has had work to do for a while
@@ -361,9 +387,9 @@ impl<S: ThreadState> MainThread<S> {
         let job = move |state: &mut S| {
             // Let go of when the job has run, and if it never does.
             let _finished = finished;
-            running.store(since_start().max(1), std::sync::atomic::Ordering::Relaxed);
+            // The job is said to be running until it ends, by panicking too.
+            let _running = Running::began(running);
             job(state);
-            running.store(0, std::sync::atomic::Ordering::Relaxed);
         };
         self.inner.sender.send(Message::Run { job: Box::new(job), at_rest }).map_err(|_| CallError::Failed)?;
         self.inner.waker.wake();
@@ -407,15 +433,17 @@ impl<S: ThreadState> MainThread<S> {
             // On macOS's window the thread that asks may be the plugin
             // thread itself, between two of its jobs: answered there.
             #[cfg(target_os = "macos")]
-            if let Some(value) = run_here::<S, R>(job) {
-                return Ok(value);
+            if let Some(answer) = run_here::<S, R>(job) {
+                return answer;
             }
             return Err(CallError::Reentrant);
         }
         // On macOS the thread plugins are driven from may be a window's:
-        // one that has been in one job for long is not waited for again.
+        // there one that has been in one job for long is not waited for
+        // again. (Anywhere else a long job is a plugin that is slow, and is
+        // waited for.)
         #[cfg(target_os = "macos")]
-        if self.hung() {
+        if os_events::steps_a_turn() && self.hung() {
             return Err(CallError::TimedOut);
         }
         let (reply, result) = mpsc::sync_channel(1);
@@ -451,8 +479,8 @@ impl<S: ThreadState> MainThread<S> {
             // On macOS's window the thread that asks may be the plugin
             // thread itself, between two of its jobs: answered there.
             #[cfg(target_os = "macos")]
-            if let Some(value) = run_here::<S, R>(job) {
-                return Ok(value);
+            if let Some(answer) = run_here::<S, R>(job) {
+                return answer;
             }
             return Err(CallError::Reentrant);
         }
@@ -505,7 +533,14 @@ impl<S: ThreadState> SharedMainThread<S> {
                 return Ok(MainThread { inner });
             }
             // Its last handle is gone but it may not have finished yet. Two
-            // main threads must never be alive at once, so wait it out.
+            // main threads must never be alive at once, so wait it out. (On
+            // a window's thread, which is its thread, it is ended here: its
+            // loop is the one that would end it.)
+            #[cfg(target_os = "macos")]
+            {
+                let asked = Instant::now();
+                while !exit.wait(Duration::from_millis(5)) && asked.elapsed() < SHUTDOWN_TIMEOUT && serve_one::<S>() {}
+            }
             if !exit.wait(SHUTDOWN_TIMEOUT) {
                 log::warn!("the previous plugin main thread is still shutting down; starting another");
             }
@@ -734,7 +769,7 @@ pub(crate) fn with_current<S: ThreadState, R>(body: impl FnOnce(&mut S) -> R) ->
 /// (macOS), which asks them something between two of their jobs and cannot
 /// wait for itself. `None` where nothing of the kind can be done here.
 #[cfg(target_os = "macos")]
-fn run_here<S: ThreadState, R>(job: impl FnOnce(&mut S) -> R) -> Option<R> {
+fn run_here<S: ThreadState, R>(job: impl FnOnce(&mut S) -> R) -> Option<Result<R, CallError>> {
     if !os_events::steps_a_turn() {
         return None;
     }
@@ -749,7 +784,12 @@ fn run_here<S: ThreadState, R>(job: impl FnOnce(&mut S) -> R) -> Option<R> {
         return None;
     }
     let mut state = home.state.try_borrow_mut().ok()?;
-    Some(job(&mut state))
+    // As a job sent from another thread is: a panic costs the question, and
+    // not the window.
+    Some(catch_unwind(AssertUnwindSafe(|| job(&mut state))).map_err(|_| {
+        log::error!("a question asked on the plugin main thread panicked");
+        CallError::Failed
+    }))
 }
 
 /// For a thread that waits for something another thread holds while

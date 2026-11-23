@@ -314,7 +314,9 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
     let in_use = driven.home.state.try_borrow_mut().is_err();
     let wait = match (driven.home.until_idle(), waits) {
         _ if in_use => Some(super::IDLE_INTERVAL),
-        (idle, true) => Some(idle.unwrap_or(FRAME_OR_AFTER).min(FRAME_OR_AFTER.saturating_sub(last.elapsed()))),
+        // Waiting for a frame takes no idle (nothing is served meanwhile):
+        // what is left of the wait.
+        (_, true) => Some(FRAME_OR_AFTER.saturating_sub(last.elapsed())),
         (idle, false) => idle,
     };
     let next = match wait {
@@ -510,6 +512,9 @@ pub(crate) fn lend(body: Box<dyn FnOnce() -> i32 + Send>) -> ! {
             fn drop(&mut self) {
                 if let Some(done) = self.0.take() {
                     done(101);
+                    // The work panicked: the same bound as when it returns.
+                    std::thread::sleep(LEAVE_WITHIN);
+                    leave(101);
                 }
             }
         }
