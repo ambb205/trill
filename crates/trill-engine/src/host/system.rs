@@ -468,6 +468,9 @@ fn open_shared(
     let format = supported.sample_format();
     let mut config: cpal::StreamConfig = supported.config();
     config.buffer_size = request.buffer_size.map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed);
+    // Off the audio thread, before its first buffer: the class for audio is
+    // asked for from inside that buffer (on Linux, by a thread this starts).
+    super::priority::expect_period(request.buffer_size.unwrap_or(0), f64::from(rate));
 
     let measured = Arc::new(Measured::default());
     let state = Callback {

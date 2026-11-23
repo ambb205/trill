@@ -56,6 +56,8 @@ impl ScriptedModels {
             return Err("the scripted model was told to fail here".to_owned());
         }
         if self.script.crash_at == Some(stage) {
+            // No system writes a report of this one (a test makes it on purpose).
+            trill_fetch::end_unreported_on_a_fault();
             std::process::abort();
         }
         if self.script.hog_at == Some(stage) {

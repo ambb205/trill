@@ -155,6 +155,29 @@ fn play(processor: &mut Processor, left: &mut [f32], right: &mut [f32], frames: 
 }
 
 #[test]
+fn a_callbacks_thread_takes_the_audio_class_without_touching_the_allocator() {
+    use trill_engine::host::priority::AudioPriority;
+    // A device's callback asks for the class with its first buffer, and
+    // looks again with every one after: on a thread that has just started,
+    // as a device's thread is met for the first time. The stream has said
+    // what its buffers are, as a stream does before it starts: on Linux
+    // that starts the thread that asks the desktop's service for the class,
+    // and an audio thread hands its wish to it.
+    trill_engine::host::priority::expect_period(512, 48_000.0);
+    let calls = std::thread::spawn(|| {
+        allocator_calls(|| {
+            for _ in 0..3 {
+                AudioPriority::raise_for_good();
+                std::hint::black_box(AudioPriority::of_this_thread());
+            }
+        })
+    })
+    .join()
+    .unwrap();
+    assert_eq!(calls, 0);
+}
+
+#[test]
 fn playing_audio_clips_and_swapping_graphs_never_touches_the_allocator() {
     let folder = folder();
     let tone = write_wav(&file(&folder, "tone 100bpm.wav"), 44_100.0, &sine(440.0, 44_100.0, 4.8, 0.5));

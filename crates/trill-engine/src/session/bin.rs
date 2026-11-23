@@ -2,12 +2,18 @@
 //!
 //! A recording is somebody's voice, and what says it is unused is a list a
 //! program made. So a recording that is removed is **never unlinked**. It
-//! goes to the system's Recycle Bin, from where the system gives it back;
-//! and where there is no bin for it (a system without one, a drive whose
-//! files the bin does not take, a file too big for it), into a folder
-//! called `removed` beside the takes, from where anybody does.
+//! goes to the system's Recycle Bin (on macOS its Trash, on Linux the
+//! desktop's trash), from where the
+//! system gives it back; and where there is no bin for it (a system without
+//! one, a drive whose files the bin does not take, a file too big for it),
+//! into a folder called `removed` beside the takes, from where anybody does.
 //!
-//! The bin is asked through the shell's own file operation, with undo
+//! On macOS the Trash is asked through the file manager, which moves a file
+//! into the Trash of its own disk or says it cannot, and never deletes it.
+//! On Linux a file goes to the trash as the freedesktop.org specification
+//! has it (`bin/trash.rs`), by a rename and never a copy or a deletion.
+//!
+//! On Windows the bin is asked through the shell's own file operation, with undo
 //! allowed. The shell deletes for good what it cannot recycle unless it is
 //! told otherwise; it is told otherwise here, by a sink that refuses every
 //! deletion that is not into the bin. What is left where it was after that
@@ -18,6 +24,15 @@ use std::path::{Path, PathBuf};
 /// The folder beside the takes that holds what was removed and could not
 /// go to the system's bin.
 pub const REMOVED_FOLDER: &str = "removed";
+
+/// What the system's bin is called where people read it.
+const SYSTEMS_BIN: &str = if cfg!(target_os = "macos") {
+    "the Trash"
+} else if cfg!(target_os = "linux") {
+    "the trash"
+} else {
+    "the Recycle Bin"
+};
 
 /// Where recordings that are removed go.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -51,8 +66,8 @@ impl Removed {
         let folder = self.set_aside.first().and_then(|path| path.parent()).map(|folder| folder.display().to_string());
         match (self.recycled, folder) {
             (0, Some(folder)) => format!("to {folder}"),
-            (_, Some(folder)) => format!("to the Recycle Bin, and {} to {folder}", self.set_aside.len()),
-            (_, None) => "to the Recycle Bin".to_string(),
+            (_, Some(folder)) => format!("to {SYSTEMS_BIN}, and {} to {folder}", self.set_aside.len()),
+            (_, None) => format!("to {SYSTEMS_BIN}"),
         }
     }
 }
@@ -62,7 +77,7 @@ impl Bin {
     /// asked before one does.
     pub fn goes(self, folder: &Path) -> String {
         match self {
-            Bin::System if cfg!(windows) => "to the Recycle Bin".to_string(),
+            Bin::System if cfg!(any(windows, target_os = "macos", target_os = "linux")) => format!("to {SYSTEMS_BIN}"),
             _ => format!("to {}", folder.join(REMOVED_FOLDER).display()),
         }
     }
@@ -113,7 +128,7 @@ fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Asks the system to take `paths` into its Recycle Bin, and returns how
 /// many it says it took. What it did not take is where it was.
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn recycle(_paths: &[PathBuf]) -> usize {
     0
 }
@@ -129,6 +144,21 @@ fn recycle(paths: &[PathBuf]) -> usize {
         match trash::trash(path) {
             Ok(_) => taken += 1,
             Err(error) => log::warn!("the trash did not take '{}': {error}", path.display()),
+        }
+    }
+    taken
+}
+
+#[cfg(target_os = "macos")]
+fn recycle(paths: &[PathBuf]) -> usize {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let manager = NSFileManager::defaultManager();
+    let mut taken = 0;
+    for path in paths {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        match manager.trashItemAtURL_resultingItemURL_error(&url, None) {
+            Ok(()) => taken += 1,
+            Err(error) => log::warn!("the Trash did not take '{}': {}", path.display(), error.localizedDescription()),
         }
     }
     taken
@@ -362,24 +392,26 @@ mod tests {
         assert_eq!(std::fs::read(aside.join("Voice (2).wav")).unwrap().len(), 60);
     }
 
-    /// Puts one small file of this test's own into the Recycle Bin of
-    /// whoever runs it, and leaves it there.
+    /// Puts two small files of this test's own into the Recycle Bin (on
+    /// macOS the Trash, on Linux the desktop's trash) of whoever runs it,
+    /// and leaves them there.
     #[test]
-    #[cfg(windows)]
-    #[ignore = "puts a file in this machine's Recycle Bin; run with `cargo test -p trill-engine --lib the_systems_bin -- --ignored --nocapture`"]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[ignore = "puts two small files in this machine's Recycle Bin or trash, and leaves them there; run with `cargo test -p trill-engine --lib the_systems_bin -- --ignored --nocapture`"]
     fn the_systems_bin_takes_a_recording_and_says_so() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("trill test recording (safe to delete).wav");
         std::fs::write(&path, vec![0u8; 2048]).unwrap();
         let taken = recycle(std::slice::from_ref(&path));
-        println!("the Recycle Bin took {taken} of 1: '{}'", path.display());
+        println!("{SYSTEMS_BIN} took {taken} of 1: '{}'", path.display());
         assert_eq!(taken, 1, "the shell says it is in the bin");
         assert!(!path.exists(), "and it is gone from where it was");
         // Through the whole of it: recycled, and nothing set aside.
         let (again, bytes) = recording(folder.path(), "trill test recording (safe to delete).wav", 1024);
         let removed = Bin::System.remove(&[(again.clone(), bytes)]).unwrap();
         assert_eq!((removed.recycled, removed.set_aside.len(), removed.bytes), (1, 0, 1024));
-        assert_eq!(removed.went(), "to the Recycle Bin");
+        assert_eq!(removed.went(), format!("to {SYSTEMS_BIN}"));
+        assert_eq!(Bin::System.goes(folder.path()), format!("to {SYSTEMS_BIN}"));
         assert!(!again.exists() && !folder.path().join(REMOVED_FOLDER).exists());
     }
 }

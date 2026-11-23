@@ -39,8 +39,8 @@ pub fn need(seconds: f64, models: &Which) -> u64 {
 }
 
 /// The memory that is free to be used at once, in bytes. `None` where
-/// the machine cannot be asked (Windows and Linux are), and then nothing is
-/// refused for want of it.
+/// the machine cannot be asked (Windows, macOS and Linux can), and then
+/// nothing is refused for want of it.
 pub fn free() -> Option<u64> {
     #[cfg(windows)]
     {
@@ -52,13 +52,49 @@ pub fn free() -> Option<u64> {
         // let programs commit: one that runs out of the second stops answering.
         Some(status.ullAvailPhys.min(status.ullAvailPageFile))
     }
+    #[cfg(target_os = "macos")]
+    return macos_memory().map(|(_, free)| free);
+    // What the system reckons can be had without swapping.
     #[cfg(target_os = "linux")]
-    {
-        // What the system reckons can be had without swapping.
-        linux::kilobytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemAvailable:")
-    }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    return trill_fetch::memory().map(|memory| memory.free);
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     None
+}
+
+/// What macOS says of its memory, in bytes: what it has, and what can be
+/// had at once (what is free, and what holds files' contents and things a
+/// program said may be thrown away, which the system gives up at once).
+/// Memory compressed or wired is not counted as free.
+#[cfg(target_os = "macos")]
+fn macos_memory() -> Option<(u64, u64)> {
+    unsafe extern "C" {
+        /// Declared here: `libc` has it only under a name it is retiring.
+        fn mach_host_self() -> libc::mach_port_t;
+    }
+    let mut total = 0u64;
+    let mut size = size_of::<u64>();
+    // SAFETY: the name is a C string, the value a `u64` that says its size.
+    let asked = unsafe {
+        libc::sysctlbyname(c"hw.memsize".as_ptr(), (&raw mut total).cast(), &mut size, std::ptr::null_mut(), 0)
+    };
+    if asked != 0 || total == 0 {
+        return None;
+    }
+    // SAFETY: a structure of numbers, for which nothing is a fine start.
+    let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: the structure and its count are the ones the flavour is asked with.
+    let asked =
+        unsafe { libc::host_statistics64(mach_host_self(), libc::HOST_VM_INFO64, (&raw mut stats).cast(), &mut count) };
+    if asked != libc::KERN_SUCCESS {
+        return None;
+    }
+    // SAFETY: a value the system sets before any code runs.
+    let page = unsafe { libc::vm_page_size } as u64;
+    let held = u64::from(stats.wire_count)
+        + u64::from(stats.compressor_page_count)
+        + u64::from(stats.internal_page_count).saturating_sub(u64::from(stats.purgeable_count));
+    Some((total, total.saturating_sub(held * page)))
 }
 
 /// What a process holds.
@@ -71,7 +107,7 @@ pub struct Held {
 }
 
 /// What the process `pid` holds. `None` when it is gone, or where a
-/// process cannot be asked (Windows and macOS can).
+/// process cannot be asked (Windows, macOS and Linux can).
 pub fn held_by(pid: u32) -> Option<Held> {
     #[cfg(windows)]
     {
@@ -157,7 +193,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn this_process_says_what_it_holds() {
+    fn the_machine_and_this_process_say_what_they_hold_on_macos() {
+        let free = free().expect("macOS can be asked");
+        assert!(free > 0 && free < 1 << 50, "{free}");
         let own = held_by(std::process::id()).expect("this process is there");
         assert!(own.now > 0 && own.peak >= own.now, "{own:?}");
         assert_eq!(held_by(u32::MAX - 7), None);

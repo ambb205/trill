@@ -88,6 +88,9 @@ pub enum Dies {
 
 /// The fault itself.
 fn die() -> ! {
+    // No system writes a report of this one (a test makes it on purpose).
+    #[cfg(unix)]
+    trill_fetch::end_unreported_on_a_fault();
     // SAFETY: there is none, on purpose: the address is not one that may
     // be written to, and the system ends the process for it. Only a test
     // asks for this, of a process it started for the purpose.

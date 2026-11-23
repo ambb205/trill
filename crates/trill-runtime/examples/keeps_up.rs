@@ -537,6 +537,9 @@ fn run(options: &Options) -> Result<(), String> {
         level.map_or("unknown".to_string(), |level| level.to_string()),
         before.map_or("unknown".to_string(), |level| level.to_string())
     );
+    if let Some(why) = trill_engine::host::priority::refused_because() {
+        println!("{why}");
+    }
     if let Some(team) = team.filter(|team| team.rounds > 0) {
         println!(
             "the threads beside the callback's: work was handed out {} times and they took it up {} times; {} of those \

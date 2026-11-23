@@ -138,7 +138,15 @@ mod tests {
     fn the_reply_lists_the_tracks_that_cost_most_first_and_counts_the_rest() {
         let load =
             Load { callbacks: 100, late: 3, mean: 0.366, worst: 1.43, threads: 8, allowed: 8, ..Load::default() };
-        let short = Shortfall { episode: 1, late: 3, buffers: 100, costliest: Vec::new(), threads: 8, allowed: 8 };
+        let short = Shortfall {
+            episode: 1,
+            late: 3,
+            buffers: 100,
+            costliest: Vec::new(),
+            threads: 8,
+            allowed: 8,
+            unprioritized: None,
+        };
         let keeping = KeepingUp {
             seconds: 1.0,
             load,

@@ -64,6 +64,7 @@ mod stream;
 mod tests;
 mod text;
 
+pub(crate) use factory::CACHE_FILE;
 pub use factory::{Vst3Config, Vst3Factory};
 pub(crate) use instance::Vst3Thread;
 pub(crate) use paths::{documents_folder, is_plugin_file};

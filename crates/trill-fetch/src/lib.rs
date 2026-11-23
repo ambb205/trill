@@ -53,8 +53,8 @@ pub mod whole;
 pub mod zip;
 
 pub use whole::{
-    disk_free, ended_by_signal, find_program, hide_console, last_line, partial_of, said, said_closely, write_json,
-    write_whole,
+    Memory, disk_free, end_unreported_on_a_fault, ended_by_signal, find_program, hide_console, last_line, memory,
+    partial_of, said, said_closely, write_json, write_whole,
 };
 
 use parking_lot::Mutex;

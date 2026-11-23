@@ -87,7 +87,7 @@ impl LoadScene {
                 tracks.iter().map(|track| (track.name.clone(), track.cost.share(sample_rate))).collect();
             costliest.sort_by(|a, b| b.1.total_cmp(&a.1));
             costliest.truncate(3);
-            Shortfall { episode: 1, late, buffers, costliest, threads, allowed }
+            Shortfall { episode: 1, late, buffers, costliest, threads, allowed, unprioritized: None }
         });
         KeepingUp { seconds: 10.0, load, tracks, master: cost(0.002), sample_rate, short }
     }

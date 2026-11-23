@@ -57,8 +57,9 @@ fn timed(project: &Project, factory: &ScriptedFactory, options: &RenderOptions) 
     (begun.elapsed(), out)
 }
 
-/// The sign of loading is memory, which only Windows is asked about.
-#[cfg(windows)]
+/// The sign of loading is memory, which only Windows and macOS are asked
+/// about.
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn a_kit_whose_last_pieces_come_long_after_the_first_is_waited_for_while_the_program_grows() {
     let _alone = ONE_AT_A_TIME.lock();
@@ -196,7 +197,7 @@ fn a_plugin_that_was_just_made_is_said_to_be_loading_and_a_built_in_device_never
     assert_eq!(watch.loading_now(), [bass]);
     // (Looked at more than once: on a busy machine the thread that grows
     // may not have its turn in the tenth of a second one look takes.)
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     assert!((0..10).any(|_| trill_engine::ready::is_loading()), "the program is growing");
     // While it loads it stays so: nothing is forgotten in a quiet moment.
     std::thread::sleep(Duration::from_millis(600));

@@ -4976,6 +4976,7 @@ dependencies = [
 name = "trill-assistant"
 version = "0.1.0"
 dependencies = [
+ "log",
  "serde_json",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
@@ -5021,6 +5022,7 @@ dependencies = [
  "cpal",
  "libc",
  "log",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "rtrb",
  "serde",
@@ -5029,6 +5031,7 @@ dependencies = [
  "thiserror 2.0.21",
  "trill-core",
  "trill-dsp",
+ "trill-fetch",
  "trill-media",
  "windows",
  "windows-core",

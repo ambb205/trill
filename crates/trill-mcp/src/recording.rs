@@ -143,7 +143,7 @@ pub struct RecordingLatencyRequest {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct UnusedRecordingsRequest {
-    /// Paths to remove, as the list gives them. They go to the system's Recycle Bin (or, where there is none, a
+    /// Paths to remove, as the list gives them. They go to the system's Recycle Bin or Trash (or, where there is none, a
     /// `removed` folder beside the takes), never out of existence, and the reply says where. One that another
     /// song plays is refused, with that song's name. Omit to list only.
     pub delete: Option<Vec<String>>,
@@ -650,7 +650,7 @@ impl TrillServer {
     /// The recordings in the song's own folder that nothing plays any more, with their sizes: not the song or
     /// any state undo can reach, not another song Trill knows of (one saved under another name plays the same
     /// files), not unsaved work that can still be recovered. With `delete`, their removal: to the system's
-    /// Recycle Bin, or a `removed` folder beside the takes; never out of existence. One that any song plays is
+    /// Recycle Bin or Trash, or a `removed` folder beside the takes; never out of existence. One that any song plays is
     /// refused with that song's name. Trill never removes a recording by itself: a take that is removed or
     /// undone leaves its file.
     #[tool(annotations(title = "Unused recordings", destructive_hint = true))]

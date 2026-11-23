@@ -140,16 +140,34 @@ pub fn ended_by_signal(status: &std::process::ExitStatus) -> Option<String> {
     }
 }
 
-/// The memory the machine has free to be used at once, in bytes: on Linux
-/// what the kernel reckons can be had without swapping (`MemAvailable`).
-/// `None` where it is not asked here.
-pub fn memory_free() -> Option<u64> {
+/// What the machine says of its memory, in bytes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// The memory it has.
+    pub total: u64,
+    /// What can be had at once: on Linux what the kernel reckons can be had
+    /// without swapping (`MemAvailable`).
+    pub free: u64,
+    /// The room left in its swap.
+    pub swap_free: u64,
+}
+
+/// What the machine says of its memory now. `None` where it is not asked
+/// here (on Windows and macOS each crate asks its own way, for now).
+pub fn memory() -> Option<Memory> {
     #[cfg(target_os = "linux")]
     {
         let said = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let line = said.lines().find(|line| line.starts_with("MemAvailable:"))?;
-        let kilobytes: u64 = line["MemAvailable:".len()..].trim().strip_suffix("kB")?.trim().parse().ok()?;
-        Some(kilobytes * 1024)
+        let field = |name: &str| -> Option<u64> {
+            let line = said.lines().find(|line| line.starts_with(name))?;
+            let kilobytes: u64 = line[name.len()..].trim().strip_suffix("kB")?.trim().parse().ok()?;
+            Some(kilobytes * 1024)
+        };
+        Some(Memory {
+            total: field("MemTotal:")?,
+            free: field("MemAvailable:")?,
+            swap_free: field("SwapFree:").unwrap_or(0),
+        })
     }
     #[cfg(not(target_os = "linux"))]
     None
@@ -229,8 +247,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_machine_says_how_much_memory_it_has_free() {
-        let free = memory_free().expect("Linux says");
-        assert!(free > 1 << 20, "{free}");
+        let memory = memory().expect("Linux says");
+        assert!(memory.total >= 1 << 30 && memory.free > 0 && memory.free <= memory.total, "{memory:?}");
     }
 
     #[cfg(unix)]

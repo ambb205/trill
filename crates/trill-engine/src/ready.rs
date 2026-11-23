@@ -346,10 +346,93 @@ impl Vitals {
                 handles,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        return macos_vitals();
+        #[cfg(target_os = "linux")]
+        return linux::vitals();
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         None
     }
 }
+
+/// [`Vitals::now`] as macOS says them: memory in use is what the program's
+/// allocations hold now, by the allocator's count; memory asked for is the
+/// footprint (what the program wrote to, in memory or compressed); reads are
+/// the blocks read from a disk; handles are files and threads.
+///
+/// In use is not what is resident, as on Windows: the allocator keeps what
+/// was freed and hands it out again, and memory the program grows into that
+/// way is resident and counted already. A sampler that loads in a program
+/// that let go of a song before shows only in what is allocated.
+#[cfg(target_os = "macos")]
+fn macos_vitals() -> Option<Vitals> {
+    use std::mem::{size_of, zeroed};
+    /// What the allocator says of all its zones.
+    #[repr(C)]
+    struct MallocStatistics {
+        blocks_in_use: u32,
+        size_in_use: usize,
+        max_size_in_use: usize,
+        size_allocated: usize,
+    }
+    unsafe extern "C" {
+        fn malloc_zone_statistics(zone: *mut std::ffi::c_void, statistics: *mut MallocStatistics);
+    }
+    // SAFETY: getpid cannot fail; each structure is one of numbers, for
+    // which nothing is a fine start, filled in by the call it is the
+    // structure of, for this process or the calling thread.
+    unsafe {
+        let pid = libc::getpid();
+        let mut usage: libc::rusage_info_v4 = zeroed();
+        if libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, (&raw mut usage).cast()) != 0 {
+            return None;
+        }
+        let mut times: libc::rusage = zeroed();
+        libc::getrusage(libc::RUSAGE_SELF, &mut times);
+        let spent = |time: libc::timeval| Duration::new(time.tv_sec as u64, time.tv_usec as u32 * 1000);
+        let mut thread: libc::thread_basic_info = zeroed();
+        let mut count = libc::THREAD_BASIC_INFO_COUNT;
+        let own = match libc::thread_info(
+            libc::pthread_mach_thread_np(libc::pthread_self()),
+            libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+            (&raw mut thread).cast(),
+            &mut count,
+        ) {
+            libc::KERN_SUCCESS => {
+                let time =
+                    |time: libc::time_value_t| Duration::new(time.seconds as u64, time.microseconds as u32 * 1000);
+                time(thread.user_time) + time(thread.system_time)
+            }
+            _ => Duration::ZERO,
+        };
+        let mut task: libc::proc_taskinfo = zeroed();
+        let task_size = size_of::<libc::proc_taskinfo>() as i32;
+        let threads = match libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut task).cast(), task_size) {
+            size if size == task_size => task.pti_threadnum.max(0) as u32,
+            _ => 0,
+        };
+        // Asked for no room, it says how much the list of files would take.
+        let listed = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0).max(0) as usize;
+        let files = (listed / size_of::<libc::proc_fdinfo>()) as u32;
+        let mut allocated =
+            MallocStatistics { blocks_in_use: 0, size_in_use: 0, max_size_in_use: 0, size_allocated: 0 };
+        // No zone: all of them, added up.
+        malloc_zone_statistics(std::ptr::null_mut(), &mut allocated);
+        Some(Vitals {
+            in_use: allocated.size_in_use as u64,
+            asked: usage.ri_phys_footprint,
+            read: usage.ri_diskio_bytesread,
+            reads: times.ru_inblock.max(0) as u64,
+            busy: spent(times.ru_utime) + spent(times.ru_stime),
+            own,
+            handles: files + threads,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[path = "ready/linux.rs"]
+mod linux;
 
 /// Watches the program for the sign that loading samples makes: its
 /// memory rises past the most it has held, and goes on rising. Memory
@@ -404,8 +487,8 @@ impl Signs {
 /// Whether something in the program seems to be loading right now: over
 /// the tenth of a second this takes, its memory grew as it does while a
 /// plugin reads its samples. It is the program that is
-/// asked, not one device, and only Windows can be asked: elsewhere the
-/// answer is `false`. A sampler pauses between two drums, so `false` is
+/// asked, not one device, and only Windows, macOS and Linux can be asked:
+/// elsewhere the answer is `false`. A sampler pauses between two drums, so `false` is
 /// not "done": [`LoadWatch`] keeps looking.
 pub fn is_loading() -> bool {
     let mut signs = Signs::new();
@@ -1783,8 +1866,8 @@ mod tests {
         watch.began(DeviceId(7));
         assert_eq!(watch.loading(), [DeviceId(7)]);
         // While the program grows as it does when samples are read, it
-        // goes on being said. (Only Windows can be asked.)
-        #[cfg(windows)]
+        // goes on being said. (Only Windows, macOS and Linux can be asked.)
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         {
             let mut held = Vec::new();
             let begun = Instant::now();
@@ -1800,7 +1883,7 @@ mod tests {
             assert!(stopped.elapsed() < Duration::from_secs(20), "it never came to an end");
             std::thread::sleep(Duration::from_millis(50));
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         assert!(stopped.elapsed() >= Duration::from_millis(200), "{:?}", stopped.elapsed());
         // One that began and is gone again is not loading.
         watch.began(DeviceId(8));
