@@ -876,10 +876,10 @@ mod tests {
         main.call(WAIT, |state| state.busy = true).unwrap();
         let turns = main
             .call(WAIT, |_| {
-                let before = os_events::TURNS.load(Ordering::Relaxed);
+                let before = os_events::TURNS.get();
                 // SAFETY: runs the thread's own loop for a while, inside a job.
                 unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.3, 0) };
-                os_events::TURNS.load(Ordering::Relaxed) - before
+                os_events::TURNS.get() - before
             })
             .unwrap();
         // About one an idle's interval (15 ms); a spinning timer turns it

@@ -30,9 +30,11 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-/// How many turns homes have been given, for tests.
 #[cfg(test)]
-pub(super) static TURNS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// How many turns the home on this thread has been given, for tests.
+    pub(super) static TURNS: Cell<u64> = const { Cell::new(0) };
+}
 
 /// Where the source that serves a home comes among a loop's sources.
 const JOBS_AFTER: CFIndex = 1000;
@@ -277,7 +279,7 @@ extern "C" fn perform<S: ThreadState>(info: *mut c_void) {
         return;
     }
     #[cfg(test)]
-    TURNS.fetch_add(1, Ordering::Relaxed);
+    TURNS.set(TURNS.get() + 1);
     let nested = nested();
     if !nested && let Some(away) = driven.away.take() {
         driven.home.served(away);
