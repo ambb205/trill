@@ -121,6 +121,58 @@ fn two_windows_joined_in_one_song_change_it_at_once_and_each_says_who_is_here_an
     assert_eq!(ben.project().tracks.len(), 2);
 }
 
+#[test]
+fn whoever_shares_removes_someone_from_the_panel_after_a_question_and_both_are_told() {
+    let mut ada = window("Ada", |session| {
+        two_tracks(session);
+    });
+    let mut ben = window("Ben", |_| {});
+    let invitation = ada.runtime.share(trill_runtime::Reach::ThisMachine, 0).unwrap();
+    ben.runtime.join(&invitation, false).unwrap();
+    both_until(&mut ada, &mut ben, "Ben has the song and each sees the other", |ada, ben| {
+        song(ada) == song(ben) && ada.app.live().together.people.len() == 1 && ben.app.live().together.people.len() == 1
+    });
+    let said = |harness: &Harness| harness.app.state().toasts.texts().join(" | ");
+
+    // Whoever came in by someone's invitation has no word on their row
+    // for whoever let them in.
+    ben.click_label("Shared song: Here: Ada");
+    ben.idle(2);
+    assert!(ben.is_on_screen("Ada: ") && !ben.is_on_screen("Remove Ada"), "{:?}", ben.labels);
+    ben.key(Modifiers::NONE, Key::Escape);
+
+    // Ada's panel has it on Ben's row. It asks first, and says what it
+    // does; keeping him changes nothing.
+    ada.click_label("Shared song: Here: Ben");
+    ada.idle(2);
+    assert!(!ada.is_on_screen("Remove Ben from the song?"));
+    ada.click_label("Remove Ben from the song");
+    ada.idle(2);
+    assert!(ada.is_on_screen("Remove Ben from the song? They keep it as it is now"), "{:?}", ada.labels);
+    ada.click_label("Keep them");
+    ada.idle(2);
+    assert!(!ada.is_on_screen("Remove Ben from the song?") && ada.app.live().together.people.len() == 1);
+    assert_eq!(ada.app.live().together.invitation.as_deref(), Some(invitation.as_str()));
+
+    // Asked again and answered: Ben is out, and each is told what
+    // happened. The song is shared under another invitation.
+    ada.click_label("Remove Ben from the song");
+    ada.click_label("Remove Ben");
+    both_until(&mut ada, &mut ben, "Ben is out and knows", |ada, ben| {
+        ada.app.live().together.people.is_empty() && !ben.app.live().together.is_on()
+    });
+    both_until(&mut ada, &mut ben, "each was told", |ada, ben| {
+        said(ada).contains("Ben is no longer in the song: you removed them.")
+            && said(ben).contains("Ada removed you from the song.")
+    });
+    let another = ada.app.live().together.invitation.clone().expect("the song is still shared");
+    assert_ne!(another, invitation);
+    ada.idle(2);
+    assert!(ada.is_on_screen(&format!("Invitation: {another}")), "{:?}", ada.labels);
+    assert!(!ada.is_on_screen("Remove Ben"), "nobody is left to ask about");
+    assert_eq!(song(&ada), song(&ben), "he keeps the song as it was");
+}
+
 /// A window whose song is shared, with a change in it that someone else
 /// then makes without having seen it.
 fn clash() -> (Harness, TrackId, ClipId) {

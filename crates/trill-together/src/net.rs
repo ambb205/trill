@@ -300,6 +300,16 @@ struct Listening {
     /// For a meeting held at a meeting point: where the thread that holds
     /// it says that it has ended it there.
     ended: Option<Receiver<()>>,
+    /// For a program that listens itself: what whoever connects has to
+    /// prove. It is the invitation's, and another when the invitation is
+    /// ([`Net::listen_anew`]).
+    proved_by: Option<Arc<Mutex<[u8; 32]>>>,
+    /// Held by whoever lets a connection in that has proved the
+    /// invitation, while it does, and by whoever ends the invitation or
+    /// makes it another, while it does: so that once that is done, every
+    /// connection the invitation before let in is among the connections
+    /// there are, and none follows.
+    gate: Arc<Mutex<()>>,
 }
 
 /// What the thread that holds a meeting at a meeting point has.
@@ -314,6 +324,8 @@ struct Hold {
     stop: Arc<AtomicBool>,
     /// How many knocks are being taken up and proved at the moment.
     proving: Arc<AtomicUsize>,
+    /// See [`Listening::gate`].
+    gate: Arc<Mutex<()>>,
     links: Arc<Mutex<HashMap<LinkId, Link>>>,
     last: Arc<AtomicU64>,
     happened: Sender<Event>,
@@ -387,7 +399,7 @@ impl Hold {
         }
         let (address, proved_by, proving) = (self.address.clone(), self.proved_by, self.proving.clone());
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
-        let pulse = self.pulse;
+        let (pulse, stop, gate) = (self.pulse, self.stop.clone(), self.gate.clone());
         proving.fetch_add(1, Ordering::Relaxed);
         let met = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
             let secured = match trill_meet::client::take(&address, ticket) {
@@ -397,7 +409,14 @@ impl Hold {
             proving.fetch_sub(1, Ordering::Relaxed);
             match secured {
                 Ok(pair) => {
-                    if let Err(error) = open(pair, None, &links, &last, &happened, pulse) {
+                    // Let in while the meeting is known to be held still:
+                    // one that was ended while this one proved its
+                    // invitation is no longer one, and nobody gets in by
+                    // it, also not who was on the way in.
+                    let _gate = gate.lock().unwrap();
+                    if stop.load(Ordering::Relaxed) {
+                        log::info!("a connection through the meeting point proved an invitation that is no longer one");
+                    } else if let Err(error) = open(pair, None, &links, &last, &happened, pulse) {
                         log::warn!("a program that connected could not be heard: {error}");
                     }
                 }
@@ -581,7 +600,9 @@ impl Net {
         listener.set_nonblocking(true)?;
         let invitation = Invitation::new(host, listener.local_addr()?.port())?;
         let stop = Arc::new(AtomicBool::new(false));
-        let (key, stopped) = (invitation.key(), stop.clone());
+        let proved_by = Arc::new(Mutex::new(invitation.key()));
+        let gate = Arc::new(Mutex::new(()));
+        let (key, stopped, let_in) = (proved_by.clone(), stop.clone(), gate.clone());
         let (links, last, happened) = (self.links.clone(), self.last.clone(), self.happened.clone());
         let pulse = self.pulse;
         let meeting = Arc::new(AtomicUsize::new(0));
@@ -603,15 +624,27 @@ impl Net {
                 // Proving who it is takes the other side's time, not the
                 // listener's: each on a thread of its own.
                 let (links, last, happened) = (links.clone(), last.clone(), happened.clone());
-                let proving = meeting.clone();
+                let (proving, key) = (meeting.clone(), key.clone());
+                let (stopped, let_in) = (stopped.clone(), let_in.clone());
                 proving.fetch_add(1, Ordering::Relaxed);
                 let met = std::thread::Builder::new().name("trill-together-meet".into()).spawn(move || {
                     let _ = stream.set_nonblocking(false);
-                    let secured = secure(stream, &key, false);
+                    // By the invitation as it is when this one connects.
+                    let asked = *key.lock().unwrap();
+                    let secured = secure(stream, &asked, false);
                     proving.fetch_sub(1, Ordering::Relaxed);
                     match secured {
                         Ok(pair) => {
-                            if let Err(error) = open(pair, None, &links, &last, &happened, pulse) {
+                            // Let in while the invitation is known to be
+                            // the one that was proved: one that was ended
+                            // or became another meanwhile is no longer one,
+                            // and nobody gets in by it, also not who was on
+                            // the way in.
+                            let _gate = let_in.lock().unwrap();
+                            let another = *key.lock().unwrap() != asked;
+                            if another || stopped.load(Ordering::Relaxed) {
+                                log::info!("a connection proved an invitation that is no longer one");
+                            } else if let Err(error) = open(pair, None, &links, &last, &happened, pulse) {
                                 log::warn!("a program that connected could not be heard: {error}");
                             }
                         }
@@ -625,7 +658,8 @@ impl Net {
                 }
             }
         })?;
-        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: None });
+        let proved_by = Some(proved_by);
+        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: None, proved_by, gate });
         Ok(invitation)
     }
 
@@ -643,6 +677,7 @@ impl Net {
         }
         let invitation = Invitation::through(point.host.clone(), point.port)?;
         let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Mutex::new(()));
         let hold = Hold {
             address: point.address(),
             key: point.key.clone(),
@@ -651,6 +686,7 @@ impl Net {
             proved_by: invitation.key(),
             stop: stop.clone(),
             proving: Arc::default(),
+            gate: gate.clone(),
             links: self.links.clone(),
             last: self.last.clone(),
             happened: self.happened.clone(),
@@ -661,8 +697,43 @@ impl Net {
             hold.run();
             let _ = done.send(());
         })?;
-        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended: Some(ended) });
+        let ended = Some(ended);
+        self.listening = Some(Listening { invitation: invitation.clone(), stop, ended, proved_by: None, gate });
         Ok(invitation)
+    }
+
+    /// Gives the program another invitation in place of the one it
+    /// listens under, and returns it: the same address, a secret of its
+    /// own by lot. The one before is no longer an invitation from here on:
+    /// nobody gets in by it, also not who was proving it at this moment.
+    /// The programs that are connected stay, and are told nothing by this.
+    ///
+    /// Once this returns, every connection the invitation before let in
+    /// is among [`Net::links`], whether or not whoever drives the song has
+    /// heard of it yet ([`Event::Open`]): a caller that means nobody to be
+    /// in by the old invitation whom it has not greeted lets go of those.
+    ///
+    /// A program that listens itself goes on listening where it does.
+    /// One that shares through a meeting point (`point`, the one it
+    /// shares through) ends the meeting there and holds another:
+    /// [`Event::Held`] follows when that is open. `None` for a program
+    /// that is not listening: there is no invitation to change.
+    pub fn listen_anew(&mut self, point: Option<&MeetingPoint>) -> io::Result<Option<Invitation>> {
+        let Some(listening) = &mut self.listening else { return Ok(None) };
+        let Some(proved_by) = &listening.proved_by else {
+            let Some(point) = point else {
+                return Err(io::Error::other("the meeting point the song is shared through was not named"));
+            };
+            self.stop_listening();
+            return self.listen_through(point).map(Some);
+        };
+        let invitation = Invitation::new(listening.invitation.host.clone(), listening.invitation.port)?;
+        {
+            let _gate = listening.gate.lock().unwrap();
+            *proved_by.lock().unwrap() = invitation.key();
+        }
+        listening.invitation = invitation.clone();
+        Ok(Some(invitation))
     }
 
     /// The invitation this program listens under, while it does.
@@ -675,7 +746,12 @@ impl Net {
     /// that are connected stay.
     pub fn stop_listening(&mut self) {
         if let Some(listening) = self.listening.take() {
-            listening.stop.store(true, Ordering::Relaxed);
+            // (With the gate: whoever was let in by the invitation is in
+            // by now, and whoever is still proving it is not let in.)
+            {
+                let _gate = listening.gate.lock().unwrap();
+                listening.stop.store(true, Ordering::Relaxed);
+            }
             // A meeting is ended where it is held, so that whoever asks
             // for it is told that it is over and not that its holder is
             // away: waited for, a moment, because a program that is being

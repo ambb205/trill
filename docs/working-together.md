@@ -32,6 +32,17 @@ closes the port, and the invitation is no longer one; whoever is connected stays
 and stops when you stop: Trill listens for nobody otherwise. A connection that has not proved the secret within
 ten seconds is closed, and no more than sixteen may be trying at once.
 
+**Letting one person go.** Whoever came into the song by your invitation has *Remove* at the end of their row
+under *Who is here*; it asks first. Their Trill is told in a sentence and does not ask for the connection
+again, and whoever was in the song through them goes with them. They keep the song as it was then: nothing
+that was handed over is taken back, and they get nothing of what is done after. **The invitation becomes
+another**, at the same address or the same meeting point: the one they hold lets nobody in, also not someone
+who was on the way in by it at that moment. Whoever else came in by it stays, is told the new one over the
+connection they have, and comes back by it by themselves when that is lost. Someone whose connection was lost
+at just that moment, and anyone who has not joined yet, needs the new invitation from you: the panel shows it.
+Nobody is the host, so nobody removes whoever let them in, and someone who came in through another person is
+that person's to let go: the refusal says which it is.
+
 What someone who is connected says is not trusted either: a message is bounded in size and messages in rate,
 and a change is held to the rules every edit is held to before any of it is taken. A program that says what no
 edit could have made is let go of, with a sentence, and the song is as it was.
@@ -335,7 +346,9 @@ an amplifier, two Serum 2 and a reverb on a return), the second with no plugins 
 ## For an AI
 
 The `shared_song` tool shares (on this computer, its networks, or through the meeting point you have set),
-joins, leaves and says who is here and what they hold, with the notices and the edit that answers one, whether a
+joins, leaves, lets one person go who came in by this program's invitation (`remove`, by their name: the reply
+has the invitation that holds from then on), and says who is here and what they hold, with the notices and the
+edit that answers one, whether a
 meeting is open at its meeting point, which connections are being asked for again, which plugins of the song
 each person's computer has not got and which tracks are heard by a recording in their place
 ([AI and MCP](ai-and-mcp.md)). A client's edits are steps of the program it talks to, said to the others as they
@@ -515,8 +528,11 @@ nearly nothing was). The file with least to go is asked for first, so that the m
   it as it was recorded, which is one of the ways it sounds.
 - A direct way between two programs that met through a meeting point, where there is one: everything they say
   goes through it for as long as they are in the song.
-- Taking one person's leave away from a meeting. Whoever has the invitation gets in for as long as it is shared;
-  a keeper can take a key away, which ends what that key holds.
+- Letting go of someone who came in through another person, from anywhere but that person's Trill; and telling
+  the new invitation to someone whose connection was lost at the moment another was let go: they are told to
+  ask for it. Someone whose own connection is lost at the moment is not among who is here, and can be let go
+  once they are back.
+- Taking back what someone who was let go already has: they keep the song and its audio as of then.
 - A meeting point that is encrypted as a web site is (TLS). What the two programs say to each other is encrypted
   end to end all the same; what is said to the meeting point itself can be read on the way and is of no use
   there, and a network that passes nothing but TLS will not pass it.

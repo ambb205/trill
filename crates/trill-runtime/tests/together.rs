@@ -749,6 +749,145 @@ fn a_lost_link_to_a_program_that_listens_itself_comes_back_too_until_its_invitat
     assert!(ben.together().away.is_empty() && !ben.together().is_on(), "{:?}", ben.together());
 }
 
+/// The number of whoever goes by `name`, as `of` sees them.
+fn number(of: &Runtime, name: &str) -> u64 {
+    let people = of.together().people;
+    people.iter().find(|here| here.person.name == name).map(|here| here.person.id).expect("they are here")
+}
+
+fn all_three_are_in(programs: [&Runtime; 3]) -> bool {
+    let [first, second, third] = programs;
+    same(first, second) && same(first, third) && programs.iter().all(|program| program.together().people.len() == 2)
+}
+
+/// About 8 connections, one of which is refused.
+#[test]
+fn whoever_shares_a_song_lets_one_person_go_and_the_others_stay_under_another_invitation() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, _, verse) = with_a_song(folder.path(), "Ada");
+    let (ben, cy) = (start(folder.path(), "Ben"), start(folder.path(), "Cy"));
+    let invitation = ada.share(Reach::ThisMachine, 0).unwrap();
+    let port = Invitation::parse(&invitation).unwrap().port;
+    // Ben reaches Ada by a way of his own, which can be cut; Cy directly.
+    let way = Way::to(port);
+    let by_the_way = invitation.replace(&format!(":{port}:"), &format!(":{}:", way.port));
+    ben.join(&by_the_way, false).unwrap();
+    cy.join(&invitation, false).unwrap();
+    eventually("all three are in the song", || all_three_are_in([&ada, &ben, &cy]));
+
+    // Whoever came in by one's own invitation is one's own to let go, and
+    // nobody else is: not who came in by someone else's, and not whoever
+    // let one in.
+    assert!(ada.together().people.iter().all(|here| here.can_be_removed), "{:?}", ada.together().people);
+    assert!(ben.together().people.iter().all(|here| !here.can_be_removed), "nobody came in by Ben's");
+    let refused = ben.remove_from_song(number(&ben, "Cy")).unwrap_err();
+    assert!(refused.contains("Cy is in the song through Ada, as you are"), "{refused}");
+    let refused = cy.remove_from_song(number(&cy, "Ada")).unwrap_err();
+    assert!(refused.contains("You are in the song by Ada's invitation"), "{refused}");
+    assert!(ada.remove_from_song(12_345).unwrap_err().contains("Nobody of that name"));
+    assert!(all_three_are_in([&ada, &ben, &cy]), "nothing came of asking");
+
+    // Ada lets Cy go.
+    let done = ada.remove_from_song(number(&ada, "Cy")).unwrap();
+    assert!(done.starts_with("Cy is no longer in the song: you removed them."), "{done}");
+    assert!(done.contains("Whoever stays was told the new one"), "{done}");
+    assert!(said(&ada).contains(&done), "{}", said(&ada));
+    // Cy is told, has the song as it was, and asks for nothing again.
+    eventually("Cy is told", || said(&cy).contains("Ada removed you from the song."));
+    eventually("Cy is alone", || !cy.together().is_on());
+    assert!(cy.together().away.is_empty() && cy.together().people.is_empty(), "{:?}", cy.together());
+    assert!(same(&ada, &cy), "what was handed over is not taken back");
+    // Ben stays, and sees Cy go. Nothing was lost on his way.
+    eventually("Ada and Ben are the two that are left", || {
+        ada.together().people.len() == 1 && ben.together().people.len() == 1
+    });
+    assert!(!said(&ben).contains("lost") && !said(&ben).contains("removed"), "{}", said(&ben));
+
+    // The invitation is another, at the same place, and by the one Cy
+    // holds nobody gets in.
+    let another = ada.together().invitation.expect("the song is still shared");
+    assert_ne!(another, invitation);
+    assert_eq!(Invitation::parse(&another).unwrap().port, port);
+    cy.join(&invitation, false).unwrap();
+    eventually("Cy is refused", || said(&cy).contains("Not joined: the program at"));
+    assert!(said(&cy).contains("did not take this invitation"), "{}", said(&cy));
+    assert_eq!(ada.together().people.len(), 1);
+    // What Ada and Ben do goes on between the two of them.
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    eventually("Ben has what Ada did", || same(&ada, &ben));
+    assert!(!same(&ada, &cy), "and Cy has none of it");
+
+    // Ben's way is cut. His program asks again by itself, by the secret
+    // Ada's program told it and at the address he reached her by: nobody
+    // hands him anything.
+    way.cut();
+    eventually("Ben's program knows", || said(&ben).contains("The connection to Ada was lost"));
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    eventually("they are in the song together again", || {
+        same(&ada, &ben) && ben.together().people.len() == 1 && ben.together().away.is_empty()
+    });
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+    assert!(!said(&ben).contains("invitation again"), "{}", said(&ben));
+
+    // Handed the new invitation, Cy is in again, with what was done since.
+    cy.join(&another, false).unwrap();
+    eventually("Cy is back in", || all_three_are_in([&ada, &ben, &cy]));
+    assert_eq!(ada.session.lock().project().clip(verse).unwrap().notes().len(), 4);
+}
+
+/// About 12 connections, one of which is refused.
+#[test]
+fn letting_someone_go_from_a_song_shared_through_a_meeting_point_ends_that_meeting_and_holds_another() {
+    let folder = tempfile::tempdir().unwrap();
+    let (ada, _, verse) = with_a_song(folder.path(), "Ada");
+    let (ben, cy) = (start(folder.path(), "Ben"), start(folder.path(), "Cy"));
+    let mut point = MeetingPoint::start(meet::Limits::default());
+    let invitation = point.shared_by(&ada);
+    ben.join(&invitation, false).unwrap();
+    cy.join(&invitation, false).unwrap();
+    eventually("all three are in the song", || all_three_are_in([&ada, &ben, &cy]));
+
+    // Ada lets Cy go: the meeting is over where it was held, another is
+    // held at the same meeting point under another invitation, and Ben
+    // stays in the song through all of it.
+    let done = ada.remove_from_song(number(&ada, "Cy")).unwrap();
+    assert!(done.contains("The invitation is another now"), "{done}");
+    eventually("Cy is told", || said(&cy).contains("Ada removed you from the song."));
+    eventually("the meeting before is over", || point.log().contains("is over: its holder ended it"));
+    eventually("another is open", || ada.together().meeting == Some((point.address.clone(), Meeting::Held)));
+    let another = ada.together().invitation.expect("the song is still shared");
+    assert!(another != invitation && another.starts_with(&format!("trill:meet:{}:", point.address)), "{another}");
+    assert_eq!(point.log().matches("Ada holds a meeting").count(), 2, "{}", point.log());
+    cy.join(&invitation, false).unwrap();
+    eventually("Cy is refused", || said(&cy).contains("Not joined:"));
+    assert!(said(&cy).contains("stopped sharing it"), "{}", said(&cy));
+    eventually("Ada and Ben are the two that are left", || {
+        ada.together().people.len() == 1 && ben.together().people.len() == 1
+    });
+    assert!(!said(&ben).contains("lost") && !said(&ben).contains("removed"), "{}", said(&ben));
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    eventually("Ben has what Ada did", || same(&ada, &ben));
+    assert!(!same(&ada, &cy), "and Cy has none of it");
+
+    // The meeting point goes down and its keeper starts it again. Ben's
+    // program gets into the new meeting by itself: it was told the new
+    // invitation, and nobody hands him anything.
+    point.stop();
+    eventually("each knows the other is away", || ada.together().people.is_empty() && ben.together().away.len() == 1);
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    point.start_again();
+    eventually("they are in the song together again", || {
+        same(&ada, &ben) && ada.together().people.len() == 1 && ben.together().away.is_empty()
+    });
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+    assert!(!said(&ben).contains("invitation again"), "{}", said(&ben));
+    // Neither invitation's secret is in what the meeting point wrote down.
+    let log = point.log();
+    for held in [&invitation, &another] {
+        assert!(!log.contains(held.rsplit(':').next().unwrap()), "{log}");
+    }
+}
+
 /// About 6 connections.
 #[test]
 fn a_meeting_point_that_does_not_take_the_key_or_passes_no_more_today_is_said_in_a_sentence() {

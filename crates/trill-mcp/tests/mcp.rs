@@ -2912,6 +2912,8 @@ async fn the_assistants_door_neither_shares_a_song_nor_sets_or_learns_a_meeting_
         json!({ "action": "join", "invitation": invited.replace("meet:", "") }),
         json!({ "action": "stop_sharing" }),
         json!({ "action": "leave" }),
+        // (And putting someone out of it.)
+        json!({ "action": "remove", "person": "Ben" }),
     ] {
         let refusal = call(client, "shared_song", arguments.clone()).await.unwrap_err();
         assert!(refusal.contains("it is the user's to do, in the window"), "{arguments}: {refusal}");

@@ -95,6 +95,9 @@ pub struct TogetherState {
     /// What sharing the song would hand to whoever joins, looked at by a
     /// worker when the Share panel opens: `None` until it has looked.
     pub going: std::sync::Arc<parking_lot::Mutex<Option<Going>>>,
+    /// Whom the panel is asking about before they are let go: their
+    /// number, after *Remove* on their row and until it is answered.
+    pub removing: Option<u64>,
 }
 
 /// What the window holds of the others, as of this frame.
@@ -216,6 +219,8 @@ impl TogetherScene {
             notes: notes(0),
             holding: Some("the volume of the track \u{201C}Bass\u{201D}".to_owned()),
             lacks: Vec::new(),
+            // (In the song by this window's invitation, where it shares.)
+            can_be_removed: true,
         };
         let sam = Here {
             person: Person { id: 1, name: "Sam".into(), colour: 1 },
@@ -227,6 +232,7 @@ impl TogetherScene {
             notes: notes(1),
             holding: None,
             lacks: Vec::new(),
+            can_be_removed: true,
         };
         // And a clash to answer, in the words a real one has.
         let text = "Jo set where the clip \u{201C}Lead\u{201D} starts at the same moment as you, and theirs is what the song has.";
@@ -254,6 +260,8 @@ impl TogetherScene {
             ];
             // (A place that is nobody's: a made-up folder.)
             let held = vec![r"D:\Sessions\Elsewhere\guide vocal.wav".to_owned()];
+            // (Jo shares this one: nobody here is this window's to let go.)
+            let jo = Here { can_be_removed: false, ..jo };
             return Seen { me: Some(me), connected: 1, people: vec![jo], files, held, ..Seen::default() };
         }
         let notices = vec![Notice::made_up(1, text, Some("Put mine back"))];
@@ -514,25 +522,43 @@ fn name_field(ui: &mut Ui, cx: &mut Cx) {
     ui.add_space(6.0);
 }
 
+/// Room at the end of a person's row for the word that lets them go.
+const REMOVE: f32 = 60.0;
+
 /// Everyone who is here, one a row: their colour, their name, what they
-/// hold.
-fn people(ui: &mut Ui, cx: &Cx) {
+/// hold. Whoever is in the song by this program's own invitation has
+/// *Remove* at the end of their row; returns whose was clicked.
+fn people(ui: &mut Ui, cx: &Cx) -> Option<u64> {
     let theme = cx.theme;
     let seen = &cx.live.together;
-    let mut row = |colour: u8, name: &str, about: &str| {
+    let mut asked = None;
+    let mut row = |ui: &mut Ui, colour: u8, name: &str, about: &str, mine_to_remove: Option<u64>| {
         let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
         trill_noir::person_dot(ui.painter(), pos2(rect.left() + 4.0, rect.center().y), theme.person(colour));
         let name_room = rect.with_min_x(rect.left() + 16.0).with_max_x(rect.left() + 150.0);
         text::paint(ui.painter(), name_room, Align2::LEFT_CENTER, theme.text.body, name, theme.ink);
-        let about_room = rect.with_min_x(rect.left() + 156.0);
+        let end = if mine_to_remove.is_some() { rect.right() - REMOVE } else { rect.right() };
+        let about_room = rect.with_min_x(rect.left() + 156.0).with_max_x(end);
         text::paint(ui.painter(), about_room, Align2::LEFT_CENTER, theme.text.micro, about, theme.ink_faint);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{name}: {about}")));
+        let Some(person) = mine_to_remove else { return };
+        let room = rect.with_min_x(end);
+        let word = ui.interact(room, ui.scope_id().with(("remove", person)), Sense::click());
+        let ink = if word.hovered() { theme.signal } else { theme.ink_dim };
+        text::paint(ui.painter(), room, Align2::RIGHT_CENTER, theme.text.micro, "Remove", ink);
+        word.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Remove {name} from the song"))
+        });
+        if word.clicked() {
+            asked = Some(person);
+        }
     };
     if let Some(me) = &seen.me {
-        row(me.colour, &me.name, "you");
+        row(ui, me.colour, &me.name, "you", None);
     }
     for here in &seen.people {
-        row(here.person.colour, &here.person.name, &about(here, &cx.snap.project));
+        let mine_to_remove = here.can_be_removed.then_some(here.person.id);
+        row(ui, here.person.colour, &here.person.name, &about(here, &cx.snap.project), mine_to_remove);
     }
     // Who is away because the connection was lost: asked for again, with
     // nothing for anyone to do.
@@ -548,6 +574,41 @@ fn people(ui: &mut Ui, cx: &Cx) {
         text::paint(ui.painter(), about_room, Align2::LEFT_CENTER, theme.text.micro, &about, theme.warn);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{}: {about}", away.name)));
     }
+    asked
+}
+
+/// The question before someone is let go: what it does, said before it
+/// is done, and the two answers. Shown while one is asked about.
+fn removing(ui: &mut Ui, cx: &mut Cx) {
+    let Some(person) = cx.state.together.removing else { return };
+    let theme = cx.theme;
+    // Whoever went meanwhile is nobody to ask about.
+    let named = cx.live.together.people.iter().find(|here| here.person.id == person && here.can_be_removed);
+    let Some(name) = named.map(|here| here.person.name.clone()) else {
+        cx.state.together.removing = None;
+        return;
+    };
+    ui.add_space(8.0);
+    let about = format!(
+        "Remove {name} from the song? They keep it as it is now, and get nothing of what is done after. The \
+         invitation becomes another: the one they have lets nobody in, whoever else is here is told the new one by \
+         itself, and anyone who has not joined yet needs it from you."
+    );
+    line(ui, cx, &about, theme.ink);
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        if trill_noir::button(ui, theme, &format!("Remove {name}"), Variant::Primary).clicked() {
+            cx.state.together.removing = None;
+            // (It waits for the meeting point where the song is shared
+            // through one: not on the thread that draws. What came of it
+            // is said as everything that happens in the song is.)
+            cx.sounds.quietly(move |runtime| runtime.remove_from_song(person).map(drop));
+        }
+        if trill_noir::button(ui, theme, "Keep them", Variant::Default).clicked() {
+            cx.state.together.removing = None;
+        }
+    });
 }
 
 /// What someone holds, in a few words.
@@ -596,7 +657,10 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
             audio(ui, cx);
             if cx.live.together.is_on() {
                 heading(ui, cx, "Who is here");
-                people(ui, cx);
+                if let Some(person) = people(ui, cx) {
+                    cx.state.together.removing = Some(person);
+                }
+                removing(ui, cx);
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);

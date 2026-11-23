@@ -26,7 +26,11 @@ use trill_core::{ClipId, DeviceId, TrackId};
 /// 6: a track says what stands in for its first devices where a program
 /// has not got them (a rendition), and everyone says which devices of
 /// the song their machine has not got ([`Presence::lacks`]).
-pub const PROTOCOL: u32 = 6;
+///
+/// 7: whoever shares a song can let one person go. The invitation is
+/// another from then on, and is said to the programs that stay
+/// ([`Message::Invitation`]).
+pub const PROTOCOL: u32 = 7;
 
 /// The most one message may be: a whole song with its plugins' states.
 pub const MAX_MESSAGE: usize = 256 << 20;
@@ -43,6 +47,9 @@ pub const MAX_PIECE: usize = 48 << 10;
 pub const MAX_WANT: u64 = 4 << 20;
 /// How many files one saying of what a program has names.
 pub const MAX_HAVE: usize = 4096;
+/// The longest an invitation is said as: one is under a hundred letters,
+/// and a host's name may be long.
+pub const MAX_INVITATION: usize = 400;
 /// What a piece begins with: no message written as text begins so.
 const PIECE: u8 = 0;
 /// What a piece carries before its bytes: the mark, the hash and the
@@ -170,6 +177,15 @@ pub enum Message {
     Gone { person: u64 },
     /// The connection is being ended, and why.
     Bye { why: String },
+    /// Said by a program that shares a song to the programs that came in
+    /// by its invitation and stay: the invitation is another from here on
+    /// (someone was let go, and the one they hold is no longer one). The
+    /// text is the invitation as it is handed to someone. Whoever hears it
+    /// takes its secret and nothing else of it
+    /// ([`Invitation::with_secret_of`](crate::Invitation::with_secret_of)),
+    /// and only from the program it joined: it is what a connection that
+    /// is lost is asked for again by.
+    Invitation { text: String },
     /// Nothing: the connection is there. Said by a connection itself when
     /// it has had nothing else to say for a moment, whatever the program
     /// that holds it is busy with, so that a connection over which nothing
@@ -245,6 +261,9 @@ impl Message {
             }
             Message::Have { files } => files.iter().try_for_each(written)?,
             Message::Want { file, .. } | Message::Nothing { file } => written(file)?,
+            Message::Invitation { text } if text.len() > MAX_INVITATION => {
+                return Err(format!("it says an invitation of {} letters: more than one is", text.len()));
+            }
             _ => {}
         }
         Ok(message)

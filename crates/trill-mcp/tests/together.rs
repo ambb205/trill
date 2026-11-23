@@ -176,6 +176,62 @@ async fn two_clients_share_a_song_by_tools_and_each_has_what_the_other_writes() 
     drop((ada.runtime, ben.runtime));
 }
 
+/// 2 connections, and one that is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_lets_one_person_go_by_name_and_is_told_the_invitation_that_holds_from_then_on() {
+    let (ada, ben, cy) = (program().await, program().await, program().await);
+    ok(&ada.client, "create_track", json!({ "name": "Keys" })).await;
+    let shared = ok(&ada.client, "shared_song", json!({ "action": "share", "name": "Ada" })).await;
+    let invitation = shared["invitation"].as_str().expect("an invitation to hand to someone").to_owned();
+    for (program, name) in [(&ben, "Ben"), (&cy, "Cy")] {
+        let join = json!({ "action": "join", "invitation": invitation, "name": name });
+        ok(&program.client, "shared_song", join).await;
+    }
+    let status = || json!({ "action": "status" });
+    let both = |reply: &Value| names(reply).len() == 2;
+    // Whoever came in by Ada's invitation is hers to let go, and her
+    // client is told so; at Ben's nobody is his.
+    let here = until(&ada.client, "shared_song", status(), "Ada sees both", both).await;
+    assert!(here["here"].as_array().unwrap().iter().all(|person| person["can_be_removed"] == true), "{here}");
+    let at_ben = until(&ben.client, "shared_song", status(), "Ben sees both", both).await;
+    let his = |person: &Value| person.get("can_be_removed").is_some();
+    assert!(!at_ben["here"].as_array().unwrap().iter().any(his), "{at_ben}");
+
+    // What is wrong with the asking is a sentence: who is here, and
+    // whose someone is to let go.
+    let remove = |person: &str| json!({ "action": "remove", "person": person });
+    let refused = call(&ada.client, "shared_song", json!({ "action": "remove" })).await.unwrap_err();
+    assert!(refused.contains("remove takes `person`") && refused.contains("Ben and Cy"), "{refused}");
+    let refused = call(&ada.client, "shared_song", remove("Dee")).await.unwrap_err();
+    assert!(refused.contains("nobody called 'Dee' is in the song"), "{refused}");
+    let refused = call(&ben.client, "shared_song", remove("Cy")).await.unwrap_err();
+    assert!(refused.contains("Cy is in the song through Ada, as you are"), "{refused}");
+    let refused = call(&ben.client, "shared_song", remove("Ada")).await.unwrap_err();
+    assert!(refused.contains("You are in the song by Ada's invitation"), "{refused}");
+
+    // Ada's client lets Cy go, by his name as it is said or nearly.
+    let after = ok(&ada.client, "shared_song", remove(" cy ")).await;
+    let done = after["removed"].as_str().expect("what was done, in a sentence");
+    assert!(done.starts_with("Cy is no longer in the song: you removed them."), "{after}");
+    assert_eq!(names(&after), ["Ben"], "{after}");
+    let another = after["invitation"].as_str().expect("the song is still shared").to_owned();
+    assert_ne!(another, invitation, "under another invitation, which the reply has");
+    // Cy's client is told, and nobody is with him.
+    let told = |reply: &Value| reply["lately"].to_string().contains("Ada removed you from the song.");
+    let at_cy = until(&cy.client, "shared_song", status(), "Cy is told", told).await;
+    assert_eq!((at_cy["here"].clone(), at_cy["connected_programs"].clone()), (json!([]), json!(0)), "{at_cy}");
+    // By the invitation he holds he does not get in again.
+    let again = json!({ "action": "join", "invitation": invitation });
+    let refused = call(&cy.client, "shared_song", again).await.unwrap_err();
+    assert!(refused.contains("did not take this invitation"), "{refused}");
+    // Ben is where he was, with Ada.
+    let left = |reply: &Value| names(reply) == ["Ada"];
+    until(&ben.client, "shared_song", status(), "Ben sees Cy go", left).await;
+    let lately = ok(&ben.client, "shared_song", status()).await["lately"].to_string();
+    assert!(!lately.contains("lost") && !lately.contains("removed"), "{lately}");
+    drop((ada.runtime, ben.runtime, cy.runtime));
+}
+
 /// Writes `seconds` of a tone and returns the file's path as text.
 fn tone(path: std::path::PathBuf, hertz: f64, seconds: f64) -> String {
     let rate = 44_100.0;

@@ -612,7 +612,8 @@ fn what_a_sampler_plays_is_said_without_its_place_and_has_a_place_made_here_at_t
     // Nothing was said of what the file is yet: it is its maker's to say,
     // and at the other's neither a problem nor a file that is missing.
     let waits = FilePlace::Sample { device: sampler, slot: "sample".into() };
-    assert_eq!(b.files_unsaid().into_iter().map(|file| file.place).collect::<Vec<_>>(), [waits.clone()]);
+    let unsaid: Vec<FilePlace> = b.files_unsaid().into_iter().map(|file| file.place).collect();
+    assert_eq!(unsaid, std::slice::from_ref(&waits));
     assert_eq!(b.files_arriving(), std::slice::from_ref(&waits));
     assert!(b.problems().is_empty(), "{:?}", b.problems());
     assert!(a.files_unsaid().is_empty());

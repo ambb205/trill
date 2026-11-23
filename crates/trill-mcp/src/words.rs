@@ -663,6 +663,10 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some("stop_sharing") => Wording::new("Taking the invitation back", "Took the invitation back"),
             Some("join") => about("Joining", "Joined", "someone's song"),
             Some("leave") => about("Leaving", "Left", "the shared song"),
+            Some("remove") => match call.text("person") {
+                Some(person) => about("Removing", "Removed", &format!("{person} from the shared song")),
+                None => about("Removing", "Removed", "someone from the shared song"),
+            },
             Some("put_back") => Wording::new("Putting back what gave way", "Put back what gave way"),
             Some("dismiss") => about("Reading", "Read", "a notice"),
             Some("what_goes") => about("Looking at", "Looked at", "which files would go with the song"),
