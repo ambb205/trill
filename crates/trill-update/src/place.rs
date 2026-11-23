@@ -18,6 +18,18 @@
 //!
 //! Everything is kept in one folder beside the programs ([`WORK`]), which
 //! an installer clears and nothing else reads.
+//!
+//! On macOS Trill is an application bundle, `Trill.app`, with the programs
+//! in `Contents/MacOS` and what they read in `Contents/Resources`: the
+//! folder it is installed in is the bundle, and an update replaces files
+//! inside it by the same renames. The bundle is signed as a whole, ad hoc
+//! (no developer's identity): its signature seals every file in it, and a
+//! bundle with a file the seal does not hold is one macOS calls damaged.
+//! So an update brings the bundle's new seal (`Contents/_CodeSignature`)
+//! with the files it holds, and keeps everything of its own beside the
+//! bundle, never in it ([`Place::work`]). An archive keeps no file's mode:
+//! what is a program there is known by where it lies, and is made one when
+//! it is staged.
 
 use crate::Version;
 use crate::release::{Build, Piece};
@@ -117,18 +129,24 @@ pub fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     Some((metadata.len(), metadata.modified().ok()?))
 }
 
-/// Whether the file at `path` (below the folder Trill is in) is one of
-/// Trill's programs.
+/// Where a bundle on macOS keeps its programs.
+#[cfg(not(target_os = "linux"))]
+const PROGRAMS_OF_A_BUNDLE: &str = "Contents/MacOS/";
+
+/// Whether the file at `path` (below the folder Trill is in) is one of its
+/// programs: on Windows by its name, in a bundle by where it lies.
 #[cfg(not(target_os = "linux"))]
 fn is_a_program(path: &str) -> bool {
-    path.ends_with(".exe")
+    path.ends_with(".exe") || path.starts_with(PROGRAMS_OF_A_BUNDLE)
 }
 
-/// Trill's programs on Linux, which have no mark in their names: the only
-/// files of an update that are made programs ([`make_runnable`]).
+/// Trill's programs on Linux, which have neither a mark in their names nor
+/// a bundle to lie in: named here, and nowhere else.
 #[cfg(target_os = "linux")]
 const PROGRAMS: &[&str] = &["trill", "trill-mcp"];
 
+/// On Linux by being one of [`PROGRAMS`], in the folder Trill is in: never
+/// by anything the archive says of a file.
 #[cfg(target_os = "linux")]
 fn is_a_program(path: &str) -> bool {
     PROGRAMS.contains(&path)
@@ -142,22 +160,44 @@ fn in_order(files: &[Piece]) -> Vec<&Piece> {
     ordered
 }
 
-/// Makes the file at `path` a program that its owner and everybody may
-/// run. On Unix a file that is unpacked is none: the archive's word on it
-/// is never read (`trill_fetch::zip::unpack` makes every file a plain
-/// one), and only the files of an update that its announcement names and
-/// that are this system's programs are marked, after each was held to its
-/// checksum.
-#[cfg(unix)]
+/// Makes a program that was unpacked one that can be run: an archive keeps
+/// no file's mode. Nothing on Windows, where a program is one by its name.
 fn make_runnable(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// The application bundle a program on macOS lies in
+/// (`<name>.app/Contents/MacOS/<program>`), which is the folder Trill is
+/// installed in there; `None` for a program that lies anywhere else.
+fn bundle_of(program: &Path) -> Option<PathBuf> {
+    let macos = program.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let named = |path: &Path, name: &str| path.file_name().is_some_and(|it| it == name);
+    let is_a_bundle = bundle.extension().is_some_and(|extension| extension == "app");
+    (named(macos, "MacOS") && named(contents, "Contents") && is_a_bundle).then(|| bundle.to_owned())
 }
 
 impl Place {
-    /// The folder the program that is running lies in.
+    /// The folder the program that is running lies in: on macOS the
+    /// application bundle, where it lies in one.
     pub fn of_this_program() -> Option<Self> {
-        Some(Self { folder: std::env::current_exe().ok()?.parent()?.to_owned() })
+        let program = std::env::current_exe().ok()?;
+        if cfg!(target_os = "macos")
+            && let Some(bundle) = bundle_of(&program)
+        {
+            return Some(Self { folder: bundle });
+        }
+        Some(Self { folder: program.parent()?.to_owned() })
     }
 
     pub fn at(folder: impl Into<PathBuf>) -> Self {
@@ -168,8 +208,25 @@ impl Place {
         &self.folder
     }
 
+    /// Where the update is kept: beside the programs, or for a bundle on
+    /// macOS beside the bundle (`.Trill.app.update`), on the same disk so
+    /// that what goes in is renamed in. Nothing of an update may lie inside
+    /// a bundle: what lies in it and was not sealed with it is a bundle
+    /// whose signature no longer holds.
     fn work(&self) -> PathBuf {
+        if let Some(name) = self.bundle_name() {
+            return self.folder.with_file_name(format!(".{name}.update"));
+        }
         self.folder.join(WORK)
+    }
+
+    /// The name of the application bundle this is, on macOS.
+    fn bundle_name(&self) -> Option<String> {
+        let is_a_bundle = self.folder.extension().is_some_and(|extension| extension == "app");
+        if !cfg!(target_os = "macos") || !is_a_bundle {
+            return None;
+        }
+        Some(self.folder.file_name()?.to_string_lossy().into_owned())
     }
 
     fn below(&self, path: &str) -> PathBuf {
@@ -185,12 +242,26 @@ impl Place {
     pub fn writable(&self) -> Result<(), String> {
         let work = self.work();
         let probe = work.join(format!("probe-{}", std::process::id()));
-        let tried = std::fs::create_dir_all(&work).and_then(|()| std::fs::write(&probe, b""));
+        let mut tried = std::fs::create_dir_all(&work).and_then(|()| std::fs::write(&probe, b""));
         let _ = std::fs::remove_file(&probe);
+        // A bundle is written into as well, by what goes in: for a moment, and taken away again.
+        if tried.is_ok() && self.bundle_name().is_some() {
+            let inside = self.folder.join(format!(".probe-{}", std::process::id()));
+            tried = std::fs::write(&inside, b"");
+            let _ = std::fs::remove_file(&inside);
+        }
         tried.map_err(|_| {
+            // On macOS an application that was downloaded and is started where it was unpacked is run
+            // from a copy the system makes that cannot be written to; one in a folder that needs an
+            // administrator cannot be either.
+            let instead = if cfg!(target_os = "macos") {
+                "move Trill.app into your Applications folder (or another folder of yours) and start it from \
+                 there, or put the new version in its place by hand"
+            } else {
+                "run the installer of the new version instead"
+            };
             format!(
-                "Trill cannot write to the folder it is installed in ({}), so it cannot update itself there: \
-                 run the installer of the new version instead",
+                "Trill cannot write to the folder it is installed in ({}), so it cannot update itself there: {instead}",
                 self.folder.display()
             )
         })
@@ -265,13 +336,9 @@ impl Place {
                         piece.path
                     )));
                 }
-            }
-            #[cfg(unix)]
-            for piece in build.files.iter().filter(|piece| is_a_program(&piece.path)) {
-                let path = self.below_work(&version.to_string(), &piece.path);
-                make_runnable(&path).map_err(|error| {
-                    Ended::Failed(format!("{} of Trill {version} could not be made a program ({error})", piece.path))
-                })?;
+                if is_a_program(&piece.path) {
+                    make_runnable(&path).map_err(|error| Ended::Failed(format!("{}: {error}", piece.path)))?;
+                }
             }
             let staged = Staged { version, files: build.files.clone() };
             write_json(&self.work().join(READY), &staged).map_err(Ended::Failed)?;
@@ -341,6 +408,12 @@ impl Place {
         write_json(&self.work().join(APPLIED), &Applied { to: version, files: paths })?;
         let _ = std::fs::remove_file(self.work().join(APPLYING));
         self.unstage();
+        // A bundle that changed says so by when it was written, which is how Finder and Launch
+        // Services know to read its `Info.plist` (the version it shows) again.
+        #[cfg(target_os = "macos")]
+        if let Ok(folder) = File::open(&self.folder) {
+            let _ = folder.set_modified(SystemTime::now());
+        }
         Ok(())
     }
 
@@ -653,6 +726,120 @@ mod tests {
         assert_eq!(place.staged(), None, "what was half used is fetched again");
     }
 
+    /// On macOS a file the system will not let be moved: one marked as not
+    /// to be changed (`chflags uchg`), as something that guards it would.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_update_that_cannot_go_in_whole_leaves_trill_as_it_was() {
+        use std::os::unix::ffi::OsStrExt;
+        let (home, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        installed(home.path(), "0.2.0");
+        let place = Place::at(home.path());
+        let staged = stage(&place, shelf.path(), "0.3.0");
+        let held = home.path().join("trill-mcp.exe");
+        let name = std::ffi::CString::new(held.as_os_str().as_bytes()).unwrap();
+        let flag = |flags: u32| {
+            // SAFETY: a path that ends, and flags of the file it names.
+            assert_eq!(unsafe { libc::chflags(name.as_ptr(), flags) }, 0)
+        };
+        flag(libc::UF_IMMUTABLE);
+        let alone = place.alone().unwrap();
+        let why = place.apply(&staged, &alone);
+        flag(0);
+        let why = why.unwrap_err();
+        assert!(why.contains("trill-mcp.exe") && why.contains("Trill is as it was"), "{why}");
+        assert_eq!(read(home.path(), "trill.exe"), "window 0.2.0");
+        assert_eq!(read(home.path(), "trill-mcp.exe"), "server 0.2.0");
+        assert_eq!(read(home.path(), "licences/Trill.txt"), "licence 0.2.0");
+        assert_eq!(read(home.path(), "licences/New in this one.txt"), "(not there)");
+        assert!(!home.path().join(WORK).join(APPLYING).exists());
+        assert_eq!(place.staged(), None, "what was half used is fetched again");
+    }
+
+    /// Trill on macOS is a bundle: its programs are the files in
+    /// `Contents/MacOS`, which go in last and are made runnable when they
+    /// are staged (an archive keeps no file's mode); the folder it is
+    /// installed in is the bundle its program lies in. (Not on Linux, which
+    /// knows no bundle: its programs are the two it names.)
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn in_a_bundle_the_programs_are_known_by_where_they_lie_and_are_staged_runnable() {
+        let files = |paths: &[&str]| -> Vec<Piece> {
+            paths.iter().map(|path| Piece { path: (*path).into(), sha256: String::new(), size: 0 }).collect()
+        };
+        let pieces = files(&["Contents/MacOS/trill", "Contents/Info.plist", "Contents/Resources/Trill.icns"]);
+        let ordered: Vec<&str> = in_order(&pieces).iter().map(|piece| piece.path.as_str()).collect();
+        assert_eq!(ordered.last(), Some(&"Contents/MacOS/trill"));
+        assert_eq!(
+            bundle_of(Path::new("/Applications/Trill.app/Contents/MacOS/trill")),
+            Some(PathBuf::from("/Applications/Trill.app"))
+        );
+        assert_eq!(bundle_of(Path::new("/somewhere/Trill/trill")), None);
+        assert_eq!(bundle_of(Path::new("/somewhere/Contents/MacOS/trill")), None, "a folder that is no bundle");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let (home, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let files: Vec<(String, Vec<u8>)> = vec![
+                ("Contents/MacOS/trill".into(), b"window 0.3.0".to_vec()),
+                ("Contents/Info.plist".into(), b"<plist/>".to_vec()),
+            ];
+            let members: Vec<(&str, &[u8], bool)> =
+                files.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice(), true)).collect();
+            let archive = shelf.path().join("trill.zip");
+            std::fs::write(&archive, trill_fetch::zip::archive_of(&members)).unwrap();
+            let build = Build {
+                runs_on: "macos-aarch64".into(),
+                url: "https://example.org/trill.zip".into(),
+                sha256: checksum(&archive, &AtomicBool::new(false)).unwrap(),
+                size: std::fs::metadata(&archive).unwrap().len(),
+                files: files
+                    .iter()
+                    .map(|(name, bytes)| Piece { path: name.clone(), sha256: sum(bytes), size: bytes.len() as u64 })
+                    .collect(),
+            };
+            let place = Place::at(home.path());
+            let staged = place.stage("0.3.0".parse().unwrap(), &build, &archive, &AtomicBool::new(false), &mut |_| {});
+            let staged = staged.unwrap();
+            let mode =
+                |path: &str| std::fs::metadata(place.below_work("0.3.0", path)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode("Contents/MacOS/trill"), 0o755, "a program is staged runnable");
+            assert_eq!(mode("Contents/Info.plist") & 0o111, 0, "and nothing else is");
+            let alone = place.alone().unwrap();
+            place.apply(&staged, &alone).unwrap();
+            let program = home.path().join("Contents/MacOS/trill");
+            assert_eq!(std::fs::metadata(program).unwrap().permissions().mode() & 0o777, 0o755);
+        }
+    }
+
+    /// On macOS everything of an update lies beside a bundle, and nothing
+    /// of it inside: a bundle holds only what its seal holds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_bundles_update_is_kept_beside_it_and_leaves_nothing_in_it() {
+        let (above, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let bundle = above.path().join("Trill.app");
+        installed(&bundle, "0.2.0");
+        let place = Place::at(&bundle);
+        assert_eq!(place.work(), above.path().join(".Trill.app.update"));
+        place.writable().unwrap();
+        let staged = stage(&place, shelf.path(), "0.3.0");
+        let _running = place.run();
+        drop(_running);
+        let alone = place.alone().unwrap();
+        place.apply(&staged, &alone).unwrap();
+        place.tidy(&alone);
+        assert_eq!(read(&bundle, "trill.exe"), "window 0.3.0");
+        let mut inside: Vec<String> = std::fs::read_dir(&bundle)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        inside.sort();
+        assert_eq!(inside, ["licences", "trill-mcp.exe", "trill.exe"], "nothing of the update is in the bundle");
+    }
+
     #[test]
     fn a_file_that_changed_on_the_disk_since_it_was_staged_does_not_go_in() {
         let (home, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -875,6 +1062,38 @@ mod tests {
             Trial::CameUp
         );
         // One that is not there.
+        let Trial::Failed(why) = place.try_out(place.alone().unwrap(), &home.path().join("no-such"), &[], from).ended
+        else {
+            panic!()
+        };
+        assert!(why.contains("could not be started"), "{why}");
+    }
+
+    /// On macOS, programs that are shell scripts: one that says it is up and
+    /// stays a while, one that ends at once with a fault, one that does what
+    /// it was asked and ends well, and one that is not there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_new_version_that_comes_up_is_kept_and_one_that_ends_at_once_is_said() {
+        let home = tempfile::tempdir().unwrap();
+        let place = Place::at(home.path());
+        let shell = PathBuf::from("/bin/sh");
+        let from = Version::new(0, 2, 0);
+        // It ends with a fault afterwards: that it came up is known by what it said, not by how it ended.
+        let up = home.path().join("comes-up.sh");
+        std::fs::write(&up, format!("#!/bin/sh\necho up > \"${TRIAL}\"\nsleep 2\nexit 9\n")).unwrap();
+        make_runnable(&up).unwrap();
+        assert_eq!(place.try_out(place.alone().unwrap(), &up, &[], from).ended, Trial::CameUp);
+        let Trial::Failed(why) =
+            place.try_out(place.alone().unwrap(), &shell, &["-c".into(), "exit 3".into()], from).ended
+        else {
+            panic!("a program that ends with a fault did not come up")
+        };
+        assert!(why.contains("ended before it was up"), "{why}");
+        assert_eq!(
+            place.try_out(place.alone().unwrap(), &shell, &["-c".into(), "exit 0".into()], from).ended,
+            Trial::CameUp
+        );
         let Trial::Failed(why) = place.try_out(place.alone().unwrap(), &home.path().join("no-such"), &[], from).ended
         else {
             panic!()
