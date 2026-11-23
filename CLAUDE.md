@@ -57,6 +57,8 @@ cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an ann
   `a_hundred_and_twenty_eight_voices_of_a_sampled_instrument_cost_less_than_the_time_they_play`, `trill-dsp`
   `eight_notes_of_eight_voices_leave_most_of_a_core`, `trill-mcp`
   `an_agent_arms_a_track_plays_it_and_records_a_take`, `trill-assistant`'s `pipeline`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
+- The compiler is the one `rust-toolchain.toml` names, on every machine: "clippy is clean" is judged on it, and a
+  newer compiler's new lints are not chased until it is raised there, on all three systems at once.
 - Development builds are optimized (`[profile.dev]` in `Cargo.toml`) because unoptimized audio code cannot keep
   up; what only runs while building is not, and debug info is line tables only.
 - Do not rename or move a `target` folder: tests of `trill-assistant` and `trill-plugins` have its path built in.
