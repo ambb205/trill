@@ -508,6 +508,37 @@ long the way is is measured by a small question put while nothing is on its way,
 the most that was counted to arrive of late (going by the last count alone, what was asked for swung until
 nearly nothing was). The file with least to go is asked for first, so that the most are whole the soonest.
 
+**Through a meeting point on a real server.** The meeting point as the Linux program on a rented server (Ubuntu
+24.04, x86-64, set up as [its page](meeting-point.md) says), 30 ms away by `ping`, and two programs at home that
+meet through it: whatever one says to the other leaves the house, reaches the server and comes back. Both
+programs were on one machine behind one router, so this is the internet and a real server, and not yet two
+homes.
+
+| | Through the server | The two on one machine |
+|---|---|---|
+| The meeting open at the meeting point, after sharing | 0.12 to 0.15 s | 0.05 s |
+| Joining the long song (57 tracks, 36,864 notes; 8.0 MB said) | 1.6 s | 1.5 s |
+| An edit, to the other's graph swapped in | 51 ms in the middle, 63 for nine in ten, 88 at worst | 22 to 24, 36 to 40 |
+| Twelve recordings of a megabyte, whole at the other | 2.3 s | |
+| A recording of 50 MB, whole at the other | 6.4 s (7.9 MB a second) | 0.4 to 1.4 s |
+| A fader set while the 50 MB cross | 87 ms in the middle, 150 for nine in ten, 217 at worst | 16, 29, 34 |
+| The same with nothing crossing | 49 to 51 ms, 68 to 73, 90 to 119 | 17, 29, 31 |
+
+- **Two real windows**, the first with the machine's plugins and the cut song (seven plugins on six tracks), the
+  second with none: the second had the song 0.8 s after joining and the first knew at once which seven devices
+  it had not got. The first recorded the five tracks in one pass in 93 s, and the second heard all five 110 s
+  after it had joined (168 MB through the server). Each recording measured against its plugin: the same
+  loudness and peak, to the hundredth of a LU, on all five. A note written at the first: the second was told
+  after 60 ms that it heard the drums as they were, and heard them as they are 61 s later.
+- **The meeting point restarted on the server** while two windows were in a song: each said the other was away,
+  each went on (a tempo here, a track there), and both were in the song again 1.9 s after the restart with what
+  the other had done. Nobody did anything.
+- **One let go** by whoever shared: 0.2 s. The other was told at once, the invitation they held was refused
+  ("whoever shared the song stopped sharing it"), and the new one let them in again.
+- **The server**: the meeting point held 0.9 MB and three threads with nothing connected, before and after. Its
+  log has the name the key was given under, a few digits of each meeting and the kilobytes that passed (296 MB
+  in that half hour, of the 2,048 a key may pass in a day), and nothing of the key.
+
 ## What is not built
 
 - A sampled instrument's recordings travelling, and telling the other which set of the catalogue an instrument
@@ -547,6 +578,7 @@ nearly nothing was). The file with least to go is asked for first, so that the m
 - Versions of a song that are kept apart and merged back.
 - What is kept of removed things and of when each property was set is never thrown away, so a shared song's
   file only grows.
-- Two computers. Everything here was run on one machine: both programs on Windows, and the meeting point as the
-  Linux program under WSL on the same machine. Nothing has crossed a real network, a real router or the internet.
-  Sharing with *My network* has not been run once: it asks the firewall a question that is yours to answer.
+- Two computers, and two homes. The meeting point has run on a real server, and two programs have met through it
+  over the internet (above), but both were on one Windows machine behind one router: nobody has joined from a
+  second computer or a second line. Sharing with *My network* has not been run once: it asks the firewall a
+  question that is yours to answer.

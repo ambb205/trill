@@ -46,7 +46,9 @@ cargo build -p trill-meet --release --target x86_64-unknown-linux-musl
 That makes `target/x86_64-unknown-linux-musl/release/trill-meet`: 1.1 MB, statically linked, so it runs on any
 x86-64 Linux whatever is installed there. Built on Windows it needs one more word, because the linker is Rust's
 own: `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld` in the environment. That is how the one this page was
-checked with was built, in fifteen seconds, and run on Ubuntu under WSL.
+checked with was built, in fifteen seconds, and run on Ubuntu under WSL and then on a rented server (Ubuntu 24.04),
+set up by the steps below on port 8745 beside what that server already ran. What two Trills at home did through
+it is [with the other measurements](working-together.md#what-it-costs).
 
 **The meeting point and the Trills that use it are of one build.** What is said to a meeting point has a
 number (2, since the answer to a holder says how much of its day is left), and a program that speaks another is
