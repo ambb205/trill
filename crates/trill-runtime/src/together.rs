@@ -74,6 +74,11 @@ const LEFT_FOR_THE_SONG: u64 = 64 << 20;
 /// What a program says as it leaves, and as it is closed.
 const LEFT: &str = "left";
 const CLOSED: &str = "the program was closed";
+/// What a program that shares a song says to someone it lets go of
+/// ([`Runtime::remove_from_song`]), and to whoever was on the way in by
+/// the invitation that was one until then.
+const REMOVED: &str = "they removed you from the song";
+const NO_LONGER_ONE: &str = "the invitation you came by is no longer one, ask them for the new one";
 /// How long a connection that was lost is left alone before it is asked
 /// for again: this long the first time and twice as long each time
 /// after, up to the longest.
@@ -97,6 +102,10 @@ pub struct Here {
     pub holding: Option<String>,
     /// The devices of the song their machine has not got.
     pub lacks: Vec<DeviceId>,
+    /// Whether they are in the song by this program's own invitation, so
+    /// that this program can let them go ([`Runtime::remove_from_song`]).
+    /// Someone who came in through another program is that program's.
+    pub can_be_removed: bool,
 }
 
 /// What this program's own person holds: said to the others, and never
@@ -198,6 +207,8 @@ enum Ask {
     StopSharing,
     Join(Invitation, bool),
     Leave,
+    /// Let one person go, by their number.
+    Remove(u64),
 }
 
 /// What the thread and the front ends both hold.
@@ -210,6 +221,9 @@ struct Shared {
     asks: Vec<Ask>,
     /// What came of the last share: the invitation, or why not.
     shared: Option<Result<String, String>>,
+    /// What came of the last asking to let someone go: the sentence that
+    /// says what was done, or why not.
+    removed: Option<Result<String, String>>,
 }
 
 impl Shared {
@@ -386,6 +400,9 @@ struct Driver {
     /// The files the song names on this computer that may not go to the
     /// others: nobody was shown them.
     held: Vec<String>,
+    /// The places of the song whose file nobody has said, each by the
+    /// name it is shown by: they wait for whoever brought them.
+    unsaid: Vec<String>,
     /// What the meeting point said the key may still pass today, when
     /// its day is over, and how many bytes of files had passed here then.
     allowance: Option<(u64, Instant, u64)>,
@@ -422,6 +439,7 @@ impl Driver {
         self.epoch = None;
         self.files.forget();
         self.held.clear();
+        self.unsaid.clear();
         (self.allowance, self.files_wait) = (None, None);
         self.renditions.leave(&self.session);
         self.session.lock().hear_changes(false);
@@ -504,8 +522,138 @@ impl Driver {
                         let _ = self.net.events();
                     }
                 }
+                Ask::Remove(person) => {
+                    let came = self.remove(person);
+                    if let Ok(sentence) = &came {
+                        self.say(sentence.clone());
+                    }
+                    self.show();
+                    self.shared.lock().removed = Some(came);
+                }
             }
         }
+    }
+
+    /// Ends the connection `link` from here, with `why` for the other
+    /// side: whoever was heard of through it is gone with it, which the
+    /// others are told. Nothing is said of it here; whoever asks says.
+    fn let_go_of(&mut self, link: LinkId, why: &str) {
+        self.files.lost(link);
+        // (Out of the peers first: its going is then nothing more to say.)
+        self.peers.remove(&link);
+        let gone: Vec<u64> =
+            self.people.iter().filter(|(_, via, _)| *via == link).map(|(here, ..)| here.person.id).collect();
+        self.people.retain(|(_, via, _)| *via != link);
+        self.net.close(link, why);
+        for person in gone {
+            self.say_to_greeted(&Message::Gone { person }, None);
+        }
+    }
+
+    /// Why `person` is not this program's to let go, in a sentence: they
+    /// are in the song by someone else's invitation, or not in it.
+    fn not_mine_to_remove(&self, person: u64) -> String {
+        let Some((here, via, _)) = self.people.iter().find(|(here, ..)| here.person.id == person) else {
+            return "Nobody of that name is in the song with you.".to_owned();
+        };
+        let name = &here.person.name;
+        let through = self.name_of(*via);
+        let own = |peer: &Peer| peer.person.as_ref().is_some_and(|known| known.id == person);
+        match self.peers.get(via) {
+            // The program this one joined: it shares the song.
+            Some(peer) if own(peer) => format!(
+                "You are in the song by {name}'s invitation, so {name} is not yours to remove. You can leave; each \
+                 of you keeps the song."
+            ),
+            Some(peer) if peer.joined => format!(
+                "{name} is in the song through {through}, as you are: only whoever they came in by can remove them."
+            ),
+            _ => format!(
+                "{name} came into the song through {through}, not by your invitation. {through} can remove them; \
+                 removing {through} takes both out."
+            ),
+        }
+    }
+
+    /// Lets one person go from the song: see [`Runtime::remove_from_song`].
+    /// Returns the sentence that says what was done, or why it was not.
+    fn remove(&mut self, person: u64) -> Result<String, String> {
+        // Whoever came in by this program's invitation is its to let go.
+        let theirs: Vec<LinkId> = (self.peers.iter())
+            .filter(|(_, peer)| !peer.joined && peer.person.as_ref().is_some_and(|known| known.id == person))
+            .map(|(link, _)| *link)
+            .collect();
+        let Some(first) = theirs.first() else { return Err(self.not_mine_to_remove(person)) };
+        let name = self.name_of(*first);
+        let with = self.people.iter().filter(|(here, via, _)| theirs.contains(via) && here.person.id != person).count();
+        for link in theirs {
+            self.let_go_of(link, REMOVED);
+        }
+        self.were_away.remove(&person);
+        let mut said = match with {
+            0 => format!("{name} is no longer in the song: you removed them. They keep it as it was."),
+            1 => format!(
+                "{name} is no longer in the song, nor is the one who was in it through them: you removed them. \
+                 They keep it as it was."
+            ),
+            with => format!(
+                "{name} is no longer in the song, nor are the {with} who were in it through them: you removed \
+                 them. They keep it as it was."
+            ),
+        };
+
+        // The invitation they hold is no longer one: the song is shared
+        // under another from here on, at the same place.
+        let greeted: HashSet<LinkId> =
+            self.peers.iter().filter(|(_, peer)| peer.person.is_some()).map(|(link, _)| *link).collect();
+        let point = self.through.as_ref().map(|(point, _)| point.clone());
+        match self.net.listen_anew(point.as_ref()) {
+            Ok(None) => said.push_str(" The song is not shared at the moment, so nobody gets in by the invitation."),
+            Ok(Some(invitation)) => {
+                if let Some((_, meeting)) = &mut self.through {
+                    *meeting = Meeting::Reaching;
+                }
+                // Whatever the invitation before let in is among the
+                // connections by now. Who had not said who they are when
+                // it became another is let go of: nobody is in by it whom
+                // this program had not greeted.
+                self.events();
+                let late: Vec<LinkId> = (self.peers.iter())
+                    .filter(|(link, peer)| !peer.joined && !greeted.contains(link))
+                    .map(|(link, _)| *link)
+                    .collect();
+                for link in late {
+                    self.let_go_of(link, NO_LONGER_ONE);
+                }
+                // Whoever stays is told the new one over the connection
+                // they have: it is what theirs is asked for again by.
+                let stay: Vec<LinkId> = (self.peers.iter())
+                    .filter(|(_, peer)| !peer.joined && peer.person.is_some())
+                    .map(|(link, _)| *link)
+                    .collect();
+                self.net.say_to(&stay, &Message::Invitation { text: invitation.to_string() });
+                said.push_str(match stay.is_empty() {
+                    true => {
+                        " The invitation is another now: the one they have lets nobody in, and whoever is to join \
+                         needs the new one."
+                    }
+                    false => {
+                        " The invitation is another now: the one they have lets nobody in. Whoever stays was told \
+                         the new one and comes back by it by itself; whoever has not joined yet needs it from you."
+                    }
+                });
+            }
+            Err(error) => {
+                // No invitation is better than the one they hold.
+                self.net.stop_listening();
+                self.through = None;
+                said.push_str(&format!(
+                    " A new invitation could not be made ({error}), so the song is no longer shared: whoever is \
+                     here stays, and nobody gets in until you share it again."
+                ));
+            }
+        }
+        Ok(said)
     }
 
     fn heard(&mut self, link: LinkId, message: Message) {
@@ -695,6 +843,20 @@ impl Driver {
             }
             // (Neither is handed on by the connection: said by it, to it.)
             Message::Bye { .. } | Message::Still => {}
+            // Whoever shares the song let someone go, and shares it under
+            // another invitation from here on. Only its secret is taken,
+            // only from the program this one joined, and for the address
+            // this one reached it by: it is what this connection is asked
+            // for again by when it is lost, and nothing else.
+            Message::Invitation { text } => {
+                let another = Invitation::parse(&text).ok();
+                if let (Some(peer), Some(another)) = (self.peers.get_mut(&link), another)
+                    && peer.joined
+                    && let Some(held) = &peer.invitation
+                {
+                    peer.invitation = Some(held.with_secret_of(&another));
+                }
+            }
             // The song's files. Nothing of them is said between programs
             // that do not hold the same song yet: whatever is asked for
             // then is not here.
@@ -793,11 +955,19 @@ impl Driver {
         }
         let revision = self.session.lock().revision();
         if self.files.look_is_due(revision) {
-            let (files, received, held) = {
+            let (files, received, held, unsaid) = {
                 let session = self.session.lock();
-                (session.files_here(), session.received_in(), session.files_held())
+                (session.files_here(), session.received_in(), session.files_held(), session.files_unsaid())
             };
             self.files.look(revision, files, received);
+            // What someone else brought into the song and has not said:
+            // shown with what is on its way, as waiting for them.
+            let mut unsaid: Vec<String> = unsaid.iter().map(crate::files::unsaid_name).collect();
+            unsaid.sort();
+            if unsaid != self.unsaid {
+                self.unsaid = unsaid;
+                self.shared.lock().status.revision += 1;
+            }
             // What the song names on this computer that nobody was shown
             // stays here: said once, with where to look at it.
             if held != self.held {
@@ -938,6 +1108,13 @@ impl Driver {
                         (Some(person), _) => match why.as_str() {
                             LEFT => self.say(format!("{} left.", person.name)),
                             CLOSED => self.say(format!("{} closed their Trill.", person.name)),
+                            // Let go of by whoever shares the song: said so,
+                            // and nothing is asked for again.
+                            REMOVED => self.say(format!(
+                                "{} removed you from the song. It stays as it is on this computer and is yours to \
+                                 go on with; to work in it with them again you need a new invitation from them.",
+                                person.name
+                            )),
                             // Lost on the way, and theirs to ask for again.
                             why if !told => {
                                 self.were_away.insert(person.id);
@@ -1103,13 +1280,32 @@ impl Driver {
         let me = shared.status.me.id;
         let ids: Vec<u64> = self.people.iter().map(|(here, ..)| here.person.id).chain([me]).collect();
         let colours = colours(&ids);
+        // Whoever came in by this program's own invitation is its to let go.
+        let by_mine = |person: u64, via: &LinkId| {
+            let peer = self.peers.get(via).filter(|peer| !peer.joined);
+            peer.and_then(|peer| peer.person.as_ref()).is_some_and(|known| known.id == person)
+        };
         let people: Vec<Here> = (self.people.iter())
-            .map(|(here, ..)| {
+            .map(|(here, via, _)| {
                 let mut here = here.clone();
                 here.person.colour = colours.get(&here.person.id).copied().unwrap_or(0);
+                here.can_be_removed = by_mine(here.person.id, via);
                 here
             })
             .collect();
+        let mut files = self.files.on_their_way(&|link| {
+            let person = self.peers.get(&link).and_then(|peer| peer.person.as_ref());
+            person.map_or_else(|| "Someone".to_owned(), |person| person.name.clone())
+        });
+        // And what nobody has said yet, after them: nothing is known of
+        // such a file but the place that plays it.
+        files.extend(self.unsaid.iter().map(|name| OnItsWay {
+            name: name.clone(),
+            bytes: 0,
+            here: 0,
+            from: None,
+            waits: Some(crate::files::Waiting::ToBeSaid),
+        }));
         let status = Together {
             me: Person { colour: colours.get(&me).copied().unwrap_or(0), ..shared.status.me.clone() },
             invitation: self.net.listening().map(|invitation| invitation.to_string()),
@@ -1122,10 +1318,7 @@ impl Driver {
             away: (self.again.iter())
                 .map(|again| Away { name: again.name.clone(), since: again.since, tries: again.tries })
                 .collect(),
-            files: self.files.on_their_way(&|link| {
-                let person = self.peers.get(&link).and_then(|peer| peer.person.as_ref());
-                person.map_or_else(|| "Someone".to_owned(), |person| person.name.clone())
-            }),
+            files,
             held: self.held.clone(),
             // (To the minute: a count that ran would be news every tick.)
             files_wait: (self.files_wait)
@@ -1185,6 +1378,8 @@ fn here_of(presence: &Presence) -> Here {
         notes: presence.notes.clone(),
         holding: presence.holding.clone(),
         lacks: presence.lacks.clone(),
+        // (Said where it is shown: it is about the connection, not them.)
+        can_be_removed: false,
     }
 }
 
@@ -1230,8 +1425,15 @@ impl Sharing {
             files_wait: None,
             recording_for_others: None,
         };
-        let shared =
-            Shared { status, mine: Mine::default(), said: Vec::new(), last_said: 0, asks: Vec::new(), shared: None };
+        let shared = Shared {
+            status,
+            mine: Mine::default(),
+            said: Vec::new(),
+            last_said: 0,
+            asks: Vec::new(),
+            shared: None,
+            removed: None,
+        };
         Self {
             shared: Arc::new(Mutex::new(shared)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -1270,6 +1472,7 @@ impl Sharing {
                     presence_said: None,
                     files,
                     held: Vec::new(),
+                    unsaid: Vec::new(),
                     allowance: None,
                     files_wait: None,
                     renditions: Renditions::new(),
@@ -1392,6 +1595,42 @@ impl Runtime {
     /// connected stays.
     pub fn stop_sharing(&self) {
         let _ = self.sharing.ask(Ask::StopSharing);
+    }
+
+    /// Lets one person go from the shared song: someone who came into it
+    /// by this program's own invitation ([`Here::can_be_removed`]), by
+    /// their number ([`Person::id`]).
+    ///
+    /// Their connection is ended with a word, so that their program says
+    /// what happened and does not ask for it again; whoever was in the
+    /// song through them goes with them. They keep the song as it was:
+    /// nothing is taken back that was handed over. **The invitation is
+    /// another from then on**, at the same place: the one they hold lets
+    /// nobody in, also not who was on the way in by it at that moment.
+    /// Whoever else came in by it stays, is told the new one over the
+    /// connection they have, and comes back by it by themselves when that
+    /// is lost. Someone whose connection was lost just then, and whoever
+    /// has not joined yet, needs the new invitation
+    /// ([`Together::invitation`]) from this program's user.
+    ///
+    /// Returns the sentence that says what was done, which is also among
+    /// [`Runtime::said_together`]. An error is the sentence that says why
+    /// this program cannot: they are in the song by someone else's
+    /// invitation (then they are that program's to let go), or not in it.
+    /// Nobody is the host, and nobody removes whoever let them in.
+    pub fn remove_from_song(&self, person: u64) -> Result<String, String> {
+        self.sharing.shared.lock().removed = None;
+        self.sharing.ask(Ask::Remove(person))?;
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(came) = self.sharing.shared.lock().removed.take() {
+                return came;
+            }
+            if Instant::now() > until {
+                return Err("removing them did not come about in time".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Joins the song of whoever handed out `invitation`. If this program

@@ -53,7 +53,9 @@ pub use point::MeetingPoint;
 /// and, for a test, the meeting point itself.
 pub use trill_meet as meet;
 pub use trill_meet::secure;
-pub use wire::{MAX_HAVE, MAX_HELD, MAX_MESSAGE, MAX_NAME, MAX_PIECE, MAX_WANT, Message, PROTOCOL, Person, Presence};
+pub use wire::{
+    MAX_HAVE, MAX_HELD, MAX_INVITATION, MAX_MESSAGE, MAX_NAME, MAX_PIECE, MAX_WANT, Message, PROTOCOL, Person, Presence,
+};
 
 #[cfg(test)]
 mod tests {
@@ -269,6 +271,47 @@ mod tests {
         assert!(why.contains("not sharing its song") || why.contains("did not take"), "{why}");
     }
 
+    /// 3 connections, and one that is refused.
+    #[test]
+    fn an_invitation_that_is_made_another_lets_nobody_in_by_the_one_before_and_who_is_connected_stays() {
+        let (mut sharer, mut stays, mut again) = (Net::new(), Net::new(), Net::new());
+        let before = sharer.listen(Reach::ThisMachine, 0).unwrap();
+        stays.join(before.clone());
+        let Event::Open { link: theirs, joined: Some(_) } = next(&mut stays) else { panic!("the joiner is connected") };
+        let Event::Open { link: ours, joined: None } = next(&mut sharer) else { panic!("and so is the sharer") };
+
+        // Another invitation: the same place, a secret of its own.
+        let after = sharer.listen_anew(None).unwrap().expect("it is listening");
+        assert_eq!((after.address(), after.meet), (before.address(), false));
+        assert_ne!(after.key(), before.key());
+        assert_eq!(sharer.listening(), Some(&after));
+        // Nobody gets in by the one before: it is no longer one, and
+        // asking again by it is no use.
+        again.join(before.clone());
+        let Event::Failed { why, for_good, .. } = next(&mut again) else { panic!("no connection") };
+        assert!(why.contains("did not take this invitation") && for_good, "{why}");
+        assert!(sharer.events().is_empty() && sharer.links() == [ours], "and the sharer has nothing of it");
+
+        // Whoever was connected stays, and is told the new one over the
+        // connection they have. Its secret, at the address they reached
+        // the sharer by, gets a program in again.
+        sharer.say(ours, &Message::Invitation { text: after.to_string() });
+        let Event::Heard { link, message: Message::Invitation { text } } = next(&mut stays) else {
+            panic!("it is heard")
+        };
+        assert_eq!(link, theirs);
+        again.join(before.with_secret_of(&Invitation::parse(&text).unwrap()));
+        assert!(matches!(next(&mut again), Event::Open { joined: Some(_), .. }));
+        assert!(matches!(next(&mut sharer), Event::Open { joined: None, .. }));
+        assert_eq!(sharer.links().len(), 2);
+
+        // What is said as one is held to the length of one, and a program
+        // that is not listening has no invitation to make another.
+        let long = Message::Invitation { text: "t".repeat(MAX_INVITATION + 1) };
+        assert!(Message::decode(&long.encode()).unwrap_err().contains("more than one is"));
+        assert!(stays.listen_anew(None).unwrap().is_none());
+    }
+
     #[test]
     fn what_is_no_message_ends_the_connection_in_a_sentence() {
         let (mut sharer, _) = (Net::new(), ());
@@ -438,6 +481,57 @@ mod tests {
         for kept_out in [secret, &secret.replace('-', ""), &key[10..], &meeting, &door] {
             assert!(!log.to_uppercase().contains(&kept_out.to_uppercase()), "{kept_out} is in the log:\n{log}");
         }
+    }
+
+    /// 2 connections through the meeting point, one that is refused, and
+    /// its holder's two.
+    #[test]
+    fn a_meeting_that_is_given_another_invitation_is_over_under_the_one_before_and_who_is_in_it_stays() {
+        let (server, point, log) = meeting_point();
+        let (mut sharer, mut stays) = (Net::new(), Net::new());
+        let before = sharer.listen_through(&point).unwrap();
+        assert!(matches!(next(&mut sharer), Event::Held));
+        stays.join(before.clone());
+        let Event::Open { link: theirs, joined: Some(_) } = next(&mut stays) else { panic!("the joiner is connected") };
+        let Event::Open { link: ours, joined: None } = next_of_a_link(&mut sharer) else {
+            panic!("and so is the sharer")
+        };
+
+        // Another invitation is another meeting at the same meeting point:
+        // the one before is ended there.
+        assert!(sharer.listen_anew(None).is_err(), "which meeting point it shares through has to be said");
+        assert_eq!(sharer.listening(), Some(&before), "and nothing was changed by asking so");
+        let after = sharer.listen_anew(Some(&point)).unwrap().expect("it is sharing");
+        assert!(after.meet && after.address() == before.address());
+        assert!(after.meeting() != before.meeting() && after.key() != before.key());
+        // (The meeting point has ended the one before once it says so.)
+        let over = |log: &Lines| log.lock().unwrap().iter().any(|line| line.contains("is over: its holder ended it"));
+        let end = Instant::now() + Duration::from_secs(30);
+        while !over(&log) {
+            assert!(Instant::now() < end, "the meeting before was never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        until(&server, "the new meeting is held, and only it", |counts| counts.meetings == 1 && counts.held == 1);
+        let mut late = Net::new();
+        late.join(before.clone());
+        let Event::Failed { why, for_good, .. } = next(&mut late) else { panic!("no connection") };
+        assert!(why.contains("stopped sharing it") && for_good, "{why}");
+
+        // Who was in the meeting stays in the song, is told the new
+        // invitation over the connection they have, and a program gets in
+        // by its secret.
+        sharer.say(ours, &Message::Invitation { text: after.to_string() });
+        let Event::Heard { link, message: Message::Invitation { text } } = next(&mut stays) else {
+            panic!("it is heard")
+        };
+        assert_eq!(link, theirs);
+        late.join(before.with_secret_of(&Invitation::parse(&text).unwrap()));
+        assert!(matches!(next(&mut late), Event::Open { joined: Some(_), .. }));
+        assert!(matches!(next_of_a_link(&mut sharer), Event::Open { joined: None, .. }));
+        until(&server, "two are in it", |counts| counts.pipes == 2);
+        let log = log.lock().unwrap().join("\n");
+        assert!(log.contains("is over: its holder ended it"), "{log}");
+        assert_eq!(log.matches("Ada holds a meeting").count(), 2, "{log}");
     }
 
     #[test]

@@ -55,6 +55,17 @@ impl Invitation {
         Self { host: host.into(), ..self.clone() }
     }
 
+    /// The place this invitation names, with the secret of `other`: what
+    /// a program that is in a song by this invitation asks again by, once
+    /// whoever shares the song has given it another secret (they let
+    /// someone go, and said the new one to who stays). Only the secret is
+    /// taken: the address stays the one this program reached them by,
+    /// whatever `other` names, so that nothing a program says can send
+    /// another one anywhere.
+    pub fn with_secret_of(&self, other: &Invitation) -> Self {
+        Self { secret: other.secret, ..self.clone() }
+    }
+
     /// Reads an invitation as it was handed over: spaces and dashes in the
     /// secret do not matter, nor whether its letters are large or small.
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -165,6 +176,12 @@ mod tests {
         assert_eq!(Invitation::parse(&elsewhere.to_string()).unwrap(), elsewhere);
         // And it is not in what a log shows.
         assert_eq!(format!("{made:?}"), "Invitation(192.168.1.20:47600)");
+        // Another secret for a place one reached by an address of one's
+        // own: the secret is the other's, the place stays one's own.
+        let reached = made.at("203.0.113.9");
+        let changed = Invitation::through("elsewhere.example.org", 9).unwrap();
+        let onward = reached.with_secret_of(&changed);
+        assert_eq!((onward.key(), onward.address().as_str(), onward.meet), (changed.key(), "203.0.113.9:47600", false));
     }
 
     #[test]

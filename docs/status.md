@@ -137,7 +137,11 @@ Only Windows has been run so far.
   again only where the track changed, or brought beside the song at a save: it stays in Trill's own folder.
 - A direct way between two programs that met through a meeting point, where there is one. Everything they say
   goes through it for as long as they are in the song.
-- Taking one person's leave away from a meeting, and a meeting point that is encrypted as a web site is (TLS).
+- Letting go of someone who came into a song through another person, from anywhere but that person's Trill.
+  Whoever shares lets go of who came in by their own invitation, and the invitation is another from then on.
+- Being told why a clip someone else brought has no audio yet (missing at theirs, held there, or no audio): it
+  is said to wait for whoever brought it.
+- A meeting point that is encrypted as a web site is (TLS).
 - A meeting point on ARM: nothing in the program is written for one processor, and nobody has built or run it
   there.
 - A connection that is asked for again giving up by itself: it is asked for every half minute until one leaves.

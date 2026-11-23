@@ -53,7 +53,11 @@ that as one undoable edit. Tell the user about a notice; put theirs back when th
 - The audio a shared song plays travels with it: what its clips and takes play, and what its samplers and drum \
 racks play, arrives by itself from whoever in the song has it. Status lists what is on its way as `arriving`, each \
 with how far it is, from whom, and why it `waits` where it does. A file on its way is not a missing file and no \
-problem: do not look for it or relink it, and say that it is arriving. Nobody is told where anyone has a file: a \
+problem: do not look for it or relink it, and say that it is arriving. An entry with `played_by` in place of a name \
+is a clip or a sample someone else brought into the song whose file their Trill has not said yet: for a moment \
+while it reads the file, and for as long as it has not got the file itself or holds it back. Say whose it is to \
+put right (theirs: at their computer the file is missing, held, or no audio), and look for nothing on this one. \
+Nobody is told where anyone has a file: a \
 place is each computer's own, so a path you give a clip or a sampler is this computer's only. What a plugin names \
 inside its own state travels as the plugin wrote it. A sampled instrument's recordings do not travel.
 - `held` in status is files the song names on this computer that have not gone to the others, because nobody was \
@@ -68,7 +72,12 @@ it's key to the song while it is shared. With someone on another network, share 
 user sets the meeting point and its key once, in the window (File, Share this song); no tool sets them, so where \
 none is set say that, and do not ask the user for the key.
 - A connection that is lost comes back by itself (status says `reconnecting`, and what each did meanwhile is \
-merged when it is back): do not join again, and do not ask for the invitation again unless a sentence says to.";
+merged when it is back): do not join again, and do not ask for the invitation again unless a sentence says to.
+- Removing someone (action `remove` with `person`) is the user's decision: only when they ask, and only someone \
+`here` lists with `can_be_removed`, who came in by this program's invitation. Someone who came in through another \
+person is that person's to remove, and nobody removes whoever let them in: the refusal says which it is. The one \
+removed keeps the song as it was. The invitation changes: `removed` in the reply says so and `invitation` is the \
+new one. Tell the user that whoever stays has it already, and that anyone who has not joined yet needs it from them.";
 
 #[derive(Copy, Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +92,11 @@ pub enum SharedSongAction {
     Join,
     /// End every connection and stop sharing. The song stays as it is, and can be merged with the others' again.
     Leave,
+    /// Let one person go from the song, by `person`: someone `here` lists with `can_be_removed`, who came in by
+    /// this program's invitation. Their Trill is told and keeps the song as it was. The invitation is another
+    /// from then on (the reply has it): the one they hold lets nobody in, whoever stays is told the new one by
+    /// itself, and whoever has not joined yet needs it. The user's to decide.
+    Remove,
     /// Do what the notice numbered `notice` offers: the edit that puts this program's own back.
     PutBack,
     /// Take the notice numbered `notice` as read.
@@ -122,6 +136,8 @@ pub struct SharedSongRequest {
     pub name: Option<String>,
     /// For `put_back` and `dismiss`: the notice's id.
     pub notice: Option<u64>,
+    /// For `remove`: the name of the person to let go, as `here` in status has it.
+    pub person: Option<String>,
 }
 
 /// How long `join` waits to say what came of it.
@@ -167,6 +183,10 @@ impl TrillServer {
                 let lacks: Vec<String> = here.lacks.iter().filter_map(device).collect();
                 if !lacks.is_empty() {
                     person["has_not_got"] = json!(lacks);
+                }
+                // In the song by this program's invitation: its to let go.
+                if here.can_be_removed {
+                    person["can_be_removed"] = json!(true);
                 }
                 person
             })
@@ -221,6 +241,17 @@ impl TrillServer {
             let mb = |bytes: u64| round(bytes as f64 / f64::from(1 << 20));
             let arriving: Vec<Value> = (status.files.iter())
                 .map(|file| {
+                    // One that nobody has said: nothing is known of it but
+                    // the place that plays it.
+                    if file.waits == Some(Waiting::ToBeSaid) {
+                        return json!({
+                            "played_by": file.name,
+                            "waits": "for whoever brought it into the song: their Trill has not said what the file \
+                                      is (it is still reading it, has not got it either, does not read it as audio, \
+                                      or holds it until its user lets it go). It is not missing on this computer: \
+                                      look for nothing here.",
+                        });
+                    }
                     let mut said = json!({ "name": file.name, "mb": mb(file.bytes), "here_mb": mb(file.here) });
                     if let Some(from) = &file.from {
                         said["from"] = json!(from);
@@ -239,6 +270,8 @@ impl TrillServer {
                                 seconds.div_ceil(60)
                             ),
                             Waiting::ForSomeone => "nobody who is in the song has said they have it".to_owned(),
+                            // (Said above.)
+                            Waiting::ToBeSaid => "for whoever brought it into the song".to_owned(),
                         });
                     }
                     said
@@ -317,6 +350,11 @@ impl TrillServer {
         if !going.elsewhere.is_empty() {
             out["outside_the_songs_folders"] = json!(going.elsewhere);
         }
+        // What the song names that Trill does not read as audio: it goes
+        // to nobody, and is said because a song file may name anything.
+        if !going.no_audio.is_empty() {
+            out["no_audio_and_stays"] = json!(going.no_audio);
+        }
         if going.gone > 0 {
             out["not_there"] = json!(going.gone);
         }
@@ -362,19 +400,23 @@ impl TrillServer {
     /// the `notices`: where this program's work and someone else's clashed, each a sentence, with an `action`
     /// that `put_back` performs as one undoable edit. Sharing opens the song to whoever holds the invitation, so
     /// do it when the user asks. For someone on another network share with reach `meeting_point`. A connection
-    /// that is lost on the way comes back by itself (`reconnecting`). The song's audio files go to whoever joins:
+    /// that is lost on the way comes back by itself (`reconnecting`). `remove` lets one person go who came in by
+    /// this program's invitation, and makes the invitation another. The song's audio files go to whoever joins:
     /// `what_goes` says which before sharing, and the reply to `share` says it again as `audio_files`. `arriving`
     /// is the audio on its way to this computer; `held` is what has not gone from it. Every reply is the status
     /// after the action.
     #[tool(annotations(title = "Share the song, join one, see who is here"))]
     fn shared_song(&self, Parameters(request): Parameters<SharedSongRequest>) -> CallToolResult {
         use SharedSongAction as Action;
-        let opens = matches!(request.action, Action::Share | Action::Join | Action::Leave | Action::StopSharing);
+        let opens = matches!(
+            request.action,
+            Action::Share | Action::Join | Action::Leave | Action::StopSharing | Action::Remove
+        );
         if opens && self.is_guarded() {
-            return finish(Err("Sharing a song, joining one and leaving one let someone else read and change the \
-                               user's song, or end that: it is the user's to do, in the window (File, Share this \
-                               song or Join a song). Say so. Who is here and the notices can be read with action \
-                               `status`."
+            return finish(Err("Sharing a song, joining one, leaving one and removing someone from one let someone \
+                               else read and change the user's song, or end that: it is the user's to do, in the \
+                               window (File, Share this song or Join a song). Say so. Who is here and the notices \
+                               can be read with action `status`."
                 .to_owned()));
         }
         if matches!(request.action, Action::LetFilesGo | Action::LetFilesArrive) && self.is_guarded() {
@@ -459,6 +501,39 @@ impl TrillServer {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Ok(self.together_json())
+            }
+            Action::Remove => {
+                let here = self.runtime.together().people;
+                let names = || {
+                    let named: Vec<&str> = here.iter().map(|here| here.person.name.as_str()).collect();
+                    match named.is_empty() {
+                        true => "nobody else is in the song".to_owned(),
+                        false => format!("in the song are {}", trill_core::journal::words::list(&named)),
+                    }
+                };
+                let Some(asked) = request.person.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
+                    return Err(format!("remove takes `person`, a name as `here` has it: {}", names()));
+                };
+                let same = |name: &str| name.trim().eq_ignore_ascii_case(asked);
+                let meant: Vec<u64> =
+                    here.iter().filter(|here| same(&here.person.name)).map(|here| here.person.id).collect();
+                let person = match meant.as_slice() {
+                    [] => return Err(format!("nobody called '{asked}' is in the song: {}", names())),
+                    [person] => *person,
+                    several => {
+                        return Err(format!(
+                            "{} people in the song go by '{asked}', and a name cannot tell them apart: the user \
+                             removes the one they mean in the window (File, Share this song)",
+                            several.len()
+                        ));
+                    }
+                };
+                // The sentence that says what was done, with how things
+                // stand after it: the new invitation among it.
+                let done = self.runtime.remove_from_song(person)?;
+                let mut reply = self.together_json();
+                reply["removed"] = json!(done);
+                Ok(reply)
             }
             Action::PutBack | Action::Dismiss => {
                 let mut session = self.session.lock();

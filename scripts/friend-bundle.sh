@@ -78,9 +78,12 @@ you need no key and no address of your own, only the invitation.
 
 What your computer needs, for now:
 
-- The same plugins as theirs, installed where plugins are installed. A
-  plugin you have not got stays in the song as a place that is kept, with a
-  sentence that says so; it is silent for you and sounds for them.
+- No plugins of theirs to hear the song. A plugin you have not got stays in
+  the song as a place that is kept, and you hear its track as their Trill
+  recorded it for you, through your own fader and the effects after it. The
+  recording arrives a few minutes after you join, and the window says which
+  tracks are heard so. To change what such a plugin does you need it
+  yourself.
 - Nothing for the song's audio: its recordings and samples arrive with
   the song, from whoever has them, and the window says what is on its way.
   Nobody is told where you keep your files. A sampled instrument's

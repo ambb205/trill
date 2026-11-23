@@ -95,6 +95,9 @@ pub struct TogetherState {
     /// What sharing the song would hand to whoever joins, looked at by a
     /// worker when the Share panel opens: `None` until it has looked.
     pub going: std::sync::Arc<parking_lot::Mutex<Option<Going>>>,
+    /// Whom the panel is asking about before they are let go: their
+    /// number, after *Remove* on their row and until it is answered.
+    pub removing: Option<u64>,
 }
 
 /// What the window holds of the others, as of this frame.
@@ -166,8 +169,8 @@ pub enum TogetherScene {
     /// being asked for again.
     Lost,
     /// One joined a friend's song and its audio is on its way: one file
-    /// arriving, one that waits for a word, and one of one's own that is
-    /// held.
+    /// arriving, one that waits for a word, one that nobody has said, and
+    /// one of one's own that is held.
     Arriving,
 }
 
@@ -216,6 +219,8 @@ impl TogetherScene {
             notes: notes(0),
             holding: Some("the volume of the track \u{201C}Bass\u{201D}".to_owned()),
             lacks: Vec::new(),
+            // (In the song by this window's invitation, where it shares.)
+            can_be_removed: true,
         };
         let sam = Here {
             person: Person { id: 1, name: "Sam".into(), colour: 1 },
@@ -227,6 +232,7 @@ impl TogetherScene {
             notes: notes(1),
             holding: None,
             lacks: Vec::new(),
+            can_be_removed: true,
         };
         // And a clash to answer, in the words a real one has.
         let text = "Jo set where the clip \u{201C}Lead\u{201D} starts at the same moment as you, and theirs is what the song has.";
@@ -249,9 +255,13 @@ impl TogetherScene {
             let files = vec![
                 file("Vocal take 3.wav", 48, 20, Some("Jo"), None),
                 file("Room mics.flac", 612, 0, None, Some(Waiting::ForAWord)),
+                // (A clip Jo brought, of whose file nothing was said.)
+                file("Guide guitar", 0, 0, None, Some(Waiting::ToBeSaid)),
             ];
             // (A place that is nobody's: a made-up folder.)
             let held = vec![r"D:\Sessions\Elsewhere\guide vocal.wav".to_owned()];
+            // (Jo shares this one: nobody here is this window's to let go.)
+            let jo = Here { can_be_removed: false, ..jo };
             return Seen { me: Some(me), connected: 1, people: vec![jo], files, held, ..Seen::default() };
         }
         let notices = vec![Notice::made_up(1, text, Some("Put mine back"))];
@@ -410,13 +420,17 @@ pub fn status_words(seen: &Seen) -> Option<String> {
         Some((_, Meeting::Held)) | None => {}
     }
     // The song's audio: how far what is on its way is, and what waits.
-    if !seen.files.is_empty() {
-        let (here, all) =
-            seen.files.iter().fold((0u64, 0u64), |(here, all), file| (here + file.here, all + file.bytes));
-        let files =
-            if seen.files.len() == 1 { "1 audio file".to_owned() } else { format!("{} audio files", seen.files.len()) };
-        let asked = seen.files.iter().any(|file| file.waits == Some(Waiting::ForAWord));
-        let waiting = seen.files.iter().all(|file| file.waits.is_some());
+    // (What nobody has said yet is not on its way: said apart, below.)
+    let unsaid = seen.files.iter().filter(|file| file.waits == Some(Waiting::ToBeSaid)).count();
+    let coming = || seen.files.iter().filter(|file| file.waits != Some(Waiting::ToBeSaid));
+    if coming().next().is_some() {
+        let (here, all) = coming().fold((0u64, 0u64), |(here, all), file| (here + file.here, all + file.bytes));
+        let files = match coming().count() {
+            1 => "1 audio file".to_owned(),
+            count => format!("{count} audio files"),
+        };
+        let asked = coming().any(|file| file.waits == Some(Waiting::ForAWord));
+        let waiting = coming().all(|file| file.waits.is_some());
         match (asked, waiting) {
             (true, _) => words.push_str(&format!(" \u{00B7} {files} wait for your word")),
             (false, true) => words.push_str(&format!(" \u{00B7} {files} wait")),
@@ -425,6 +439,11 @@ pub fn status_words(seen: &Seen) -> Option<String> {
                 words.push_str(&format!(" \u{00B7} {files} arriving, {percent} %"));
             }
         }
+    }
+    match unsaid {
+        0 => {}
+        1 => words.push_str(" \u{00B7} 1 audio file waits for whoever brought it"),
+        unsaid => words.push_str(&format!(" \u{00B7} {unsaid} audio files wait for whoever brought them")),
     }
     if seen.files_wait.is_some() {
         words.push_str(" \u{00B7} audio waits for the meeting point");
@@ -503,25 +522,43 @@ fn name_field(ui: &mut Ui, cx: &mut Cx) {
     ui.add_space(6.0);
 }
 
+/// Room at the end of a person's row for the word that lets them go.
+const REMOVE: f32 = 60.0;
+
 /// Everyone who is here, one a row: their colour, their name, what they
-/// hold.
-fn people(ui: &mut Ui, cx: &Cx) {
+/// hold. Whoever is in the song by this program's own invitation has
+/// *Remove* at the end of their row; returns whose was clicked.
+fn people(ui: &mut Ui, cx: &Cx) -> Option<u64> {
     let theme = cx.theme;
     let seen = &cx.live.together;
-    let mut row = |colour: u8, name: &str, about: &str| {
+    let mut asked = None;
+    let mut row = |ui: &mut Ui, colour: u8, name: &str, about: &str, mine_to_remove: Option<u64>| {
         let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
         trill_noir::person_dot(ui.painter(), pos2(rect.left() + 4.0, rect.center().y), theme.person(colour));
         let name_room = rect.with_min_x(rect.left() + 16.0).with_max_x(rect.left() + 150.0);
         text::paint(ui.painter(), name_room, Align2::LEFT_CENTER, theme.text.body, name, theme.ink);
-        let about_room = rect.with_min_x(rect.left() + 156.0);
+        let end = if mine_to_remove.is_some() { rect.right() - REMOVE } else { rect.right() };
+        let about_room = rect.with_min_x(rect.left() + 156.0).with_max_x(end);
         text::paint(ui.painter(), about_room, Align2::LEFT_CENTER, theme.text.micro, about, theme.ink_faint);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{name}: {about}")));
+        let Some(person) = mine_to_remove else { return };
+        let room = rect.with_min_x(end);
+        let word = ui.interact(room, ui.scope_id().with(("remove", person)), Sense::click());
+        let ink = if word.hovered() { theme.signal } else { theme.ink_dim };
+        text::paint(ui.painter(), room, Align2::RIGHT_CENTER, theme.text.micro, "Remove", ink);
+        word.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Remove {name} from the song"))
+        });
+        if word.clicked() {
+            asked = Some(person);
+        }
     };
     if let Some(me) = &seen.me {
-        row(me.colour, &me.name, "you");
+        row(ui, me.colour, &me.name, "you", None);
     }
     for here in &seen.people {
-        row(here.person.colour, &here.person.name, &about(here, &cx.snap.project));
+        let mine_to_remove = here.can_be_removed.then_some(here.person.id);
+        row(ui, here.person.colour, &here.person.name, &about(here, &cx.snap.project), mine_to_remove);
     }
     // Who is away because the connection was lost: asked for again, with
     // nothing for anyone to do.
@@ -537,6 +574,41 @@ fn people(ui: &mut Ui, cx: &Cx) {
         text::paint(ui.painter(), about_room, Align2::LEFT_CENTER, theme.text.micro, &about, theme.warn);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{}: {about}", away.name)));
     }
+    asked
+}
+
+/// The question before someone is let go: what it does, said before it
+/// is done, and the two answers. Shown while one is asked about.
+fn removing(ui: &mut Ui, cx: &mut Cx) {
+    let Some(person) = cx.state.together.removing else { return };
+    let theme = cx.theme;
+    // Whoever went meanwhile is nobody to ask about.
+    let named = cx.live.together.people.iter().find(|here| here.person.id == person && here.can_be_removed);
+    let Some(name) = named.map(|here| here.person.name.clone()) else {
+        cx.state.together.removing = None;
+        return;
+    };
+    ui.add_space(8.0);
+    let about = format!(
+        "Remove {name} from the song? They keep it as it is now, and get nothing of what is done after. The \
+         invitation becomes another: the one they have lets nobody in, whoever else is here is told the new one by \
+         itself, and anyone who has not joined yet needs it from you."
+    );
+    line(ui, cx, &about, theme.ink);
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        if trill_noir::button(ui, theme, &format!("Remove {name}"), Variant::Primary).clicked() {
+            cx.state.together.removing = None;
+            // (It waits for the meeting point where the song is shared
+            // through one: not on the thread that draws. What came of it
+            // is said as everything that happens in the song is.)
+            cx.sounds.quietly(move |runtime| runtime.remove_from_song(person).map(drop));
+        }
+        if trill_noir::button(ui, theme, "Keep them", Variant::Default).clicked() {
+            cx.state.together.removing = None;
+        }
+    });
 }
 
 /// What someone holds, in a few words.
@@ -585,7 +657,10 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
             audio(ui, cx);
             if cx.live.together.is_on() {
                 heading(ui, cx, "Who is here");
-                people(ui, cx);
+                if let Some(person) = people(ui, cx) {
+                    cx.state.together.removing = Some(person);
+                }
+                removing(ui, cx);
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -610,7 +685,8 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
         None => {
             let about = "Someone else opens this song in their own Trill and you both change it at once. Nobody is \
                          the host: each of you has all of it, and can go on alone and merge again later. The song's \
-                         audio files go to whoever joins; they need the same plugins to hear what you hear.";
+                         audio files go to whoever joins. A plugin they have not got they hear as your Trill \
+                         records it for them.";
             line(ui, cx, about, theme.ink_dim);
             what_goes(ui, cx);
             heading(ui, cx, "Who can reach this song");
@@ -744,6 +820,25 @@ fn what_goes(ui: &mut Ui, cx: &mut Cx) {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
         return;
     };
+    // What the song names that is no audio stays, and is shown all the
+    // same: a song file someone else wrote may name anything.
+    let stays = |ui: &mut Ui, cx: &mut Cx| {
+        if going.no_audio.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        let about = match going.no_audio.len() {
+            1 => "The song names 1 file that is no audio as Trill reads it. It stays here:".to_owned(),
+            count => format!("The song names {count} files that are no audio as Trill reads them. They stay here:"),
+        };
+        line(ui, cx, &about, theme.ink_dim);
+        for path in going.no_audio.iter().take(LISTED) {
+            line(ui, cx, path, theme.ink_faint);
+        }
+        if going.no_audio.len() > LISTED {
+            line(ui, cx, &format!("and {} more", going.no_audio.len() - LISTED), theme.ink_faint);
+        }
+    };
     if going.files == 0 {
         line(
             ui,
@@ -751,13 +846,12 @@ fn what_goes(ui: &mut Ui, cx: &mut Cx) {
             "The song names no audio files on this computer: nothing but the song itself goes.",
             theme.ink_dim,
         );
+        stays(ui, cx);
         return;
     }
     let files = if going.files == 1 { "1 audio file".to_owned() } else { format!("{} audio files", going.files) };
-    let said = format!(
-        "{files}, {} together, to whoever joins: the ones Trill reads as audio. Nobody is told where you keep them.",
-        megabytes(going.bytes)
-    );
+    let said =
+        format!("{files}, {} together, to whoever joins. Nobody is told where you keep them.", megabytes(going.bytes));
     line(ui, cx, &said, theme.ink_dim);
     for (folder, count, bytes) in &going.folders {
         let files = if *count == 1 { "1 file".to_owned() } else { format!("{count} files") };
@@ -773,10 +867,20 @@ fn what_goes(ui: &mut Ui, cx: &mut Cx) {
             line(ui, cx, &format!("and {} more", going.elsewhere.len() - LISTED), theme.ink_faint);
         }
     }
+    stays(ui, cx);
 }
 
 /// How many files a list in the panel names one by one.
 const LISTED: usize = 8;
+
+/// What the panel says of a clip or a sample whose file nobody has said:
+/// it is with whoever brought it into the song, and theirs to put right.
+fn unsaid_words(place: &str) -> String {
+    format!(
+        "{place} \u{00B7} waits for whoever brought it: their Trill has not said what its file is (it is reading \
+         it, has not got it, or holds it back)"
+    )
+}
 
 /// While the song is shared: its audio that is on its way here, and the
 /// files on this computer that have not gone to the others.
@@ -787,6 +891,12 @@ fn audio(ui: &mut Ui, cx: &mut Cx) {
     if !files.is_empty() {
         heading(ui, cx, "Audio on its way");
         for file in files.iter().take(LISTED) {
+            // One that nobody has said: only the place that plays it is
+            // known, and whose it is to put right.
+            if file.waits == Some(Waiting::ToBeSaid) {
+                line(ui, cx, &unsaid_words(&file.name), theme.ink_dim);
+                continue;
+            }
             let about = match (&file.waits, &file.from) {
                 (Some(Waiting::ForAWord), _) => "waits for your word".to_owned(),
                 (Some(Waiting::ForRoom { short }), _) => {
@@ -796,6 +906,8 @@ fn audio(ui: &mut Ui, cx: &mut Cx) {
                     format!("waits for the meeting point's next day, about {} min", seconds.div_ceil(60))
                 }
                 (Some(Waiting::ForSomeone), _) => "nobody who is here has it".to_owned(),
+                // (Said above.)
+                (Some(Waiting::ToBeSaid), _) => "waits for whoever brought it".to_owned(),
                 (None, Some(from)) => format!("from {from}"),
                 (None, None) => "arriving".to_owned(),
             };

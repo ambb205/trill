@@ -32,6 +32,17 @@ closes the port, and the invitation is no longer one; whoever is connected stays
 and stops when you stop: Trill listens for nobody otherwise. A connection that has not proved the secret within
 ten seconds is closed, and no more than sixteen may be trying at once.
 
+**Letting one person go.** Whoever came into the song by your invitation has *Remove* at the end of their row
+under *Who is here*; it asks first. Their Trill is told in a sentence and does not ask for the connection
+again, and whoever was in the song through them goes with them. They keep the song as it was then: nothing
+that was handed over is taken back, and they get nothing of what is done after. **The invitation becomes
+another**, at the same address or the same meeting point: the one they hold lets nobody in, also not someone
+who was on the way in by it at that moment. Whoever else came in by it stays, is told the new one over the
+connection they have, and comes back by it by themselves when that is lost. Someone whose connection was lost
+at just that moment, and anyone who has not joined yet, needs the new invitation from you: the panel shows it.
+Nobody is the host, so nobody removes whoever let them in, and someone who came in through another person is
+that person's to let go: the refusal says which it is.
+
 What someone who is connected says is not trusted either: a message is bounded in size and messages in rate,
 and a change is held to the rules every edit is held to before any of it is taken. A program that says what no
 edit could have made is let go of, with a sentence, and the song is as it was.
@@ -40,9 +51,10 @@ A program joins wherever it can open a connection to the other: on one computer,
 through a port one of you forwarded, or through a meeting point.
 
 **What the other needs.** The song travels, and so does its audio (below); plugins do not. Whoever joins plays
-the song with their own plugins. A plugin one of you has not got stays in the song as a place that is kept, with
-the sentence that says so, as in a song that is opened without it; its settings are carried untouched, and it
-sounds for whoever has it. So for now a friend on another computer needs **the same plugins**.
+the song with their own plugins. A plugin one of you has not got stays in the song as a place that is kept; its
+settings are carried untouched, and it sounds for whoever has it. Whoever has not got it hears the track as
+someone who has it recorded it ([a plugin one of you has not got](#a-plugin-one-of-you-has-not-got), below), so
+a friend does not need the same plugins to hear the song, only to change what those plugins do.
 
 **A build to hand to a friend.** `sh scripts/friend-bundle.sh` makes a release build and gathers it into one
 folder, `target/friend/Trill`: `trill.exe` (which starts no program but itself), `trill-mcp.exe`, the licences,
@@ -76,7 +88,9 @@ you have been shown it.
 
 - *Before you share*, the Share panel says what goes: how many files, how large, the folders they lie in, and
   one by one every file that lies outside the song's own folder, Trill's recordings and your sample library.
-  Sharing is your word that they go.
+  Only what Trill reads as audio is counted, because only that goes. What the song names that is no audio is
+  listed after it, each by where it really lies, as what stays: a song file someone handed you may name
+  anything on your disk, and you should see what it named. Sharing is your word that the audio goes.
 - *A file your own hand brings into a shared song* (a clip you drop in, a sample you give a sampler, what you
   record) goes without a question: that is the hand's act.
 - *Anything else that comes to name a file here* is **held**: a shared song you opened from a file and joined
@@ -89,6 +103,13 @@ looking for it, and it plays when it is there without the song being opened agai
 settled before its first byte: one that is said to be longer than any file is (64 GB) is refused, one the disk
 has not the room for waits and is tried again, and above 500 MB waiting at once (`together.ask_above_mb` in the
 settings) the rest waits for your word, asked once, with *Let them arrive*.
+
+**A file nobody has said waits for whoever brought it.** A clip or a sample that someone else brought into the
+song can be in it before their Trill has said what its file is: for a moment while it reads the file, and for
+as long as it has not got the file itself, does not read it as audio, or holds it until its person lets it go.
+On your computer that is not a missing file, and nothing is looked for on your disk. The clip is silent and
+says *Its audio waits for whoever brought it*, the status bar says *1 audio file waits for whoever brought it*,
+and the panel names the clip. It is theirs to put right, at their computer.
 
 **An edit never waits for a file.** What is changed in the song, and who is here, go ahead of a file's bytes on
 every connection: behind one piece of 48 kB at the most. A file is read to be played before it has its name,
@@ -325,7 +346,9 @@ an amplifier, two Serum 2 and a reverb on a return), the second with no plugins 
 ## For an AI
 
 The `shared_song` tool shares (on this computer, its networks, or through the meeting point you have set),
-joins, leaves and says who is here and what they hold, with the notices and the edit that answers one, whether a
+joins, leaves, lets one person go who came in by this program's invitation (`remove`, by their name: the reply
+has the invitation that holds from then on), and says who is here and what they hold, with the notices and the
+edit that answers one, whether a
 meeting is open at its meeting point, which connections are being asked for again, which plugins of the song
 each person's computer has not got and which tracks are heard by a recording in their place
 ([AI and MCP](ai-and-mcp.md)). A client's edits are steps of the program it talks to, said to the others as they
@@ -484,6 +507,8 @@ nearly nothing was). The file with least to go is asked for first, so that the m
 
 - A sampled instrument's recordings travelling, and telling the other which set of the catalogue an instrument
   is from. The other has the instrument's place and a sentence that its file is not there.
+- Saying *why* a file someone brought has not been said: whoever waits for it is told that it waits for them,
+  and not whether it is missing there, held there or no audio.
 - A list of what arrived and was never saved with a song, with a way to remove it. It stays in Trill's folder.
 - What was read of a file (its hash) kept from one run to the next: every file a shared song names is read once
   each time Trill is started and the song is in company.
@@ -503,8 +528,11 @@ nearly nothing was). The file with least to go is asked for first, so that the m
   it as it was recorded, which is one of the ways it sounds.
 - A direct way between two programs that met through a meeting point, where there is one: everything they say
   goes through it for as long as they are in the song.
-- Taking one person's leave away from a meeting. Whoever has the invitation gets in for as long as it is shared;
-  a keeper can take a key away, which ends what that key holds.
+- Letting go of someone who came in through another person, from anywhere but that person's Trill; and telling
+  the new invitation to someone whose connection was lost at the moment another was let go: they are told to
+  ask for it. Someone whose own connection is lost at the moment is not among who is here, and can be let go
+  once they are back.
+- Taking back what someone who was let go already has: they keep the song and its audio as of then.
 - A meeting point that is encrypted as a web site is (TLS). What the two programs say to each other is encrypted
   end to end all the same; what is said to the meeting point itself can be read on the way and is of no use
   there, and a network that passes nothing but TLS will not pass it.

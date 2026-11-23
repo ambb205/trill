@@ -187,10 +187,11 @@ fn the_audio_of_a_song_arrives_with_the_song_by_what_it_is_and_nobody_is_told_a_
     assert_eq!((going.files, going.gone, going.folders.len()), (2, 0, 0), "{going:?}");
     assert_eq!(going.elsewhere.len(), 2, "a song without a folder of its own: each file by its path");
     assert!(
-        going.sentence().starts_with("2 files (") && going.sentence().contains("vocal take.wav"),
+        going.sentence().starts_with("2 audio files (") && going.sentence().contains("vocal take.wav"),
         "{}",
         going.sentence()
     );
+    assert!(going.no_audio.is_empty(), "{going:?}");
 
     let ben = start(folder.path(), "Ben");
     // Ada shares and Ben joins: he has the song, then what it plays.
@@ -639,15 +640,26 @@ fn a_song_file_is_a_stranger_too_and_only_audio_its_user_let_go_is_ever_said_or_
     assert!(memo_as_named.contains(".."), "the song names it as the file spells it: {memo_as_named}");
     // Before she shares she is shown what would go: how many, how large,
     // the folders, and each file that lies outside the song's own folder.
+    // Only what Trill reads as audio is counted as going: the two
+    // recordings. What the song names that is none stays, and is shown
+    // all the same, each by where it really lies: she should see what a
+    // song file someone handed her names on her disk.
     let going = ada.files_to_go();
+    assert_eq!((going.files, going.gone), (2, 1), "the two recordings go, and the folder is no file: {going:?}");
+    assert_eq!(going.bytes, content(&doctored.audio).bytes + content(&doctored.elsewhere).bytes);
     assert_eq!(going.folders.len(), 1, "{going:?}");
-    assert_eq!((going.folders[0].0.as_str(), going.folders[0].1), ("the song's folder", 2));
+    assert_eq!((going.folders[0].0.as_str(), going.folders[0].1), ("the song's folder", 1));
+    assert_eq!(going.elsewhere.len(), 1, "{going:?}");
+    assert!(going.elsewhere[0].ends_with("private.wav") && !going.elsewhere[0].contains(".."), "{going:?}");
     let shown = going.sentence();
-    for outside in ["private.wav", "id_ed25519", "cookies", "in use.wav"] {
-        assert!(going.elsewhere.iter().any(|path| path.ends_with(outside)), "{outside} is named: {going:?}");
-        assert!(shown.contains(outside), "{shown}");
+    assert!(shown.starts_with("2 audio files (") && shown.contains("private.wav"), "{shown}");
+    assert_eq!(going.no_audio.len(), 4, "{going:?}");
+    for stays in ["id_ed25519", "notes.wav", "cookies", "in use.wav"] {
+        assert!(going.no_audio.iter().any(|path| path.ends_with(stays)), "{stays} is named: {going:?}");
+        assert!(shown.contains(stays), "{shown}");
     }
-    assert!(shown.contains("where Trill reads them as audio"), "{shown}");
+    assert!(going.no_audio.iter().all(|path| !path.contains("..")), "each where it really lies: {going:?}");
+    assert!(shown.contains("4 files the song names are no audio as Trill reads them and stay here"), "{shown}");
 
     // She shares it all the same. Only what Trill reads as audio is said
     // and handed out: the two recordings.
@@ -698,6 +710,23 @@ fn a_song_file_is_a_stranger_too_and_only_audio_its_user_let_go_is_ever_said_or_
     assert!(said(&ada).contains("1 file that the shared song names on this computer has not gone"), "{}", said(&ada));
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(file_of(&ben, added), (String::new(), None), "nothing of it has gone to anyone");
+    // At Ben's, what Ada's program has not said (the one it holds, and
+    // the five it does not read as audio) is no file he is missing and no
+    // problem of his: each waits for whoever brought it, by the clip's
+    // name, and nothing is looked for on his disk.
+    let unsaid = |runtime: &Runtime| -> Vec<String> {
+        let files = runtime.together().files.into_iter().filter(|file| file.waits == Some(Waiting::ToBeSaid));
+        files.map(|file| file.name).collect()
+    };
+    eventually("Ben is shown what waits for Ada", || unsaid(&ben).len() == 6);
+    let waits = unsaid(&ben);
+    for name in doctored.strangers.iter().map(|(name, _)| *name).chain(["Later"]) {
+        assert!(waits.iter().any(|shown| shown == name), "{name} is among {waits:?}");
+    }
+    assert!(ben.together().files.iter().all(|file| file.bytes == 0 && file.from.is_none()), "nothing is known of them");
+    assert!(ben.files_missing().is_empty(), "{:?}", ben.files_missing().files);
+    assert!(ben.session.lock().problems().is_empty(), "{:?}", ben.session.lock().problems());
+    assert!(unsaid(&ada).is_empty(), "at Ada's they are her own files, held or no audio");
     let shared = folder.path().join("songs").join("shared.trill");
     ada.session.lock().save(&shared).unwrap();
     drop(ada);
@@ -718,7 +747,8 @@ fn a_song_file_is_a_stranger_too_and_only_audio_its_user_let_go_is_ever_said_or_
     );
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(file_of(&ben, added), (String::new(), None));
-    assert!(again.together().files.is_empty() && ben.together().files.is_empty());
+    assert!(again.together().files.is_empty(), "nothing is on its way to her, and what she holds is her own");
+    assert_eq!(unsaid(&ben).len(), ben.together().files.len(), "nothing is on its way to him: six wait to be said");
     // Shown them, she lets them go: the recording arrives, and of what is
     // no audio there is still nothing, here or there.
     again.let_files_go();
