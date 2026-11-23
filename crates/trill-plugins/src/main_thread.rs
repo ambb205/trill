@@ -51,6 +51,8 @@ mod os_events;
 mod os_events;
 
 /// On Linux an editor's window has the thread wake for its connection.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use os_events::waits;
 #[cfg(target_os = "linux")]
 pub(crate) use os_events::{unwatch, watch};
 

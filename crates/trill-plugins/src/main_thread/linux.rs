@@ -8,36 +8,56 @@
 //! this thread runs), and the window Trill puts it in has a connection of
 //! Trill's (`editor/x11.rs`), whose events the editor drains when the thread
 //! idles. So the thread waits on what wakes it (an eventfd) and on those
-//! connections, and a connection that has something asks for an idle at
-//! once instead of at the next interval.
+//! connections. A connection that has something is read at once, by what
+//! was handed in with it ([`watch`]), whether a window is open or not: a
+//! server says things by itself (a keyboard's mapping changed), and what is
+//! not read leaves the connection ready, and the thread turning, for good.
+//! Where what was read is news for a window, an idle is asked for at once
+//! instead of at the next interval.
 
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
+/// What reads a watched connection when it is ready: whether what it read
+/// is news for a window.
+pub(crate) type Reader = Rc<dyn Fn() -> bool>;
+
+/// How many times a plugin thread has waited, in all: for tests that hold
+/// that it sleeps.
+static WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// How many times the plugin threads have waited so far.
+#[cfg(test)]
+pub(crate) fn waits() -> u64 {
+    WAITS.load(Ordering::Relaxed)
+}
+
 thread_local! {
-    /// The connections this thread waits on besides its own wake-ups.
-    static WATCHED: RefCell<Vec<RawFd>> = const { RefCell::new(Vec::new()) };
+    /// The connections this thread waits on besides its own wake-ups, each
+    /// with what reads it.
+    static WATCHED: RefCell<Vec<(RawFd, Reader)>> = const { RefCell::new(Vec::new()) };
     /// The eventfd that wakes this thread, where it is a plugin thread.
     static WAKES: Cell<RawFd> = const { Cell::new(-1) };
 }
 
 /// Has the plugin thread (the calling one) wake when `fd` has something to
-/// read, until [`unwatch`].
-pub(crate) fn watch(fd: RawFd) {
+/// read, and `read` read it, until [`unwatch`].
+pub(crate) fn watch(fd: RawFd, read: Reader) {
     WATCHED.with_borrow_mut(|watched| {
-        if !watched.contains(&fd) {
-            watched.push(fd);
-        }
+        watched.retain(|(watching, _)| *watching != fd);
+        watched.push((fd, read));
     });
 }
 
 /// Stops waking for `fd`.
 pub(crate) fn unwatch(fd: RawFd) {
-    WATCHED.with_borrow_mut(|watched| watched.retain(|watching| *watching != fd));
+    WATCHED.with_borrow_mut(|watched| watched.retain(|(watching, _)| *watching != fd));
 }
 
 pub(super) struct Pump {
@@ -66,9 +86,11 @@ impl Pump {
     /// or `idle_in` has passed. A wake-up that came before the call ends it
     /// at once.
     pub(super) fn wait(&self, idle_in: Option<Duration>) {
+        WAITS.fetch_add(1, Ordering::Relaxed);
         let mut fds = vec![libc::pollfd { fd: self.wakes.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-        WATCHED.with_borrow(|watched| {
-            fds.extend(watched.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }));
+        let readers: Vec<Reader> = WATCHED.with_borrow(|watched| {
+            fds.extend(watched.iter().map(|(fd, _)| libc::pollfd { fd: *fd, events: libc::POLLIN, revents: 0 }));
+            watched.iter().map(|(_, read)| read.clone()).collect()
         });
         // Rounded up: a wait that ends a little before the idle is due
         // would only come round again at once.
@@ -81,7 +103,15 @@ impl Pump {
         if fds[0].revents != 0 {
             drain(fds[0].fd);
         }
-        if fds[1..].iter().any(|fd| fd.revents != 0) {
+        // Each ready connection is read now, by its reader (which may let go
+        // of it), and news for a window has the idle run at once.
+        let mut news = false;
+        for (fd, read) in fds[1..].iter().zip(readers) {
+            if fd.revents != 0 {
+                news |= read();
+            }
+        }
+        if news {
             super::IDLE_REQUESTED.set(true);
         }
     }

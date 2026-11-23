@@ -488,3 +488,32 @@ fn an_edit_is_flushed_out_of_a_plugin_nobody_is_processing() {
     std::thread::sleep(Duration::from_millis(1_300));
     assert_eq!(value(&mut instance, scripted::AUDIO_FLUSHES), 1.0, "a flush nobody asked for");
 }
+
+/// Once every editor is closed, the connection their windows had is still
+/// read whenever the server says something by itself (here, that a
+/// keyboard's mapping changed, which every client is told), and the plugin
+/// thread sleeps: it does not turn round a connection nobody reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn with_every_editor_closed_what_the_server_says_unasked_is_read_and_the_thread_sleeps() {
+    needs_windows!();
+    use std::sync::atomic::Ordering;
+    let factory = factory();
+    let mut instance = create(&factory, kind::EDITOR);
+    let window = open(&mut instance, &options("closed before the server speaks"));
+    instance.controller.as_mut().unwrap().close_editor();
+    assert!(!simulate::exists(window));
+    let thrown = crate::editor::THROWN.load(Ordering::Relaxed);
+
+    simulate::tell_every_client_of_a_mapping();
+    assert!(
+        eventually(WAIT, || crate::editor::THROWN.load(Ordering::Relaxed) > thrown),
+        "what the server said was read, with no window open"
+    );
+    let before = crate::main_thread::waits();
+    std::thread::sleep(Duration::from_millis(500));
+    let turns = crate::main_thread::waits() - before;
+    // Other tests' plugin threads wait too (this one's idles while their
+    // editors are open, every 15 ms): far fewer than a thread that turns.
+    assert!(turns < 2_000, "the plugin threads waited {turns} times in half a second");
+}

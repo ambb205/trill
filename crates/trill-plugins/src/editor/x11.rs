@@ -30,7 +30,7 @@
 
 use super::{Events, Size};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
@@ -112,6 +112,9 @@ struct Display {
     black: u32,
     atoms: Atoms,
     pending: RefCell<HashMap<u32, Events>>,
+    /// The windows of this connection that are there: what is read of
+    /// another is thrown away.
+    windows: RefCell<HashSet<u32>>,
     broken: Cell<bool>,
 }
 
@@ -134,16 +137,32 @@ impl Display {
         })?;
         let (root, black) = (conn.setup().roots[screen].root, conn.setup().roots[screen].black_pixel);
         let atoms = Atoms::of(&conn)?;
-        crate::main_thread::watch(conn.stream().as_raw_fd());
-        let display = Rc::new(Self { conn, root, black, atoms, pending: RefCell::default(), broken: Cell::new(false) });
+        let fd = conn.stream().as_raw_fd();
+        let display = Rc::new(Self {
+            conn,
+            root,
+            black,
+            atoms,
+            pending: RefCell::default(),
+            windows: RefCell::default(),
+            broken: Cell::new(false),
+        });
+        // Read whenever it has something, whether a window is open or not:
+        // what is not read leaves it ready, and the thread turning.
+        let weak = Rc::downgrade(&display);
+        crate::main_thread::watch(fd, Rc::new(move || weak.upgrade().is_some_and(|display| display.read())));
         DISPLAY.set(Some(display.clone()));
         Ok(display)
     }
 
     /// Sorts what the server said since it was last asked out to the windows
-    /// it is about.
-    fn read(&self) {
+    /// it is about, throwing away what is of no window that is there, and
+    /// what is of none (a keyboard's new mapping, which every client is
+    /// told). Says whether there was news for a window.
+    fn read(&self) -> bool {
         let mut pending = self.pending.borrow_mut();
+        let windows = self.windows.borrow();
+        let mut news = false;
         loop {
             let (window, said) = match self.conn.poll_for_event() {
                 Ok(Some(Event::ConfigureNotify(configured))) => {
@@ -157,15 +176,27 @@ impl Display {
                     (message.window, Said::Close)
                 }
                 Ok(Some(Event::DestroyNotify(gone))) => (gone.window, Said::Gone),
-                Ok(Some(_)) => continue,
+                Ok(Some(_)) => {
+                    #[cfg(test)]
+                    THROWN.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 Ok(None) => break,
                 // A connection that broke is every window gone.
                 Err(_) => {
                     self.broken.set(true);
                     crate::main_thread::unwatch(self.conn.stream().as_raw_fd());
+                    // Every window there is learns it at its next look.
+                    news |= !windows.is_empty();
                     break;
                 }
             };
+            if !windows.contains(&window) {
+                #[cfg(test)]
+                THROWN.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            news = true;
             let events = pending.entry(window).or_default();
             match said {
                 Said::Resized(size) => events.resized = Some(size),
@@ -173,8 +204,14 @@ impl Display {
                 Said::Gone => events.destroyed = true,
             }
         }
+        news
     }
 }
+
+/// How many things the server said that were of no window that is there,
+/// read and thrown away: for tests.
+#[cfg(test)]
+pub(crate) static THROWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What the server said of a window.
 enum Said {
@@ -233,6 +270,7 @@ impl Window {
         let size = PROVISIONAL_SIZE;
         conn.create_window(0, id, display.root, x, y, size, size, 0, WindowClass::INPUT_OUTPUT, 0, &aux)
             .map_err(|e| failed(&e))?;
+        display.windows.borrow_mut().insert(id);
         let window = Self {
             display: display.clone(),
             id,
@@ -423,16 +461,19 @@ impl Window {
 
     /// Destroys the window, if it still exists.
     pub(crate) fn destroy(&self) {
+        // Out of the connection's list first: what the server says of it
+        // from now on (its own going) is thrown away.
+        self.display.windows.borrow_mut().remove(&self.id);
+        self.display.pending.borrow_mut().remove(&self.id);
         if self.alive.replace(false) {
             let _ = self.display.conn.destroy_window(self.id);
             let _ = self.round_trip();
         }
-        self.display.pending.borrow_mut().remove(&self.id);
     }
 
     /// What happened to the window since the last call.
     pub(crate) fn take_events(&self) -> Events {
-        self.display.read();
+        let _ = self.display.read();
         let mut events = self.events.take();
         let mut said = self.display.pending.borrow_mut().remove(&self.id).unwrap_or_default();
         // A size the host gave the window itself is no news from it.
@@ -450,6 +491,14 @@ impl Window {
 
     /// The area inside the window as it is drawn right now, the view's own
     /// windows included. Nothing for a window that is not mapped.
+    ///
+    /// The server is asked for the picture of the window itself, which for a
+    /// window far off the screen (a picture's) is there only where the server
+    /// keeps each window in memory of its own: Xwayland under a Wayland
+    /// compositor does (this was measured there), and so does an X server
+    /// under a compositing window manager. A plain X server without one keeps
+    /// only what is on the screen, and gives nothing usable for a window off
+    /// it.
     pub(crate) fn capture(&self) -> Option<EditorImage> {
         if !self.mapped.get() || !self.alive.get() {
             return None;
@@ -486,6 +535,19 @@ pub(crate) mod simulate {
             let root = conn.setup().roots[screen].root;
             (conn, root)
         };
+    }
+
+    /// Has the server tell every client that a keyboard's mapping changed,
+    /// changing nothing: one key given the mapping it has.
+    pub(crate) fn tell_every_client_of_a_mapping() {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        with(|conn, _| {
+            let first = conn.setup().min_keycode;
+            let mapping = conn.get_keyboard_mapping(first, 1).expect("asked").reply().expect("the mapping");
+            let per = mapping.keysyms_per_keycode;
+            conn.change_keyboard_mapping(1, first, per, &mapping.keysyms).expect("asked");
+            let _ = conn.get_input_focus().map(|cookie| cookie.reply());
+        });
     }
 
     /// Whether an X server can be reached here: the editor tests are about

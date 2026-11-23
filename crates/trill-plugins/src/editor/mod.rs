@@ -36,6 +36,8 @@ mod window;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::device::{EditorImage, EditorOptions};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use window::THROWN;
 #[cfg(target_os = "linux")]
 pub(crate) use window::keep_out_of_sight;
 #[cfg(all(test, any(windows, target_os = "linux")))]
