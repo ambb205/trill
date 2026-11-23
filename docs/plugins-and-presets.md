@@ -5,7 +5,9 @@
 MCP like any other device's. A plugin's own editor opens in a window (on Windows, macOS and Linux), from the Editor
 button on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
 On Linux that window is an X window, also on a Wayland desktop (through Xwayland): where no X server can be
-reached, no plugin offers one, and the window says so once as it starts.
+reached, no plugin offers one, and the window says so once as it starts. An error the X server reports on a
+plugin's own connection, which would otherwise end the program, is taken by Trill, said once in the log, and passed
+on to a handler the plugin set of its own.
 
 **Which thread drives a plugin**: a plugin is made, asked and let go of from one thread of the program's. On
 Windows that is a thread of its own. On macOS plugins take the program's first thread for theirs and post work of

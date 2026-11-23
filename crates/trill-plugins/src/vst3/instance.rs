@@ -791,6 +791,9 @@ impl Vst3Thread {
             offline: request.offline,
         };
         self.instances.insert(id, instance);
+        // The plugin may have loaded libX11, and set its own handler of errors.
+        #[cfg(target_os = "linux")]
+        crate::x_errors::hold();
         Ok(created)
     }
 

@@ -75,7 +75,6 @@ window, the server and the engine; what each has not got yet is below ([macOS](#
 - A preset browser for plugins in the window. The session lists, searches and loads them, and so does MCP; the
   device panel shows built-in and saved presets only.
 - Asking a CLAP plugin for a stereo layout when its default is mono (a VST3 plugin is asked).
-- Plugin editors on Linux.
 - Finding files a plugin keeps in its own state. Only audio clips and the built-in sampler and drum rack name
   theirs to Trill.
 - A loaded kit's own names in the window. The piano roll names a drum track's rows from the track's own map and
@@ -199,13 +198,15 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
 What Windows has and Linux has not, yet. Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64; what runs
 there and how it was checked is in [Building and testing](development.md#on-linux).
 
-- All of plugin editors. An editor opens in an X window of its own (through Xwayland on a Wayland desktop), which
-  goes behind Trill's window as any other window does; Surge XT's open in both formats and what is done in them
-  reaches the song. A VST3 plugin's view is given the run loop it asks the frame for its timers and connections
-  (`IRunLoop`), which plugins built on Steinberg's own interface library need to draw at all, and a CLAP plugin
-  the descriptors it asks the host to hear of (`posix-fd-support`); no plugin that uses either has been tried
-  yet (Surge XT uses neither). Not yet: the scale an editor is told (1: Surge XT reads the display's resolution
-  itself). Where there is no X server, no plugin offers its window, and Trill says so once as it starts.
+- Plugin editors as far as they were tried. An editor opens in an X window of its own (through Xwayland on a
+  Wayland desktop), which goes behind Trill's window as any other window does; Surge XT's open in both formats and
+  what is done in them reaches the song. A VST3 plugin's view is given the run loop it asks the frame for its
+  timers and connections (`IRunLoop`), which plugins built on Steinberg's own interface library need to draw at
+  all, and a CLAP plugin the descriptors it asks the host to hear of (`posix-fd-support`); no plugin that uses
+  either has been tried yet (Surge XT uses neither). An editor is told a scale of 1 (Surge XT reads the display's
+  resolution itself). Where there is no X server, no plugin offers its window, and Trill says so once as it
+  starts. An error the X server reports on a plugin's own connection is taken by Trill and said in the log; if
+  the X server goes while an editor's plugin is loaded, Trill ends with it, and the safety copy has the song.
   The plugins installed in `~/.clap`, `/usr/lib/clap`, `~/.vst3` and `/usr/lib/vst3` are found, scanned,
   played, rendered and given their presets (tried on Surge XT in both formats).
 - Real-time scheduling where neither the user's limit nor RealtimeKit gives it. The threads then run at an
