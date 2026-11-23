@@ -19,7 +19,7 @@
 //! plugin thread kept from that for good is a program that can no longer
 //! save its plugins' states. The safety copy has the song.
 
-use std::ffi::{CStr, c_int, c_uchar, c_ulong, c_void};
+use std::ffi::{c_int, c_uchar, c_ulong, c_void};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// libX11's `XErrorEvent`.
@@ -39,6 +39,8 @@ type SetHandler = unsafe extern "C" fn(Option<Handler>) -> Option<Handler>;
 
 /// The handler a plugin had set of its own, as an address; 0 for none.
 static PREVIOUS: AtomicUsize = AtomicUsize::new(0);
+/// libX11's own handler, as libX11 itself said it; 0 until it was asked.
+static DEFAULT: AtomicUsize = AtomicUsize::new(0);
 /// The kinds already said in the log: an error code and a request, a bit each.
 static SAID: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
 /// How many errors Trill's handler has taken, in all.
@@ -64,34 +66,33 @@ pub(crate) fn hold() {
     if !set.is_null() {
         // SAFETY: libX11's `XSetErrorHandler`, of this type.
         let set: SetHandler = unsafe { std::mem::transmute::<*mut c_void, SetHandler>(set) };
-        // SAFETY: sets a handler of the right type, which lives as long as
-        // the program; it takes libX11's lock itself.
-        let before = unsafe { set(Some(taken)) };
-        if let Some(before) = before
-            && before as usize != taken as Handler as usize
-            && !is_libx11s_default(before as usize)
+        let ours = taken as Handler as usize;
+        // SAFETY: sets handlers of the right type, which live as long as the
+        // program; libX11 takes its lock itself.
+        let before = unsafe {
+            if DEFAULT.load(Ordering::Acquire) == 0 {
+                // libX11 says which is its own: no handler puts its default
+                // back and answers with what was there, and the next call
+                // answers with the default. Asked once, and known for certain
+                // wherever names can be read or not.
+                let before = set(None);
+                if let Some(default) = set(Some(taken)) {
+                    DEFAULT.store(default as usize, Ordering::Release);
+                }
+                before
+            } else {
+                set(Some(taken))
+            }
+        };
+        if let Some(before) = before.map(|handler| handler as usize)
+            && before != ours
+            && before != DEFAULT.load(Ordering::Acquire)
         {
-            PREVIOUS.store(before as usize, Ordering::Release);
+            PREVIOUS.store(before, Ordering::Release);
         }
     }
     // SAFETY: the reference taken above.
     unsafe { libc::dlclose(library) };
-}
-
-/// The name of the function at `address`, where a loaded library says it.
-fn name_at(address: usize) -> Option<&'static CStr> {
-    let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
-    // SAFETY: fills in `info`; the names it points at belong to a library
-    // that is loaded, and are only read at once.
-    if unsafe { libc::dladdr(address as *const c_void, &mut info) } == 0 || info.dli_sname.is_null() {
-        return None;
-    }
-    // SAFETY: a C string of the library's, as `dladdr` gives it.
-    Some(unsafe { CStr::from_ptr(info.dli_sname) })
-}
-
-fn is_libx11s_default(address: usize) -> bool {
-    name_at(address).is_some_and(|name| name == c"_XDefaultError")
 }
 
 /// Whether `address` is still in a library that is loaded: a plugin's
