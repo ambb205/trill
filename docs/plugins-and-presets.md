@@ -2,8 +2,8 @@
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
-MCP like any other device's. A plugin's own editor opens in a window (Windows only so far), from the Editor button
-on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
+MCP like any other device's. A plugin's own editor opens in a window (on Windows and macOS so far), from the Editor
+button on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
 
 **Which thread drives a plugin**: a plugin is made, asked and let go of from one thread of the program's. On
 Windows that is a thread of its own. On macOS plugins take the program's first thread for theirs and post work of
@@ -19,7 +19,11 @@ The window on macOS draws on its first thread too, so there it drives its plugin
 step at a time (its instance, its state, setting up, its parameters, activating), with a frame drawn between two
 steps, and its file is loaded beforehand on another thread. While a step runs the window stands still: on a song of
 eight plugins, 0.6 s at the most (Hammond B-3X activating), and the line that says which device is coming next is on
-screen before it. **A plugin that hangs on macOS freezes the window**, which cannot be drawn or closed until the
+screen before it. An editor's window on macOS is made on that thread too, and opening one stands the window still for as long as the
+plugin takes to make its view: measured with the `editor` example, 0.1 to 0.35 s (Pianoteq 9, SWAM Violin 3, Serum 2,
+ValhallaRoom and ValhallaSupermassive, Consort's Hall and Marimba in CLAP) and 3 s for Hammond B-3X. A view's sizes
+are in points and it is told no scale: AppKit draws it at its screen's resolution. **A plugin that hangs on macOS
+freezes the window**, which cannot be drawn or closed until the
 program is ended (Force Quit). The song is not lost: the safety copy of unsaved work goes on being written by
 another thread every twenty seconds, with each plugin's state as it last was, and the next start offers it back. On
 Windows a plugin that hangs costs a sentence and the window goes on.

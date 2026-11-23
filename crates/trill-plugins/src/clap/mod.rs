@@ -27,7 +27,7 @@ mod controller;
 mod events;
 mod factory;
 mod gui;
-#[cfg(all(test, any(windows, target_os = "linux")))]
+#[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
 mod gui_tests;
 mod host;
 mod instance;

@@ -67,10 +67,12 @@ mod os_events;
 
 #[cfg(target_os = "macos")]
 #[path = "main_thread/cf.rs"]
-mod cf;
+pub(crate) mod cf;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use os_events::from_the_first_threads_loop;
 #[cfg(target_os = "macos")]
-pub(crate) use os_events::{first_is_lent, frame_drawn, lend, serve_here, steps_a_turn};
+pub(crate) use os_events::{first_is_lent, frame_drawn, has_application, lend, serve_here, steps_a_turn};
 
 /// How often an idling thread services plugin callbacks.
 const IDLE_INTERVAL: Duration = Duration::from_millis(15);

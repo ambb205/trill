@@ -146,14 +146,18 @@ pub struct Memory {
     /// The memory it has.
     pub total: u64,
     /// What can be had at once: on Linux what the kernel reckons can be had
-    /// without swapping (`MemAvailable`).
+    /// without swapping (`MemAvailable`); on macOS what is free, and what
+    /// holds files' contents and things a program said may be thrown away,
+    /// which the system gives up at once (memory compressed or wired is not
+    /// counted).
     pub free: u64,
-    /// The room left in its swap.
+    /// The room left in its swap: nothing on macOS, which grows its swap
+    /// as it needs and has no limit short of its disk.
     pub swap_free: u64,
 }
 
 /// What the machine says of its memory now. `None` where it is not asked
-/// here (on Windows and macOS each crate asks its own way, for now).
+/// here (on Windows each crate asks its own way, for now).
 pub fn memory() -> Option<Memory> {
     #[cfg(target_os = "linux")]
     {
@@ -169,7 +173,45 @@ pub fn memory() -> Option<Memory> {
             swap_free: field("SwapFree:").unwrap_or(0),
         })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            /// Declared here: `libc` has it only under a name it is retiring.
+            fn mach_host_self() -> libc::mach_port_t;
+        }
+        /// The host's port, taken once: each `mach_host_self` is a send
+        /// right that would have to be given back.
+        fn host() -> libc::mach_port_t {
+            static HOST: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
+            // SAFETY: names this machine's host; kept for the life of the process.
+            *HOST.get_or_init(|| unsafe { mach_host_self() })
+        }
+        let mut total = 0u64;
+        let mut size = size_of::<u64>();
+        // SAFETY: the name is a C string, the value a `u64` that says its size.
+        let asked = unsafe {
+            libc::sysctlbyname(c"hw.memsize".as_ptr(), (&raw mut total).cast(), &mut size, std::ptr::null_mut(), 0)
+        };
+        if asked != 0 || total == 0 {
+            return None;
+        }
+        // SAFETY: a structure of numbers, for which nothing is a fine start.
+        let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        // SAFETY: the structure and its count are the ones the flavour is asked with.
+        let asked =
+            unsafe { libc::host_statistics64(host(), libc::HOST_VM_INFO64, (&raw mut stats).cast(), &mut count) };
+        if asked != libc::KERN_SUCCESS {
+            return None;
+        }
+        // SAFETY: a value the system sets before any code runs.
+        let page = unsafe { libc::vm_page_size } as u64;
+        let held = u64::from(stats.wire_count)
+            + u64::from(stats.compressor_page_count)
+            + u64::from(stats.internal_page_count).saturating_sub(u64::from(stats.purgeable_count));
+        Some(Memory { total, free: total.saturating_sub(held * page), swap_free: 0 })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     None
 }
 
@@ -244,10 +286,10 @@ mod tests {
         assert_eq!(ended_by_signal(&ended("exit 3")), None);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_machine_says_how_much_memory_it_has_free() {
-        let memory = memory().expect("Linux says");
+        let memory = memory().expect("the system says");
         assert!(memory.total >= 1 << 30 && memory.free > 0 && memory.free <= memory.total, "{memory:?}");
     }
 

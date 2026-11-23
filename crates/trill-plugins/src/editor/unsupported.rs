@@ -22,6 +22,13 @@ use trill_core::device::EditorImage;
 /// Whether this platform hosts plugin editors.
 pub(crate) const SUPPORTED: bool = false;
 
+/// Keeps editor windows out of sight, where a picture of one can be taken
+/// so (macOS). Nothing here: a picture of an editor is taken off the screen.
+pub(crate) fn keep_out_of_sight() {}
+
+/// Whether a view is told how many of the monitor's pixels one of its own is.
+pub(crate) const TELLS_SCALE: bool = false;
+
 /// Never exists: see the module documentation.
 pub(crate) struct Window(Infallible);
 
