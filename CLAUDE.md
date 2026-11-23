@@ -2,7 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Trill is an open-source digital audio workstation in Rust (GPL-3.0-or-later), developed on Windows. Three goals
+Trill is an open-source digital audio workstation in Rust (GPL-3.0-or-later), developed on Windows and built and
+tested on macOS (Apple silicon) too. Three goals
 decide every trade-off: it does not crash or stall, it hosts CLAP and VST3 plugins, and everything it can do is
 reachable over MCP so an AI can write and mix a song. `README.md` is the front page (what Trill is,
 how to build it and how to use it) and stays short; `docs/` describes the features, a page a topic, and
@@ -918,7 +919,8 @@ on the samples.
 - **The look** comes from `trill-noir`'s theme tokens: near-black surfaces, hairlines, zero corner radius, caps
   micro labels, the signal orange used sparingly, nothing below 10 px. Extend the kit instead of styling in place.
 - **Pictures are not kept.** `render.sh <word>` renders the few pictures that show a change into
-  `target/screenshots` (off-screen, taking no focus); look at them and leave them there. Never run it for every
+  `target/screenshots` (off-screen, taking no focus; on macOS in a window without a title bar, which the system
+  would put back on a screen, by a program that is never brought to the front, `ui::run`); look at them and leave them there. Never run it for every
   picture as routine. Only the five the README and `docs/` show, in `docs/images`, are tracked (`render.sh readme`, on purpose): four
   of the window and one of the stage, which the film example draws. Films and their stills go under `target/`.
 - **The assistant keeps five rules**, written at the top of `trill-assistant/src/lib.rs`: it never touches
@@ -928,6 +930,12 @@ on the samples.
 - **Nothing of a plugin maker's is in the repository**: no preset file, no part of one, no dump of a state.
   Tests of `trill-plugins/src/vendor` build their own small files in the format and load them into the scripted
   plugins; the ones on installed plugins are `#[ignore]`d (`tests/vendor.rs`). Trill only reads in a maker's folders.
+- **Each system's code is its own.** What only Windows does is under `cfg(windows)` and what only macOS does under
+  `cfg(target_os = "macos")`, each in arms or files of its own, so that a change for one leaves the other as it
+  was; what every Unix does alike is under `cfg(unix)`. A test that is about one system by its nature (a path as
+  Windows writes it, the code a process ended with) says so where it chooses; it is not left out elsewhere. A
+  macOS temporary folder is reached through a link (`/var` is `/private/var`), so a test that compares a path
+  Trill shows names its files by their real path. What macOS has not got yet is in `docs/status.md`.
 - **Dependencies** must be GPL-compatible and worth their build time (`cargo build --timings`).
 - **Code is written here.** Nothing is copied from the owner's other projects, with two exceptions: `trill-noir`,
   which carries their design language, and Magpie (their project that takes a recording apart), whose method

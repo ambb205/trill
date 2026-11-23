@@ -17,7 +17,8 @@ Three goals decide every trade-off:
 - **It hosts your plugins.** CLAP and VST3, with their presets and their own editor windows.
 - **An AI can drive all of it.** Every edit has one implementation, which the window and the MCP server share.
 
-Trill is an early build and has only been run on Windows. [Status](docs/status.md) lists what is not built yet.
+Trill is an early build, made on Windows and built and tested on macOS too. [Status](docs/status.md) lists what is
+not built yet, and what macOS has not got.
 
 ## What is in it
 
@@ -44,15 +45,17 @@ Trill is an early build and has only been run on Windows. [Status](docs/status.m
 
 ## Getting started
 
-Trill needs 64-bit Windows. It is developed on Windows 11; macOS and Linux have not been run.
+Trill needs 64-bit Windows, or macOS on Apple silicon. It is developed on Windows 11; on macOS it is built from the
+repository, and some of it is not there yet ([what](docs/status.md#macos)). Linux has not been run.
 
 **Install it.** Download `Trill-<version>-setup.exe` from the
 [latest release](https://github.com/ambb205/trill/releases/latest) and run it. It installs for you alone, asks for
 no administrator, and an installed Trill says when a newer version is out. The build is not signed yet, so Windows
 asks before it runs the installer. ([Installing and updating](docs/installing-and-updating.md))
 
-**Or build it.** You need [Rust](https://rustup.rs) 1.90 or newer with the MSVC toolchain, which needs the
-"Desktop development with C++" workload of the Visual Studio Build Tools. Then, from the repository:
+**Or build it.** You need [Rust](https://rustup.rs) 1.90 or newer: on Windows with the MSVC toolchain, which needs
+the "Desktop development with C++" workload of the Visual Studio Build Tools; on macOS with Xcode's command-line
+tools (`xcode-select --install`). Then, from the repository:
 
 ```sh
 git clone https://github.com/ambb205/trill.git
