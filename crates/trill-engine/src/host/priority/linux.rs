@@ -581,9 +581,8 @@ mod tests {
         }
         guard();
         // Each registers as a device's thread does with ManuallyDrop, and ends without letting go.
-        let every_one_held = (0..RAISED.len() + 20)
-            .map(|_| std::thread::spawn(|| hold(&RAISED, this_thread())).join().unwrap())
-            .all(|held| held);
+        let every_one_held =
+            (0..RAISED.len() + 20).all(|_| std::thread::spawn(|| hold(&RAISED, this_thread())).join().unwrap());
         // Two that are there when the signal comes.
         let (stop, waiting) = (std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(AtomicU32::new(0)));
         let there: Vec<_> = (0..2)
