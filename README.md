@@ -17,7 +17,7 @@ Three goals decide every trade-off:
 - **It hosts your plugins.** CLAP and VST3, with their presets and their own editor windows.
 - **An AI can drive all of it.** Every edit has one implementation, which the window and the MCP server share.
 
-Trill is an early build and has only been run on Windows. [Status](docs/status.md) lists what is not built yet.
+Trill is an early build, developed on Windows and run on Linux too. [Status](docs/status.md) lists what is not built yet.
 
 ## What is in it
 
@@ -44,15 +44,18 @@ Trill is an early build and has only been run on Windows. [Status](docs/status.m
 
 ## Getting started
 
-Trill needs 64-bit Windows. It is developed on Windows 11; macOS and Linux have not been run.
+Trill is developed on Windows 11 and also builds and runs on Linux; macOS has not been run. Releases are for 64-bit
+Windows.
 
 **Install it.** Download `Trill-<version>-setup.exe` from the
 [latest release](https://github.com/ambb205/trill/releases/latest) and run it. It installs for you alone, asks for
 no administrator, and an installed Trill says when a newer version is out. The build is not signed yet, so Windows
 asks before it runs the installer. ([Installing and updating](docs/installing-and-updating.md))
 
-**Or build it.** You need [Rust](https://rustup.rs) 1.90 or newer with the MSVC toolchain, which needs the
-"Desktop development with C++" workload of the Visual Studio Build Tools. Then, from the repository:
+**Or build it.** You need [Rust](https://rustup.rs) 1.90 or newer. On Windows that is the MSVC toolchain, which
+needs the "Desktop development with C++" workload of the Visual Studio Build Tools; on Linux a C compiler,
+`pkg-config` and ALSA's headers (`sudo apt install build-essential pkg-config libasound2-dev` on Debian and Ubuntu;
+[what Linux lacks yet](docs/status.md#linux)). Then, from the repository:
 
 ```sh
 git clone https://github.com/ambb205/trill.git

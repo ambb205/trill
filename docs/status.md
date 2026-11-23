@@ -3,7 +3,8 @@
 Trill is an early build. Everything the other pages describe works and is held by tests. This page lists what is
 not built yet.
 
-Only Windows has been run so far.
+Trill is developed on Windows. It builds and runs on Linux too, where its tests pass, the window draws and a song
+plays through the system's sound; what Linux does not have yet is [below](#linux). macOS has not been run.
 
 ## Arrangement and engine
 
@@ -181,3 +182,22 @@ Only Windows has been run so far.
   that release for as long as it runs; a second key can be added to the releases after it.
 - An update between two published releases. The whole of it was tried on the real programs with builds made for
   the trial, served from the same machine; the first that crosses the internet is the one after 0.1.0.
+
+## Linux
+
+Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64. What runs there and how it was checked is in
+[Building and testing](development.md#on-linux). Not yet:
+
+- The audio threads in the class the system keeps for audio. They run at an ordinary thread's priority, so a song
+  that keeps up on an idle machine may fall short on a busy one.
+- Plugins installed on Linux tried: CLAP and VST3 are looked for in their usual Linux folders, and none has been
+  loaded. Their editors are not shown: opening one says "plugin editors are not supported on this platform yet".
+- Taking an output for Trill alone (exclusive mode). Asked for, it says the device cannot be taken exclusively on
+  this system, and the device is shared.
+- The trash. A recording that is removed goes to the `removed` folder beside the takes.
+- What a render or a probe in a process of its own measures of the machine's memory, and of what a thread ran.
+- The assistant's processes ending with Trill when Trill itself is killed. They are one group, stopped together
+  when a turn is stopped or Trill closes, as on Windows; a Windows job also ends them when Trill is killed.
+- A study. The models' runtime is published for Windows alone so far: a study says that the part `runtime` is not
+  published for this system yet.
+- A release, an installer and the updater.
