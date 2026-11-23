@@ -4,7 +4,8 @@
 //! would leave the rest running. Every child is therefore placed in a
 //! [`ProcessTree`] before it executes a single instruction: on Windows a job
 //! object that the kernel empties when its last handle closes, which also
-//! covers Trill crashing; elsewhere a process group.
+//! covers Trill crashing; elsewhere a process group, which on macOS has a
+//! keeper beside it that ends it when Trill is gone.
 
 use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
@@ -24,9 +25,9 @@ impl ProcessTree {
         self.inner.kill();
     }
 
-    /// Gives the tree up once its child has exited. On Windows this kills
-    /// whatever the child left running; elsewhere there is no safe way to
-    /// (see the Unix `Tree`), and leftovers are left alone.
+    /// Gives the tree up once its child has exited. On Windows and macOS
+    /// this kills whatever the child left running; elsewhere there is no
+    /// safe way to (see the Unix `Tree`), and leftovers are left alone.
     pub(crate) fn close(self) {}
 }
 
@@ -217,7 +218,7 @@ mod imp {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod imp {
     use std::io;
     use std::os::unix::process::CommandExt;
@@ -255,5 +256,77 @@ mod imp {
         let child = command.spawn()?;
         let group = i32::try_from(child.id()).map_err(io::Error::other)?;
         Ok((child, Tree { group }))
+    }
+}
+
+/// On macOS the group has a keeper: a shell in the group, which reads a pipe
+/// that only Trill holds the other end of. However Trill ends (a crash, a
+/// kill), the system closes that end, and the keeper ends the group and
+/// itself with it. And as long as the keeper lives the group is not empty,
+/// so its id is not given to another: killing it is safe at any time, and
+/// closing or dropping the tree kills what the CLI left running, as on
+/// Windows. Without a keeper (none could be started) it is the group alone.
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::io;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, ChildStdin, Command, Stdio};
+
+    unsafe extern "C" {
+        /// POSIX `kill(2)`. Declared here to avoid a dependency for one call.
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+
+    const SIGKILL: i32 = 9;
+    /// What the keeper does: waits for its input to end, which it does only
+    /// when Trill is gone, and then ends its group. (Trill never writes.)
+    const KEEPER: &str = "read _; kill -KILL -- -\"$1\"";
+
+    pub(super) struct Tree {
+        group: i32,
+        /// The keeper, and the end of its pipe that Trill holds.
+        keeper: Option<(Child, ChildStdin)>,
+    }
+
+    impl Tree {
+        pub(super) fn kill(&self) {
+            // Only while the keeper holds the group open is its id certainly
+            // still its own.
+            if self.keeper.is_some() {
+                // SAFETY: `kill` has no memory-safety requirements. A negative
+                // pid addresses the group, which the keeper keeps alive.
+                unsafe { kill(-self.group, SIGKILL) };
+            }
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            self.kill();
+            if let Some((mut keeper, input)) = self.keeper.take() {
+                drop(input);
+                let _ = keeper.wait();
+            }
+        }
+    }
+
+    pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Tree)> {
+        command.process_group(0);
+        let child = command.spawn()?;
+        let group = i32::try_from(child.id()).map_err(io::Error::other)?;
+        let keeper = Command::new("/bin/sh")
+            .args(["-c", KEEPER, "keeper", &group.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(group)
+            .spawn()
+            .ok()
+            .and_then(|mut keeper| Some((keeper.stdin.take()?, keeper)))
+            .map(|(input, keeper)| (keeper, input));
+        if keeper.is_none() {
+            log::warn!("the assistant's CLI has no keeper: if Trill is killed, it is left to end by itself");
+        }
+        Ok((child, Tree { group, keeper }))
     }
 }
