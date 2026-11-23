@@ -61,6 +61,11 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# What every Unix says of a thread, of memory and of the machine. In the
+# tree already, through other crates.
+libc = "0.2"
+
 [dev-dependencies]
 # Fixtures for the audio tests: temporary folders and files.
 tempfile = "3"

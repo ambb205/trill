@@ -16,12 +16,14 @@ pub fn now_ns() -> u64 {
     u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// How many of its processor's cycles the calling thread has run in all:
-/// what the system counts only while the thread is on a processor. Read
-/// before and after a piece of work, beside the clock, it tells work that
-/// took long to do from a thread that was kept from doing it. One call to
-/// the system that neither allocates nor waits; 0 where the system has no
-/// such count.
+/// How much the calling thread has run in all, counted only while it is
+/// on a processor: its processor's cycles on Windows, and on Unix the
+/// nanoseconds of processor time the system has given it. Read before and
+/// after a piece of work, beside the clock, it tells work that took long
+/// to do from a thread that was kept from doing it; whoever turns it into
+/// time measures first how many a busy thread counts in a nanosecond. One
+/// call to the system that neither allocates nor waits; 0 where the system
+/// has no such count.
 pub fn thread_cycles() -> u64 {
     #[cfg(windows)]
     {
@@ -34,7 +36,16 @@ pub fn thread_cycles() -> u64 {
             Err(_) => 0,
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: asks of the calling thread only, into a live local.
+        match unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } {
+            0 => (time.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(time.tv_nsec as u64),
+            _ => 0,
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
     0
 }
 
