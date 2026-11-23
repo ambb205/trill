@@ -51,7 +51,7 @@ recording.** `File`, `Unused recordings` (the `unused_recordings` tool) lists th
 open song or any state undo or redo can bring back, not another song Trill knows of (the ones it saved or
 opened lately), not unsaved work that can be recovered. One that another song plays is listed with that song's
 name and refused. The others are removed when that is asked for, in the window only after a second yes, and
-removed means sent to the system's Recycle Bin (on macOS its Trash), or into a `removed` folder beside the takes where there is no
+removed means sent to the system's Recycle Bin (on macOS its Trash, on Linux the desktop's trash), or into a `removed` folder beside the takes where there is no
 bin; the question and the tool's reply say which. A take's recording is one of the song's files like any other:
 listed when it is missing, looked for, and relinked.
 

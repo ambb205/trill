@@ -202,7 +202,7 @@ state undo can bring back, not a sampler or a drum rack of it, not another song 
 saved under another name goes on playing the files of the song it was saved from), not unsaved work that can
 still be recovered. The ones another song plays are listed apart, with the song's name, and stay. Trill never
 removes a recording by itself: `Remove` asks first and says where they go, and only a second yes sends them to
-the system's Recycle Bin, from where they can be had back. (Where a system has no bin, and in a run on a
+the system's Recycle Bin (macOS's Trash, the Linux desktop's trash), from where they can be had back. (Where a system has no bin, and in a run on a
 profile folder, they go into a `removed` folder beside the takes.) Nothing is ever deleted outright.
 
 ## Working together
