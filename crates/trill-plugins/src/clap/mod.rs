@@ -43,6 +43,7 @@ mod scripted;
 mod tests;
 mod timers;
 
+pub(crate) use factory::CACHE_FILE;
 pub use factory::{ClapConfig, ClapFactory};
 pub(crate) use instance::{ClapThread, host_info};
 pub use paths::{find_plugin_files, standard_search_paths};

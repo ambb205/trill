@@ -25,7 +25,7 @@ const INSTRUMENT_CATEGORY: &str = "Instrument";
 /// ("Instrument|Drum").
 const DRUM_CATEGORY: &str = "Drum";
 /// File name of the scan cache inside the application's cache directory.
-const CACHE_FILE: &str = "vst3-plugins.json";
+pub(crate) const CACHE_FILE: &str = "vst3-plugins.json";
 
 /// How VST3 plugins are found and listed.
 static FORMAT: Format = Format {

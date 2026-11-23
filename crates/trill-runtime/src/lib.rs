@@ -283,7 +283,21 @@ impl Runtime {
         let media = Arc::new(MediaCache::default());
         let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(Builtins::with_loader(media.clone()))];
         factories.extend(parts.devices);
-        let plugins = options.plugins.map(PluginHost::new).transpose().map_err(RuntimeError::Plugins)?;
+        // A program that keeps what it keeps in a folder of its own keeps
+        // the list of the plugins it found there too, and neither reads nor
+        // writes the one the user's own Trill keeps.
+        let own_folder = match &options.storage {
+            Storage::At { .. } => settings.folder().map(std::path::Path::to_owned),
+            Storage::User | Storage::Nowhere => None,
+        };
+        let plugins = options
+            .plugins
+            .map(|scanner| match &own_folder {
+                Some(folder) => PluginHost::keeping_scans_in(scanner, folder),
+                None => PluginHost::new(scanner),
+            })
+            .transpose()
+            .map_err(RuntimeError::Plugins)?;
         if let Some(plugins) = &plugins {
             factories.extend(plugins.factories());
             // The first scan of a machine's plugins takes seconds. It runs

@@ -906,7 +906,8 @@ on the samples.
   a virtual cable, by name, and plays nothing while another program records from it.
 - **Hermetic by default.** Tests, screenshots and scripts never read or write the user's settings
   (`%APPDATA%\trill`), sample library, studies or safety copies: `RuntimeOptions::hermetic()` or `Storage::At` on a
-  temporary folder in tests, `trill-mcp --scratch`, or `--profile <folder>` on either program, by hand. (Studies
+  temporary folder in tests, `trill-mcp --scratch`, or `--profile <folder>` on either program, by hand (which keeps
+  the list of the plugins a scan found in that folder too: `PluginHost::keeping_scans_in`). (Studies
   and what was fetched are kept in `%LOCALAPPDATA%\trill` unless the settings say where; with `Storage::At`,
   beside the settings.) Nor does a test leave anything outside the repository and the temporary folder: on macOS a
   process a test takes down on purpose (the scripted instruments' `die`, a scripted model's crash) has the fault
