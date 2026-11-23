@@ -109,14 +109,29 @@ fn files_below(folder: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(found)
 }
 
+/// The mode a file has where it lies, said in the archive for whoever
+/// unpacks it with a tool of their own (a program stays one); nothing on
+/// Windows. Trill's own unpacking never reads it.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Result<Option<u32>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(Some(std::fs::metadata(path).map_err(said(path))?.permissions().mode() & 0o777))
+}
+
+#[cfg(not(unix))]
+fn mode_of(_path: &Path) -> Result<Option<u32>, String> {
+    Ok(None)
+}
+
 fn pack(folder: &Path, out: &Path) -> Result<(), String> {
     let files = files_below(folder)?;
     let mut read = Vec::with_capacity(files.len());
     for (name, path) in &files {
-        read.push((name.as_str(), std::fs::read(path).map_err(said(path))?));
+        read.push((name.as_str(), std::fs::read(path).map_err(said(path))?, mode_of(path)?));
     }
-    let members: Vec<(&str, &[u8], bool)> = read.iter().map(|(name, bytes)| (*name, bytes.as_slice(), true)).collect();
-    std::fs::write(out, trill_fetch::zip::archive_of(&members)).map_err(said(out))?;
+    let members: Vec<(&str, &[u8], bool, Option<u32>)> =
+        read.iter().map(|(name, bytes, mode)| (*name, bytes.as_slice(), true, *mode)).collect();
+    std::fs::write(out, trill_fetch::zip::archive_with_modes(&members)).map_err(said(out))?;
     println!("{}: {} files", out.display(), members.len());
     Ok(())
 }
