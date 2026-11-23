@@ -209,10 +209,14 @@ mod tests {
             assert!(pieces.say(ours, &piece).is_some());
         }
         assert!(pieces.say(ours, &Message::Gone { person: 1 }).is_none(), "it says pieces and nothing else");
-        assert!(pieces.waiting(ours).unwrap() > 50 * MAX_PIECE, "most of the file waits");
+        // (How many pieces wait when the song is spoken of: on a machine
+        // that is busy the connection has said some of the file by now,
+        // and how many is no part of what is held here.)
+        let waited = pieces.waiting(ours).unwrap() / (MAX_PIECE + 64);
+        assert!(waited > 50, "much of the file waits: {waited} pieces");
         sharer.say(ours, &Message::Gone { person: 7 });
         // The other hears it after the few pieces that were on their way,
-        // and not after the file.
+        // and not after the pieces that waited when it was said.
         let mut before = 0;
         loop {
             match next(&mut joiner) {
@@ -224,9 +228,11 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
-        assert!(before < PIECES / 4, "the song waited for {before} of {PIECES} pieces");
+        let overtaken = PIECES - before;
+        assert!(overtaken > waited / 2, "the song waited for {before} of {PIECES} pieces, {waited} of which waited then");
         // A connection that is ended does not say the rest of a file first.
         let began = Instant::now();
+        let waited = pieces.waiting(ours).unwrap() / (MAX_PIECE + 64);
         sharer.close(ours, "enough");
         loop {
             match next(&mut joiner) {
@@ -235,7 +241,7 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
-        assert!(before < PIECES / 2, "{before} pieces were said before the goodbye");
+        assert!(PIECES - before > waited / 2, "{before} pieces were said before the goodbye, of {PIECES}");
         assert!(began.elapsed() < Duration::from_secs(5));
         let _ = theirs;
     }
