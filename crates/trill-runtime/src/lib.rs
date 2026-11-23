@@ -200,6 +200,25 @@ const DEVICE_LIST_TIMEOUT: Duration = Duration::from_secs(6);
 /// How long a rescan of the MIDI ports is waited for.
 const MIDI_RESCAN_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The folder in the temporary folder where a program that keeps nothing of
+/// the user's keeps the list of the plugins it found.
+const SCRATCH_SCANS_FOLDER: &str = "trill-scratch-plugins";
+
+/// Where the list of the plugins a scan found is kept, in place of the one
+/// the user's own Trill keeps (`None`: that one). A program that keeps what
+/// it keeps in a folder of its own keeps the list there too. One that keeps
+/// nothing of the user's neither reads nor writes theirs: its list is in
+/// the temporary folder, where its next run finds it, because looking at
+/// every plugin of a machine again takes minutes and what is found says
+/// nothing of anyone.
+fn scans_kept_in(storage: &Storage, settings_folder: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    match storage {
+        Storage::User => None,
+        Storage::At { .. } => settings_folder.map(std::path::Path::to_owned),
+        Storage::Nowhere => Some(std::env::temp_dir().join(SCRATCH_SCANS_FOLDER)),
+    }
+}
+
 /// The program's shared parts. Front ends hold it in an `Arc` and reach
 /// into the public fields; everything stops when the last holder lets go.
 pub struct Runtime {
@@ -283,13 +302,7 @@ impl Runtime {
         let media = Arc::new(MediaCache::default());
         let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(Builtins::with_loader(media.clone()))];
         factories.extend(parts.devices);
-        // A program that keeps what it keeps in a folder of its own keeps
-        // the list of the plugins it found there too, and neither reads nor
-        // writes the one the user's own Trill keeps.
-        let own_folder = match &options.storage {
-            Storage::At { .. } => settings.folder().map(std::path::Path::to_owned),
-            Storage::User | Storage::Nowhere => None,
-        };
+        let own_folder = scans_kept_in(&options.storage, settings.folder());
         let plugins = options
             .plugins
             .map(|scanner| match &own_folder {
@@ -699,5 +712,25 @@ impl Drop for Runtime {
     /// thread itself is stopped right after this, as the fields go.
     fn drop(&mut self) {
         housekeeping::save_if_changed(&self.library, &self.settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn only_the_users_own_program_keeps_the_list_of_plugins_found_where_the_users_trill_keeps_it() {
+        let folder = Path::new("profile");
+        assert_eq!(scans_kept_in(&Storage::User, Some(folder)), None);
+        // A profile keeps it beside its settings.
+        let at = Storage::At { settings: folder.join("settings.json"), library_index: None };
+        assert_eq!(scans_kept_in(&at, Some(folder)), Some(folder.to_path_buf()));
+        // A run that keeps nothing of the user's keeps it in the temporary
+        // folder, the same one every time, so that the next run finds it.
+        let scratch = scans_kept_in(&Storage::Nowhere, None).expect("a folder of its own");
+        assert!(scratch.starts_with(std::env::temp_dir()), "{}", scratch.display());
+        assert_eq!(scans_kept_in(&Storage::Nowhere, None), Some(scratch));
     }
 }
