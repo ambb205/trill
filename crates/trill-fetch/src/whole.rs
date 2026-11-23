@@ -182,7 +182,14 @@ mod tests {
     #[test]
     fn a_program_ended_by_a_signal_says_which_and_one_that_ended_by_itself_says_none() {
         let ended = |script: &str| Command::new("sh").args(["-c", script]).status().unwrap();
-        assert_eq!(ended_by_signal(&ended("kill -ABRT $$")), Some(format!("signal {}, SIGABRT", libc::SIGABRT)));
+        // A signal it names. (On macOS not an abort, of which the system
+        // keeps a crash report, and a test leaves nothing behind.)
+        let (word, signal, name) = if cfg!(target_os = "macos") {
+            ("TERM", libc::SIGTERM, "SIGTERM")
+        } else {
+            ("ABRT", libc::SIGABRT, "SIGABRT")
+        };
+        assert_eq!(ended_by_signal(&ended(&format!("kill -{word} $$"))), Some(format!("signal {signal}, {name}")));
         assert_eq!(ended_by_signal(&ended("kill -USR1 $$")), Some(format!("signal {}", libc::SIGUSR1)));
         assert_eq!(ended_by_signal(&ended("exit 3")), None);
     }
