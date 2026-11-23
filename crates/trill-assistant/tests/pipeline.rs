@@ -1056,10 +1056,9 @@ fn dropping_the_conversation_stops_the_turn_in_progress() {
     assert!(stage.helper_has_stopped());
 }
 
-/// On Windows a job object is what makes this hold, on macOS a keeper in the
-/// CLI's process group. Elsewhere the CLI is left to notice that its output
-/// pipe has gone.
-#[cfg(any(windows, target_os = "macos"))]
+/// On Windows a job object is what makes this hold, on Unix a keeper in the
+/// CLI's process group.
+#[cfg(any(windows, unix))]
 #[test]
 fn the_cli_dies_with_the_program_that_started_it() {
     let stage = Stage::new("host-killed");
