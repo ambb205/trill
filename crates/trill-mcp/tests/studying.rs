@@ -395,10 +395,9 @@ async fn a_model_that_fails_or_takes_its_process_down_is_a_sentence_and_the_serv
     let failed = ok(client, "study", json!({ "action": "report", "study": id, "wait_seconds": 120 })).await;
     assert_eq!(failed["state"], "failed", "{failed}");
     let error = failed["error"].as_str().unwrap();
-    assert!(
-        error.starts_with("the process that studies went down while finding the beat (it ended with code 0x"),
-        "{error}"
-    );
+    // Windows ends a process that aborts with a code; Unix with a signal, and no code.
+    let how = if cfg!(windows) { "(it ended with code 0x" } else { "(it was ended by signal 6, SIGABRT)" };
+    assert!(error.starts_with(&format!("the process that studies went down while finding the beat {how}")), "{error}");
     assert!(error.contains("Trill is as it was, and every stage of the study that had finished is kept"), "{error}");
     assert_eq!(failed["stems"].as_array().unwrap().len(), 4);
     let unread = fails(client, "listen", json!({ "study": id })).await;

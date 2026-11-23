@@ -182,8 +182,10 @@ fn a_model_that_takes_its_process_down_costs_a_sentence() {
     let folder = study_in(root.path());
     let (outcome, _) = run(&folder, Script { crash_at: Some(Stage::Words), ..script() }, None, None);
     let Outcome::Failed(sentence) = outcome else { panic!("{outcome:?}") };
+    // Windows ends a process that aborts with a code; Unix with a signal, and no code.
+    let how = if cfg!(windows) { "(it ended with code 0x" } else { "(it was ended by signal 6, SIGABRT)" };
     assert!(
-        sentence.starts_with("the process that studies went down while writing down the words (it ended with code 0x"),
+        sentence.starts_with(&format!("the process that studies went down while writing down the words {how}")),
         "{sentence}"
     );
     assert!(

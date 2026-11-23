@@ -98,6 +98,10 @@ pub enum Said {
     Done,
     /// It could not, and why.
     Failed(String),
+    /// The most memory it held, in bytes: said by the process itself just
+    /// before it ends, where a process that has ended can no longer be
+    /// asked (Linux; Windows can be, and it is not said there).
+    Held(u64),
 }
 
 /// A process that studies, as whoever started it has it.
@@ -291,17 +295,24 @@ pub fn attend(job: &mut Job, limit: Option<u64>, stop: &AtomicBool, on: &mut dyn
                     Said::Checked(found) => checked = Some(found),
                     Said::Done => break checked.take().map_or(Outcome::Done, Outcome::Checked),
                     Said::Failed(why) => break Outcome::Failed(why),
+                    Said::Held(peak) => held.peak = held.peak.max(peak),
                     Said::Hello(_) | Said::Progress(_) | Said::Device(_) | Said::Cards(_) => {}
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
             // Its output closed without a word on how it ended: it went down.
             Err(RecvTimeoutError::Disconnected) => {
-                let code = job.process.wait().ok().and_then(|status| status.code());
+                let status = job.process.wait().ok();
+                let code = status.and_then(|status| status.code());
+                // On Unix one that aborts or faults is ended by a signal, and has no code.
+                let signal = status.as_ref().and_then(trill_fetch::ended_by_signal);
                 // What it said last is on its way through another thread.
                 std::thread::sleep(LOOK_EVERY);
                 let words = job.words.lock().trim().to_owned();
-                let code = code.map_or(String::new(), |code| format!(" (it ended with code {:#x})", code as u32));
+                let code = match signal {
+                    Some(signal) => format!(" (it was ended by {signal})"),
+                    None => code.map_or(String::new(), |code| format!(" (it ended with code {:#x})", code as u32)),
+                };
                 let mut sentence = format!(
                     "the process that studies went down{}{code}. Trill is as it was, and every stage of the study that had \
                      finished is kept: run it again to take it up there",
@@ -425,6 +436,10 @@ pub fn run_if_requested() {
             ))
         })
     });
+    #[cfg(not(windows))]
+    if let Some(own) = room::held_by(std::process::id()) {
+        say(&Said::Held(own.peak));
+    }
     match ended {
         Ok(()) => say(&Said::Done),
         Err(why) => say(&Said::Failed(why)),
