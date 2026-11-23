@@ -1,11 +1,9 @@
 //! The plugin main thread where it has no operating system event queue to
 //! serve: it simply sleeps between jobs.
 //!
-//! This is what Linux and macOS get until plugin editors are hosted there.
-//! On macOS a run loop only works on the process's first thread, so
-//! editors will need the application to lend it; on Linux plugins bring
-//! their own event loop or use CLAP's timer and fd extensions, which the
-//! thread's idle processing would serve.
+//! Windows, macOS and Linux each have a loop of their own
+//! (`windows.rs`, `macos.rs`, `linux.rs`); this is what any other system
+//! gets, where plugin editors are not hosted.
 
 use std::io;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};

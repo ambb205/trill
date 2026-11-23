@@ -25,6 +25,8 @@ use eframe::NativeOptions;
 pub(super) fn keep_out_of_sight(options: &mut NativeOptions) {
     #[cfg(target_os = "linux")]
     {
+        // A plugin's own window, asked for at start, is kept out of sight as well.
+        trill_plugins::keep_editors_out_of_sight();
         let x = std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty());
         if !x {
             log::warn!(

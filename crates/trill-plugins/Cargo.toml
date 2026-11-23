@@ -46,6 +46,14 @@ md5 = "0.8"
 # The plugin main thread runs a Win32 message loop and hosts the windows
 # of plugin editors, the scanner process turns off crash dialogs, and VST3
 # preset files are looked for in the user's documents, wherever those are.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The plugin thread's wait (`poll`, an eventfd), and the X connection of an
+# editor's window, which is X11 also on a Wayland desktop (through the X it
+# runs beside itself), as plugins draw nothing else. Both in the tree
+# already, through other crates.
+libc = "0.2"
+x11rb = "0.13"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

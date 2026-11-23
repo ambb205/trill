@@ -199,9 +199,14 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
 What Windows has and Linux has not, yet. Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64; what runs
 there and how it was checked is in [Building and testing](development.md#on-linux).
 
-- Plugin editors. Opening one says that they are not supported on this system yet. The plugins installed in
-  `~/.clap`, `/usr/lib/clap`, `~/.vst3` and `/usr/lib/vst3` are found, scanned, played, rendered and given their
-  presets (tried on Surge XT in both formats).
+- All of plugin editors. An editor opens in an X window of its own (through Xwayland on a Wayland desktop), which
+  goes behind Trill's window as any other window does; Surge XT's open in both formats and what is done in them
+  reaches the song. Not yet: what a CLAP plugin asks of the host to hear of its own connections
+  (`posix-fd-support`) and what a VST3 plugin asks for its timers and connections (`IRunLoop`), which plugins
+  built on Steinberg's own interface library need to draw at all; the scale an editor is told (1: Surge XT reads
+  the display's resolution itself); and, where there is no X server, more than the sentence opening one gives.
+  The plugins installed in `~/.clap`, `/usr/lib/clap`, `~/.vst3` and `/usr/lib/vst3` are found, scanned,
+  played, rendered and given their presets (tried on Surge XT in both formats).
 - Real-time scheduling where neither the user's limit nor RealtimeKit gives it. The threads then run at an
   ordinary priority, and a song that falls short says so with what the user can do.
 - Taking an output for Trill alone (exclusive mode). Asked for, it says the device cannot be taken exclusively on

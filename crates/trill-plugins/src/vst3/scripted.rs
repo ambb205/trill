@@ -805,6 +805,14 @@ mod view_timer {
     pub(super) fn stop(_view: &super::ViewState) {}
 }
 
+/// The kind of window a view is put into on this system, as the SDK names it.
+#[cfg(windows)]
+const PLATFORM_TYPE: &CStr = c"HWND";
+#[cfg(target_os = "macos")]
+const PLATFORM_TYPE: &CStr = c"NSView";
+#[cfg(not(any(windows, target_os = "macos")))]
+const PLATFORM_TYPE: &CStr = c"X11EmbedWindowID";
+
 /// A scripted plugin's view. With `SCALES` it takes its monitor's scale
 /// from the host; without, it has no interface to be told by.
 struct View<const SCALES: bool> {
@@ -831,9 +839,7 @@ impl<const SCALES: bool> Drop for View<SCALES> {
 impl<const SCALES: bool> IPlugViewTrait for View<SCALES> {
     unsafe fn isPlatformTypeSupported(&self, r#type: FIDString) -> tresult {
         // SAFETY: the host passes a C string, or null.
-        // The kind of window this system has, as a real view says.
-        let own = if cfg!(target_os = "macos") { c"NSView" } else { c"HWND" };
-        let supported = !r#type.is_null() && unsafe { CStr::from_ptr(r#type) } == own;
+        let supported = !r#type.is_null() && unsafe { CStr::from_ptr(r#type) } == PLATFORM_TYPE;
         if supported { kResultTrue } else { kResultFalse }
     }
 

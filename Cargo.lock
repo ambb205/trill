@@ -5147,6 +5147,7 @@ dependencies = [
  "clack-host",
  "clack-plugin",
  "clap-sys",
+ "libc",
  "libloading 0.8.9",
  "log",
  "md5",
@@ -5162,6 +5163,7 @@ dependencies = [
  "trill-engine",
  "vst3",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

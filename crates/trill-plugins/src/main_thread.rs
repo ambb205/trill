@@ -46,7 +46,18 @@ use std::time::{Duration, Instant};
 #[path = "main_thread/windows.rs"]
 mod os_events;
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+#[path = "main_thread/linux.rs"]
+mod os_events;
+
+/// On Linux an editor's window has the thread wake for its connection.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use os_events::waits;
+#[cfg(target_os = "linux")]
+pub(crate) use os_events::{unwatch, watch};
+
+// A system that is none of the three: the thread only sleeps between jobs.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[path = "main_thread/portable.rs"]
 mod os_events;
 

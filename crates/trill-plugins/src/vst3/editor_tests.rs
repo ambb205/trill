@@ -5,12 +5,14 @@
 //! plugin, except that this crate's unit tests never put a window on
 //! screen. What a user would do with the mouse is done to them by
 //! [`simulate`].
+// Some of what is used here only the tests that wait for `IRunLoop` on Linux use.
+#![cfg_attr(not(windows), allow(unused_imports))]
 
 use super::Vst3Factory;
 use super::scripted::{self, Action, ViewSeen, kind};
 use crate::editor::{Size, TELLS_SCALE, simulate};
 use crate::plugin_thread::plugin_thread;
-use crate::test_support::{eventually, unique_title, within};
+use crate::test_support::{eventually, needs_windows, unique_title, within};
 use std::time::Duration;
 use trill_core::device::{
     DeviceFactory, DeviceInstance, EditorError, EditorOptions, ParamEdit, ParamEditKind, ProcessInfo,
@@ -114,6 +116,7 @@ fn block(instance: &mut DeviceInstance, fill: f32) -> Vec<f32> {
 
 #[test]
 fn an_editor_opens_in_a_window_of_the_views_size_and_closes_again() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -152,6 +155,7 @@ fn an_editor_opens_in_a_window_of_the_views_size_and_closes_again() {
 
 #[test]
 fn opening_an_open_editor_keeps_the_one_window() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -167,6 +171,7 @@ fn opening_an_open_editor_keeps_the_one_window() {
 
 #[test]
 fn the_user_closing_the_window_detaches_the_view_and_the_window_remembers_its_place() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -188,6 +193,7 @@ fn the_user_closing_the_window_detaches_the_view_and_the_window_remembers_its_pl
 
 #[test]
 fn an_editor_goes_with_its_controller_and_with_its_device() {
+    needs_windows!();
     let factory = factory();
 
     // The session lets go of the controller when the device leaves the
@@ -220,6 +226,7 @@ fn an_editor_goes_with_its_controller_and_with_its_device() {
 
 #[test]
 fn several_editors_are_open_at_once_and_none_outlives_the_factory() {
+    needs_windows!();
     within(Duration::from_secs(60), || {
         let factory = factory();
         let mut instances: Vec<DeviceInstance> = (0..3).map(|_| create(&factory, kind::EDITOR)).collect();
@@ -241,6 +248,7 @@ fn several_editors_are_open_at_once_and_none_outlives_the_factory() {
 
 #[test]
 fn a_view_that_cannot_be_attached_is_an_error_and_leaves_no_window() {
+    needs_windows!();
     let factory = factory();
     let mut failing = create(&factory, kind::FAILS_ATTACH);
     let serial = serial(&mut failing);
@@ -261,6 +269,7 @@ fn a_view_that_cannot_be_attached_is_an_error_and_leaves_no_window() {
 
 #[test]
 fn a_plugin_without_a_view_turns_out_to_have_no_editor() {
+    needs_windows!();
     let factory = factory();
     // VST3 cannot be asked in advance: a plugin with an edit controller
     // may have a view, and says so when it is asked for one.
@@ -283,16 +292,26 @@ fn a_plugin_without_a_view_turns_out_to_have_no_editor() {
 
 #[test]
 fn the_user_resizes_an_editor_only_to_sizes_its_view_accepts() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
     let window = open(&mut instance, &options("resizable"));
     assert!(simulate::is_resizable(window));
 
-    // While an edge is dragged, the view is asked about every size.
-    assert_eq!(simulate::drag_to(window, Size::new(703, 517)), Size::new(700, 510));
-    assert_eq!(simulate::drag_to(window, Size::new(50, 50)), Size::new(150, 100), "no smaller than the view allows");
-    assert_eq!(simulate::client_size(window), scaled_size(serial), "dragging alone resizes nothing");
+    // While an edge is dragged, Windows asks the plugin about every size (`WM_SIZING`), and AppKit the
+    // window's delegate (`windowWillResize:toSize:`); an X window manager resizes by the size hints and tells
+    // the program afterwards, so there is nothing to ask then.
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert_eq!(simulate::drag_to(window, Size::new(703, 517)), Size::new(700, 510));
+        assert_eq!(
+            simulate::drag_to(window, Size::new(50, 50)),
+            Size::new(150, 100),
+            "no smaller than the view allows"
+        );
+        assert_eq!(simulate::client_size(window), scaled_size(serial), "dragging alone resizes nothing");
+    }
 
     // When the mouse is released, the view is given the size, and the
     // window follows what the view makes of it.
@@ -318,8 +337,12 @@ fn the_user_resizes_an_editor_only_to_sizes_its_view_accepts() {
     assert_eq!(simulate::client_size(window), natural);
 }
 
+// The scripted view does what its user did on its timer, which a view on Linux has from the host's
+// `IRunLoop`: not given yet (the next stage of editors on Linux).
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn a_view_that_asks_for_another_size_gets_it_and_is_told() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -352,6 +375,7 @@ fn a_view_that_asks_for_another_size_gets_it_and_is_told() {
 
 #[test]
 fn a_view_that_asks_for_its_size_while_it_is_attached_gets_it() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::ASKS_WHEN_ATTACHED);
     let serial = serial(&mut instance);
@@ -366,8 +390,12 @@ fn a_view_that_asks_for_its_size_while_it_is_attached_gets_it() {
     assert_eq!(view(serial).resize_results, [kResultOk]);
 }
 
+// The scripted view does what its user did on its timer, which a view on Linux has from the host's
+// `IRunLoop`: not given yet (the next stage of editors on Linux).
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn a_view_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -386,11 +414,13 @@ fn a_view_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
     assert_eq!(given.width % 10 + given.height % 10, 0, "a size the view itself accepts");
 }
 
-/// (A monitor's scale is told to a view on Windows; on macOS AppKit draws
-/// a view at its screen's resolution.)
+// Windows tells a window that it moved to a monitor of another resolution (`WM_DPICHANGED`). On X
+// an editor is told a scale of 1, and a plugin reads the display's resolution itself (`editor/x11.rs`); on
+// macOS AppKit draws a view at its screen's resolution and no scale is told.
 #[cfg(windows)]
 #[test]
 fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);
@@ -406,8 +436,12 @@ fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
 
 // ---- edits ---------------------------------------------------------------------
 
+// The scripted view does what its user did on its timer, which a view on Linux has from the host's
+// `IRunLoop`: not given yet (the next stage of editors on Linux).
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn an_edit_made_in_the_view_is_heard_and_reported_with_its_gesture() {
+    needs_windows!();
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
     let serial = serial(&mut instance);

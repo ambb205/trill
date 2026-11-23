@@ -101,6 +101,18 @@ pub(crate) fn unique_title(what: &str) -> String {
     format!("{what} #{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Returns from an editor test where the system has no windows to give it:
+/// on Linux, where no X server can be reached.
+macro_rules! needs_windows {
+    () => {
+        #[cfg(target_os = "linux")]
+        if !crate::editor::simulate::there_is_an_x_server() {
+            return;
+        }
+    };
+}
+pub(crate) use needs_windows;
+
 /// On macOS this crate's unit tests drive their plugins from the process's
 /// first thread, as every program of Trill's does there
 /// ([`crate::first_thread`]): an editor's window is AppKit's, which is used

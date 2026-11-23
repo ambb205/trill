@@ -165,11 +165,14 @@ fn find(descriptors: &[DeviceDescriptor], wanted: &str) -> Result<DeviceDescript
 /// Processes blocks at the pace a sound card would ask for them, until
 /// told to stop: what the engine's audio thread does to a device, without
 /// the engine and without making a sound.
-fn drive(mut processor: Box<dyn DeviceProcessor>, note: bool, stop: Arc<AtomicBool>) {
+/// Plays the plugin in real time until `stop`, and says how it kept up:
+/// how many blocks were done later than their time, and the longest one
+/// took, over the whole run, the editor's opening included.
+fn drive(mut processor: Box<dyn DeviceProcessor>, note: bool, stop: Arc<AtomicBool>) -> String {
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     let block_time = Duration::from_secs_f64(BLOCK as f64 / SAMPLE_RATE);
     let started = Instant::now();
-    let mut blocks = 0u32;
+    let (mut blocks, mut late, mut longest) = (0u32, 0u32, Duration::ZERO);
     while !stop.load(Ordering::Relaxed) {
         let info = ProcessInfo {
             sample_rate: SAMPLE_RATE,
@@ -185,12 +188,20 @@ fn drive(mut processor: Box<dyn DeviceProcessor>, note: bool, stop: Arc<AtomicBo
             if note && blocks == 20 { &[Event::new(0, EventKind::NoteOn { pitch: 60, velocity: 0.8 })] } else { &[] };
         left.fill(0.0);
         right.fill(0.0);
+        let began = Instant::now();
         processor.process(&info, events, &mut left, &mut right);
+        longest = longest.max(began.elapsed());
         blocks += 1;
-        if let Some(ahead) = (block_time * blocks).checked_sub(started.elapsed()) {
-            thread::sleep(ahead);
+        match (block_time * blocks).checked_sub(started.elapsed()) {
+            Some(ahead) => thread::sleep(ahead),
+            None => late += 1,
         }
     }
+    format!(
+        "{blocks} blocks of {:.1} ms in real time, {late} done later than their time; the longest took {:.2} ms",
+        block_time.as_secs_f64() * 1000.0,
+        longest.as_secs_f64() * 1000.0
+    )
     // `processor` drops here, which tears the plugin down.
 }
 
@@ -414,7 +425,7 @@ fn run(options: &Options) -> Result<ExitCode, String> {
     println!("close: the editor is open: {} after {:.0?}", controller.is_editor_open(), closing.elapsed());
     drop(controller);
     stop.store(true, Ordering::Relaxed);
-    audio.join().map_err(|_| "the audio thread panicked")?;
+    println!("audio: {}", audio.join().map_err(|_| "the audio thread panicked")?);
     // Off Windows there is no owner window, and nothing to drop.
     #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
     drop(owner);
@@ -880,9 +891,171 @@ mod platform {
     }
 }
 
-/// Editors are hosted on Windows and macOS so far; elsewhere the program
-/// gets as far as the host telling it so.
-#[cfg(not(any(windows, target_os = "macos")))]
+/// On Linux the editor is an X window. For a picture it is kept out of
+/// sight (a window the window manager leaves alone, far off every screen),
+/// and a drag is events sent to the plugin's own window under the point:
+/// the real pointer and the keyboard are left alone.
+#[cfg(target_os = "linux")]
+mod platform {
+    use trill_core::device::EditorImage;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ButtonPressEvent, ButtonReleaseEvent, ConnectionExt,
+        EventMask, KeyButMask, MOTION_NOTIFY_EVENT, MotionNotifyEvent,
+    };
+    use x11rb::rust_connection::RustConnection;
+
+    pub fn be_dpi_aware() {
+        // A picture's editor is never on screen and never takes the keyboard.
+        if std::env::args().any(|argument| argument == "--screenshot") {
+            trill_plugins::keep_editors_out_of_sight();
+        }
+    }
+
+    pub struct Owner;
+
+    impl Owner {
+        pub fn create() -> Self {
+            Self
+        }
+
+        pub fn handle(&self) -> isize {
+            0
+        }
+
+        pub fn pump(&self) {}
+    }
+
+    pub struct Stray {
+        pub description: String,
+    }
+
+    pub fn stray_windows(_editor: &str) -> Vec<Stray> {
+        Vec::new()
+    }
+
+    pub fn capture(_stray: &Stray) -> Option<EditorImage> {
+        None
+    }
+
+    pub fn keep_in_front(_title: &str) {}
+
+    fn connect() -> Option<(RustConnection, u32)> {
+        let (conn, screen) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots[screen].root;
+        Some((conn, root))
+    }
+
+    /// The editor's window, by its title, among the top-level windows.
+    fn find(conn: &RustConnection, root: u32, title: &str) -> Option<u32> {
+        let tree = conn.query_tree(root).ok()?.reply().ok()?;
+        tree.children.into_iter().find(|window| {
+            let name = conn.get_property(false, *window, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 1024);
+            name.ok().and_then(|cookie| cookie.reply().ok()).is_some_and(|reply| reply.value == title.as_bytes())
+        })
+    }
+
+    pub fn describe(title: &str) -> Option<String> {
+        let (conn, root) = connect()?;
+        let window = find(&conn, root, title)?;
+        let geometry = conn.get_geometry(window).ok()?.reply().ok()?;
+        let children = conn.query_tree(window).ok()?.reply().ok()?.children;
+        Some(format!(
+            "X window {window:#x} at {},{} of {}x{}, with {} window(s) of the plugin's in it",
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            children.len()
+        ))
+    }
+
+    /// The deepest window under `at` (in the editor window's own pixels),
+    /// and `at` in that window's pixels.
+    fn under(conn: &RustConnection, window: u32, at: (i32, i32)) -> Option<(u32, i16, i16)> {
+        let (mut window, mut x, mut y) = (window, at.0 as i16, at.1 as i16);
+        loop {
+            let children = conn.query_tree(window).ok()?.reply().ok()?.children;
+            let mut deeper = None;
+            for child in children.into_iter().rev() {
+                let g = conn.get_geometry(child).ok()?.reply().ok()?;
+                let inside = x >= g.x && y >= g.y && x < g.x + g.width as i16 && y < g.y + g.height as i16;
+                if inside {
+                    deeper = Some((child, x - g.x, y - g.y));
+                    break;
+                }
+            }
+            match deeper {
+                Some(found) => (window, x, y) = found,
+                None => return Some((window, x, y)),
+            }
+        }
+    }
+
+    pub fn drag(title: &str, from: (i32, i32), to: (i32, i32)) -> String {
+        let Some((conn, root)) = connect() else { return "no X server".into() };
+        let Some(editor) = find(&conn, root, title) else { return "no window of that title".into() };
+        let Some((target, x, y)) = under(&conn, editor, from) else { return "nothing under the point".into() };
+        let (dx, dy) = ((to.0 - from.0) as i16, (to.1 - from.1) as i16);
+        let at = |step: i16, steps: i16| (x + dx * step / steps, y + dy * step / steps);
+        let send = |event: [u8; 32], mask: EventMask| {
+            let _ = conn.send_event(true, target, mask, event);
+        };
+        let press = ButtonPressEvent {
+            response_type: BUTTON_PRESS_EVENT,
+            detail: 1,
+            sequence: 0,
+            time: 0,
+            root,
+            event: target,
+            child: 0,
+            root_x: 0,
+            root_y: 0,
+            event_x: x,
+            event_y: y,
+            state: KeyButMask::default(),
+            same_screen: true,
+        };
+        send(press.into(), EventMask::BUTTON_PRESS);
+        let steps = 12;
+        for step in 1..=steps {
+            let (event_x, event_y) = at(step, steps);
+            let motion = MotionNotifyEvent {
+                response_type: MOTION_NOTIFY_EVENT,
+                detail: x11rb::protocol::xproto::Motion::NORMAL,
+                sequence: 0,
+                time: 0,
+                root,
+                event: target,
+                child: 0,
+                root_x: 0,
+                root_y: 0,
+                event_x,
+                event_y,
+                state: KeyButMask::BUTTON1,
+                same_screen: true,
+            };
+            send(motion.into(), EventMask::BUTTON_MOTION | EventMask::POINTER_MOTION);
+            let _ = conn.flush();
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        let (event_x, event_y) = at(steps, steps);
+        let release = ButtonReleaseEvent {
+            response_type: BUTTON_RELEASE_EVENT,
+            state: KeyButMask::BUTTON1,
+            event_x,
+            event_y,
+            ..ButtonReleaseEvent::from(press)
+        };
+        send(release.into(), EventMask::BUTTON_RELEASE);
+        let _ = conn.flush();
+        format!("events sent to window {target:#x} from {x},{y}")
+    }
+}
+
+/// Editors are hosted on Windows, macOS and Linux so far; elsewhere the
+/// program gets as far as the host telling it so.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod platform {
     use trill_core::device::EditorImage;
 
