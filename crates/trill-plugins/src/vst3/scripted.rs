@@ -814,7 +814,60 @@ mod view_timer {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+/// On macOS a timer of the thread's run loop, as a real view there has
+/// (JUCE's views do).
+#[cfg(target_os = "macos")]
+mod view_timer {
+    use super::*;
+    use crate::main_thread::cf::*;
+    use std::ffi::c_void;
+
+    const PERIOD_S: f64 = 0.005;
+
+    extern "C" fn tick(timer: *mut c_void, _info: *mut c_void) {
+        let views: Vec<(u64, Arc<ViewState>)> = {
+            let views = VIEWS.lock().unwrap();
+            views.iter().flatten().map(|(serial, view)| (*serial, view.clone())).collect()
+        };
+        for (serial, view) in views {
+            if view.timer.load(Ordering::Relaxed) == timer as usize {
+                view.tick(serial);
+            }
+        }
+    }
+
+    pub(super) fn start(view: &ViewState) {
+        // SAFETY: a repeating timer of the calling thread's loop, which the
+        // loop holds from here; `stop` takes it away on the same thread.
+        let timer = unsafe {
+            let mut context = Context::of(std::ptr::null_mut());
+            let timer = CFRunLoopTimerCreate(
+                std::ptr::null(),
+                CFAbsoluteTimeGetCurrent() + PERIOD_S,
+                PERIOD_S,
+                0,
+                0,
+                tick,
+                &mut context,
+            );
+            CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes);
+            CFRelease(timer.cast_const());
+            timer
+        };
+        view.timer.store(timer as usize, Ordering::Relaxed);
+    }
+
+    pub(super) fn stop(view: &ViewState) {
+        let timer = view.timer.swap(0, Ordering::Relaxed);
+        if timer != 0 {
+            // SAFETY: the timer is one `start` made on this thread, which its
+            // loop still holds.
+            unsafe { CFRunLoopTimerInvalidate(timer as *mut c_void) };
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod view_timer {
     pub(super) fn start(_view: &super::ViewState) {}
 

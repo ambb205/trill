@@ -49,6 +49,9 @@ use x11rb::wrapper::ConnectionExt as _;
 /// Whether this platform hosts plugin editors.
 pub(crate) const SUPPORTED: bool = true;
 
+/// Whether a view is told how many of the monitor's pixels one of its own is.
+pub(crate) const TELLS_SCALE: bool = true;
+
 /// The class an editor's window is known by.
 const CLASS: &[u8] = b"trill-plugin-editor\0Trill\0";
 /// What a window is created with, before its view has said what it wants.

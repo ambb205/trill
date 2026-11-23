@@ -49,6 +49,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// Whether this platform hosts plugin editors.
 pub(crate) const SUPPORTED: bool = true;
 
+/// Keeps editor windows out of sight, where a picture of one can be taken
+/// so (macOS). Nothing here: a picture of an editor is taken off the screen.
+pub(crate) fn keep_out_of_sight() {}
+
+/// Whether a view is told how many of the monitor's pixels one of its own is.
+pub(crate) const TELLS_SCALE: bool = true;
+
 /// Whether editor windows are put on screen. In this crate's own unit
 /// tests they are not: the windows are real, and are created, resized and
 /// destroyed like any other, but nobody running the tests sees one.
