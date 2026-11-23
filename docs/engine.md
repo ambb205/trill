@@ -159,7 +159,23 @@ built-in song spread over eight threads from its first block (`keeps_up -- built
 
 The device's own thread is in the class too (priority 20, from 0). Where neither way is open, a song that falls
 short says so in its sentence, with what the user can do (install RealtimeKit, or give the user a real-time
-limit). A device that fails costs the buffer it failed
+limit).
+
+The kernel ends a program with SIGKILL, without a word, when a real-time thread of it runs past a limit without
+sleeping (`RLIMIT_RTTIME`; RealtimeKit asks for 200 ms). On this machine a thread given the class and kept busy
+was killed 217 ms after it began. A song that takes more than its buffers' time never lets the device's thread
+sleep, and one block of a plugin that takes long does the same, so Trill keeps the limit's soft half at 100 ms:
+there the kernel says SIGXCPU first, and Trill takes every thread it raised out of real time and says so (the
+threads run at an ordinary priority until the device is opened again). The same thread, measured again, was taken
+out of real time 101 ms into its work, went on for its 400 ms, and the program lived. The busy table above came out
+the same with this in place.
+
+RealtimeKit's bounds are this user's, shared by all of their programs (by default 25 threads at once and 25
+requests in 20 seconds), so it is asked only for a real device's stream or by a program that measures as one
+(`keeps_up`), never by a test or for a stand-in, and the device's and the input's threads are asked for before
+the team's. A song alone gets all it asks for here (eight threads, beside eight that other programs of the user
+held); four `keeps_up` at once, 32 threads, were each given the device's thread first and then what was left, the
+rest running at an ordinary priority, and each said how many of each it had. A device that fails costs the buffer it failed
 in, on whichever thread, and what was played by hand in that buffer is let go of, so that the key it failed on
 is not played to it again with every buffer after.
 
