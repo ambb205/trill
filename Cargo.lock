@@ -5019,6 +5019,7 @@ name = "trill-engine"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "libc",
  "log",
  "parking_lot",
  "rtrb",
