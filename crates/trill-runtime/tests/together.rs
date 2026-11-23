@@ -9,6 +9,7 @@ use trill_core::merge::{Change, Floors, Op, Said, Stamp, TrackOp, TrackSet};
 use trill_core::{ChainRef, ClipId, TrackId, TrackKind};
 use trill_engine::AudioBackend;
 use trill_runtime::{Meeting, MeetingPointSet, Mine, Reach, Runtime, RuntimeOptions, Storage};
+use trill_together::line::{Line, Pace};
 use trill_together::{Invitation, Message, PROTOCOL, Person, meet, secure};
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -581,6 +582,91 @@ fn a_link_that_is_lost_comes_back_by_itself_and_what_each_did_meanwhile_is_merge
     ben.leave();
     eventually("Ben is gone", || ada.together().people.is_empty() && !ben.together().is_on());
     assert!(said(&ada).ends_with("Ben left."), "{}", said(&ada));
+}
+
+/// Two programs in a song through a meeting point, each on a line of its
+/// own home to it: Ada, who shares, with her line, and Ben with his.
+fn each_on_a_line(folder: &Path, point: &MeetingPoint) -> (Runtime, Runtime, Line, Line, ClipId) {
+    let (ada, _, verse) = with_a_song(folder, "Ada");
+    let ben = start(folder, "Ben");
+    let pace = Pace::of(20_000, 20_000, 5);
+    let (hers, his) = (Line::to(&point.address, pace).unwrap(), Line::to(&point.address, pace).unwrap());
+    ada.set_meeting_point(&hers.address(), Some(&point.key.to_string())).unwrap();
+    let invitation = ada.share_through_meeting_point().unwrap();
+    eventually("the meeting is open", || matches!(ada.together().meeting, Some((_, Meeting::Held))));
+    ben.join(&his.carries(&Invitation::parse(&invitation).unwrap()).to_string(), false).unwrap();
+    eventually("Ben has the song", || same(&ada, &ben) && ben.together().people.len() == 1);
+    eventually("Ada sees him", || ada.together().people.len() == 1);
+    (ada, ben, hers, his, verse)
+}
+
+/// About 9 connections.
+#[test]
+fn whoever_shares_and_loses_their_line_without_a_word_is_missed_within_seconds_and_met_again() {
+    let folder = tempfile::tempdir().unwrap();
+    let point = MeetingPoint::start(meet::Limits::default());
+    let (ada, ben, hers, _his, verse) = each_on_a_line(folder.path(), &point);
+
+    // Ada's line goes down: her connections end where she is, and no word
+    // of it reaches the meeting point or Ben. His own connection is as
+    // good as it was, and what he says goes into it as before.
+    hers.lose();
+    eventually("Ada knows", || ada.together().people.is_empty());
+    assert!(said(&ada).contains("Ben is away: the connection was lost"), "{}", said(&ada));
+    // Each goes on meanwhile.
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+
+    // Ben's program hears nothing from hers, and takes that for what it
+    // is within seconds: it lets go and asks again by itself. Her program
+    // holds the meeting again by then (her line is back), and they are in
+    // the song together with what each did.
+    let began = Instant::now();
+    eventually("Ben's program has missed her", || said(&ben).contains("The connection to Ada was lost"));
+    assert!(said(&ben).contains("nothing was heard over it for 10 seconds"), "{}", said(&ben));
+    assert!(began.elapsed() < Duration::from_secs(20), "it took {:?} to miss her", began.elapsed());
+    eventually("they are in the song together again", || {
+        same(&ada, &ben)
+            && ada.together().people.len() == 1
+            && ben.together().people.len() == 1
+            && ben.together().away.is_empty()
+    });
+    assert_eq!(ada.session.lock().project().clip(verse).unwrap().notes().len(), 4);
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+    assert!(said(&ada).ends_with("Ben is back."), "{}", said(&ada));
+    assert_eq!(ada.together().connected, 1, "one connection to him, and none that is no longer one");
+}
+
+/// About 9 connections.
+#[test]
+fn whoever_joined_and_loses_their_line_is_back_before_the_other_was_told_anything() {
+    let folder = tempfile::tempdir().unwrap();
+    let point = MeetingPoint::start(meet::Limits::default());
+    let (ada, ben, _hers, his, verse) = each_on_a_line(folder.path(), &point);
+    let before = said(&ada);
+
+    // Ben's line goes down and is there again: his program sees its
+    // connection end and asks again at once. Ada's program is sent no word
+    // of the end, and the connection it had to him is open as far as it
+    // can tell.
+    his.lose();
+    eventually("Ben's program knows", || said(&ben).contains("The connection to Ada was lost"));
+    ben.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(48, 4.0)])).unwrap();
+    ada.session.lock().edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
+    eventually("they are in the song together again", || {
+        same(&ada, &ben) && ben.together().people.len() == 1 && ben.together().away.is_empty()
+    });
+    assert_eq!(ada.session.lock().project().clip(verse).unwrap().notes().len(), 4);
+    assert!(said(&ben).contains("The connection is back: you are in the song with Ada."), "{}", said(&ben));
+
+    // Ada's program has let go of the connection that was no longer one,
+    // without a word: he was never away as far as she was told, so nothing
+    // is said of his return either, and nothing later says he is away.
+    eventually("the older connection is let go of", || ada.together().connected == 1);
+    assert_eq!(ada.together().people.len(), 1);
+    std::thread::sleep(Duration::from_secs(12));
+    assert_eq!(said(&ada), before, "nothing was said to her of any of it");
+    assert_eq!((ada.together().connected, ada.together().people.len()), (1, 1));
 }
 
 /// What stands between two programs on a way that can be cut: it passes

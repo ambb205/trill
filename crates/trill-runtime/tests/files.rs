@@ -918,6 +918,67 @@ fn a_file_is_asked_for_in_strides_and_not_a_piece_at_a_time() {
     assert!(!said(&ben).contains("no longer") && !said(&ben).contains("lost"), "{}", said(&ben));
 }
 
+/// 1 connection.
+#[test]
+fn however_many_files_a_program_hands_over_no_more_is_asked_of_it_at_once_than_of_one() {
+    // (What is asked for and has not arrived is what the other's own words
+    // about the song wait behind, on a line that is slower than the two
+    // programs. Asked for file by file, eight recordings were eight times
+    // that, and a fader moved meanwhile took seconds to arrive.)
+    let folder = tempfile::tempdir().unwrap();
+    let (eve, track, verse, _) = with_a_recording(folder.path(), "Eve");
+    let mut clips = vec![verse];
+    for number in 1..8u32 {
+        let take =
+            tone(folder.path().join("Eve's music").join(format!("take {number}.wav")), 200.0 + f64::from(number), 2.0);
+        clips.push(clip_by_hand(&eve, track, "Take", f64::from(number) * 4.0, &take));
+    }
+    let _ = eve.share(Reach::ThisMachine, 0).unwrap();
+    eventually("Eve's program has said what the files are", || {
+        clips.iter().all(|clip| file_of(&eve, *clip).1.is_some())
+    });
+    let files: Vec<Content> = clips.iter().map(|clip| file_of(&eve, *clip).1.unwrap().content()).collect();
+    let all: u64 = files.iter().map(|file| file.bytes).sum();
+    assert!(files.iter().all(|file| file.bytes > 2 * MAX_PIECE as u64) && all > 2_000_000, "eight recordings: {all}");
+    let song = eve.session.lock().whole_song();
+
+    // Someone who has all eight, and answers no question for a while.
+    let mut net = Net::new();
+    let invitation = net.listen(Reach::ThisMachine, 0).unwrap().to_string();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(Content, u64, u64)>::new()));
+    let (wanted, has) = (asked.clone(), files.clone());
+    std::thread::spawn(move || {
+        let until = Instant::now() + WAIT;
+        while Instant::now() < until {
+            match net.next(Duration::from_millis(100)) {
+                Some(Event::Open { link, .. }) => net.say(link, &hello(None)),
+                Some(Event::Heard { link, message: Message::Hello { .. } }) => {
+                    net.say(link, &Message::Song { text: song.clone() });
+                    net.say(link, &Message::Have { files: has.clone() });
+                }
+                Some(Event::Heard { message: Message::Want { file, at, len }, .. }) => {
+                    wanted.lock().unwrap().push((file, at, len));
+                }
+                Some(Event::Lost { .. }) => return,
+                _ => {}
+            }
+        }
+    });
+    let ben = start(folder.path(), "Ben");
+    ben.join(&invitation, false).unwrap();
+    eventually("Ben's program has asked for something", || !asked.lock().unwrap().is_empty());
+    std::thread::sleep(Duration::from_millis(1500));
+    let asked = asked.lock().unwrap().clone();
+    let together: u64 = asked.iter().map(|(_, _, len)| len).sum();
+    assert!(together <= 3 * MAX_PIECE as u64, "{together} bytes were asked for at once, of {} files", asked.len());
+    assert!(asked.iter().all(|(file, at, len)| files.contains(file) && at + len <= file.bytes), "{asked:?}");
+    // And of one file at a time, to its end: the most are whole the soonest.
+    let begun: std::collections::BTreeSet<&Content> = asked.iter().map(|(file, ..)| file).collect();
+    assert_eq!(begun.len(), 1, "one recording is begun, not all eight a little: {asked:?}");
+    assert!(!said(&ben).contains("no longer") && !said(&ben).contains("lost"), "{}", said(&ben));
+    assert_eq!(ben.together().files.len(), 8, "all eight are on their way, as far as Ben is shown");
+}
+
 /// 2 connections.
 #[test]
 fn above_what_the_user_set_files_wait_for_their_word_and_a_file_they_point_at_is_taken_if_it_is_the_file() {

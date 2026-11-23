@@ -409,6 +409,21 @@ impl Received {
     pub fn let_go(&mut self, file: &Content) {
         self.arriving.remove(file);
     }
+
+    /// Throws away what arrived of a file that is on its way: whoever
+    /// sent it was found to send what nobody asked for, and may have sent
+    /// other bytes than the file's where it was asked. (A part that holds
+    /// such bytes would be found out only when it is whole, with whoever
+    /// sent the rest of it in good faith taken for the one who did.)
+    pub fn throw_away(&mut self, file: &Content) {
+        if let Some(arriving) = self.arriving.remove(file) {
+            let part = arriving.part.clone();
+            let _ = arriving.file.set_len(0);
+            // (Closed first: a file that is open is not removed everywhere.)
+            drop(arriving);
+            let _ = std::fs::remove_file(part);
+        }
+    }
 }
 
 /// Where a file that is `is` lies in `dir`, a folder of files that came
@@ -756,5 +771,17 @@ mod tests {
         assert_eq!(received.begin(&other).unwrap(), Begun::From(MAX_PIECE as u64));
         assert_eq!(cross(&offered, &mut received, &other), Took::Other);
         assert!(!part.exists() && !received.home(&other).exists());
+
+        // What arrived from someone who then sent what nobody asked for is
+        // not gone on from: it is thrown away, and begun again it is at
+        // its beginning.
+        let (third, _) = offer(&theirs.file("third.flac", &bytes(3 * MAX_PIECE, 15)));
+        let (file, part) = (third.content(), dir.join(format!("{}.flac.{PART}", third.sha256)));
+        assert_eq!(received.begin(&third).unwrap(), Begun::From(0));
+        assert_eq!(received.take(&file, 0, &bytes(MAX_PIECE, 16)), Took::More(MAX_PIECE as u64));
+        assert!(part.exists());
+        received.throw_away(&file);
+        assert!(!part.exists(), "nothing of it is kept");
+        assert_eq!(received.begin(&third).unwrap(), Begun::From(0));
     }
 }

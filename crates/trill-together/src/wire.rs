@@ -18,7 +18,11 @@ use trill_core::{ClipId, TrackId};
 /// longer said by anyone, and a program that says it is let go of; what
 /// the file is (its hash, its length, its name) is a property of the
 /// clip, and the bytes are asked for by it ([`Message::Want`]).
-pub const PROTOCOL: u32 = 4;
+///
+/// 5: a connection that has nothing to say says that it is there
+/// ([`Message::Still`]), and one over which nothing is heard for a time is
+/// taken to be lost on the way.
+pub const PROTOCOL: u32 = 5;
 
 /// The most one message may be: a whole song with its plugins' states.
 pub const MAX_MESSAGE: usize = 256 << 20;
@@ -154,6 +158,11 @@ pub enum Message {
     Gone { person: u64 },
     /// The connection is being ended, and why.
     Bye { why: String },
+    /// Nothing: the connection is there. Said by a connection itself when
+    /// it has had nothing else to say for a moment, whatever the program
+    /// that holds it is busy with, so that a connection over which nothing
+    /// at all is heard is one that was lost on the way.
+    Still,
     /// Files of the song that the sender can hand over, each by what it
     /// is. Said of nothing the song does not play.
     Have { files: Vec<Content> },

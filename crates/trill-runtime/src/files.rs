@@ -60,14 +60,41 @@ const MAX_PENDING: u64 = 32 << 20;
 /// How long the thread that hands out waits when every connection it
 /// reads for has enough waiting.
 const DRAINING: Duration = Duration::from_millis(2);
-/// How many bytes are asked for ahead when a file begins to arrive, and
-/// the fewest that ever are.
-const FIRST_WINDOW: u64 = 256 << 10;
-const LEAST_WINDOW: u64 = 2 * MAX_PIECE as u64;
-/// How long what is asked for ahead should take to arrive: the window is
-/// what arrived in that time. What the other side has to say of the song
-/// meanwhile waits behind no more than this of a file.
-const AHEAD: Duration = Duration::from_millis(250);
+/// How many bytes are asked for ahead of one program when files begin to
+/// arrive from it, the fewest that ever are, and the most.
+const FIRST_WINDOW: u64 = 3 * MAX_PIECE as u64;
+const LEAST_WINDOW: u64 = 16 << 10;
+const MOST_WINDOW: u64 = 16 << 20;
+/// The fewest bytes that are asked for at once, of a file that has more.
+const LEAST_STRIDE: u64 = 8 << 10;
+/// How long what waits to be sent of files, at the program that hands
+/// them out, should take to arrive. Whatever that program has to say of
+/// the song goes ahead of the files in its own queue, and behind what its
+/// system and the line have taken already, which is as much as it was
+/// asked for: so what it says of the song waits behind no more than this
+/// of files, **however many files it is handing over**. What is asked
+/// for ahead is the connection's, and the files that come over it share
+/// it, in turn. (It was each file's once. With twelve recordings arriving
+/// at once over a line of one megabit a second, a fader the other moved
+/// then took two seconds to arrive, where it takes half a second with one
+/// recording.)
+///
+/// What is asked for ahead is this much *and what is on its way*: a
+/// question takes time to get there and its bytes time to get back
+/// ([`Way::turn`]), and a program that asks only for what arrives in a
+/// moment leaves the line with nothing on it while it asks. (Over a way
+/// that takes a quarter of a second there and back, twelve megabytes
+/// took 45 seconds on a line that carries them in 19.)
+const WAITING: Duration = Duration::from_millis(125);
+/// Over how long what arrives is counted, to say how fast the way is.
+const COUNTED: Duration = Duration::from_millis(250);
+/// The longest a question and its answer are taken to be on their way.
+const LONGEST_TURN: Duration = Duration::from_secs(2);
+/// How many questions for bytes are put to one program in a second at the
+/// most: a song of thousands of small files, on a fast connection, would
+/// otherwise ask more often than a program that works in a song says
+/// anything, and be let go of for it.
+const WANTS_A_SECOND: u32 = 200;
 /// How long a program may leave a question for bytes unanswered before
 /// someone else is asked.
 const STALLED: Duration = Duration::from_secs(20);
@@ -308,6 +335,10 @@ enum Job {
     Serve { link: LinkId, file: Content, at: u64, len: u64 },
     /// A connection is gone: nothing more is read for it.
     Gone(LinkId),
+    /// How many bytes of files may still be handed to a connection, where
+    /// the way to it passes only so many more: none are handed over above
+    /// that. `None` for as many as are asked for.
+    Budget(LinkId, Option<u64>),
     /// The folder what arrives is kept in from here on: the open song's.
     Into(PathBuf),
     /// A file is wanted: how much of it is here?
@@ -316,6 +347,9 @@ enum Job {
     Piece { file: Content, at: u64, bytes: Vec<u8> },
     /// A file is no longer wanted.
     LetGo(Content),
+    /// What arrived of a file is not to be gone on from: whoever sent it
+    /// sent what nobody asked for.
+    ThrowAway(Content),
     /// The user's word: however much may be on its way at once.
     AnyAmount,
     /// The look is over: these are the files the song names.
@@ -338,6 +372,9 @@ enum Done {
     },
     /// A program asked for more than it took.
     TooMuch(LinkId),
+    /// A file a program asked for is not here after all (it went, or was
+    /// written, since it was offered): it is told so.
+    NotHere(LinkId, Content),
 }
 
 /// A file as it was read to be played: held until the song has it.
@@ -381,6 +418,7 @@ fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds,
     let mut received: Option<Received> = None;
     let mut any_amount = false;
     let mut owed: HashMap<LinkId, Vec<Owed>> = HashMap::new();
+    let mut budgets: HashMap<LinkId, u64> = HashMap::new();
     loop {
         // While something is owed, jobs are looked for and not waited
         // for longer than the connections take to drain.
@@ -403,6 +441,8 @@ fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds,
                 }
             }
             Ok(Job::Gone(link)) => drop(owed.remove(&link)),
+            Ok(Job::Budget(link, Some(bytes))) => drop(budgets.insert(link, bytes)),
+            Ok(Job::Budget(link, None)) => drop(budgets.remove(&link)),
             Ok(Job::Into(dir)) => {
                 if received.as_ref().is_none_or(|received| received.dir() != dir) {
                     let mut into = Received::new(dir)
@@ -435,6 +475,11 @@ fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds,
                     received.let_go(&file);
                 }
             }
+            Ok(Job::ThrowAway(file)) => {
+                if let Some(received) = received.as_mut() {
+                    received.throw_away(&file);
+                }
+            }
             Ok(Job::AnyAmount) => {
                 any_amount = true;
                 if let Some(received) = received.as_mut() {
@@ -464,23 +509,32 @@ fn pass(jobs: Receiver<Job>, done: Sender<Done>, pieces: Pieces, bounds: Bounds,
                 Some(waiting) if waiting >= QUEUED => return true,
                 Some(_) => {}
             }
+            // On a way that passes only so many more bytes, no piece is
+            // handed over that would be more: what is owed waits, until
+            // whoever counts the way says it passes more, or closes it.
+            let next = first.left.min(MAX_PIECE as u64);
+            if budgets.get(link).is_some_and(|left| *left < next) {
+                return true;
+            }
             read_any = true;
-            let answer = match offered.read(&first.file, first.at, first.left) {
+            match offered.read(&first.file, first.at, first.left) {
                 Some(bytes) => {
                     let read = bytes.len() as u64;
                     let piece = Message::Piece { file: first.file.clone(), at: first.at, bytes };
                     (first.at, first.left) = (first.at + read, first.left - read);
-                    piece
+                    if pieces.say(*link, &piece).is_none() {
+                        return false;
+                    }
+                    if let Some(left) = budgets.get_mut(link) {
+                        *left = left.saturating_sub(read);
+                    }
                 }
                 // Not here, whatever the reason: the rest of what was
                 // asked for of it is not answered piece by piece.
                 None => {
                     first.left = 0;
-                    Message::Nothing { file: first.file.clone() }
+                    let _ = done.send(Done::NotHere(*link, first.file.clone()));
                 }
-            };
-            if pieces.say(*link, &answer).is_none() {
-                return false;
             }
             if first.left == 0 {
                 pending.remove(0);
@@ -521,13 +575,108 @@ struct Incoming {
     expect: u64,
     /// Up to where bytes were asked for.
     asked_to: u64,
-    /// How many bytes are asked for ahead.
-    window: u64,
+    /// When bytes last arrived, or were last asked for.
+    heard: Instant,
+}
+
+/// What is asked for over one connection, of every file that comes over
+/// it together.
+struct Way {
+    /// How many bytes a second arrived over it, the last few times that
+    /// was counted. A way that is asked for less than it carries has less
+    /// arrive than it could carry, and never more: so what it carries is
+    /// the most of them. (Going by the last count alone, what is asked
+    /// for swings: a count that came out low has less asked for, of which
+    /// less arrives.)
+    rates: [Option<f64>; 4],
+    /// How long a question took to get there and the first of its answer
+    /// to arrive, the last few times that was measured: from a question
+    /// put while nothing was on its way, which asks for a little first
+    /// ([`LEAST_STRIDE`]), so that what is measured is the way and not
+    /// how long a whole piece takes to cross the line. Whatever else is
+    /// in such a measurement makes it longer (a disk that was slow to
+    /// read, a thread that was late), so the way is the shortest of them.
+    turns: [Option<Duration>; 4],
     /// For the rate: when counting began, and how much arrived since.
     since: Instant,
     arrived: u64,
-    /// When bytes last arrived, or were last asked for.
-    heard: Instant,
+    /// When a question was put while nothing was on its way, until its
+    /// first bytes arrive.
+    dry: Option<Instant>,
+    /// The second in which questions are counted, and how many were put
+    /// in it.
+    asked: (Instant, u32),
+}
+
+impl Way {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self { rates: [None; 4], turns: [None; 4], since: now, arrived: 0, dry: None, asked: (now, 0) }
+    }
+
+    /// How many bytes a second the way carries, as far as is known.
+    fn rate(&self) -> Option<f64> {
+        self.rates.iter().flatten().copied().reduce(f64::max)
+    }
+
+    /// How long a question and the first of its answer are on their way,
+    /// as far as is known.
+    fn turn(&self) -> Duration {
+        self.turns.iter().flatten().min().copied().unwrap_or_default().min(LONGEST_TURN)
+    }
+
+    /// How many bytes may be asked for and not written here yet: what is
+    /// on its way there and back, and what arrives in [`WAITING`].
+    fn window(&self) -> u64 {
+        let Some(rate) = self.rate() else { return FIRST_WINDOW };
+        ((rate * (self.turn() + WAITING).as_secs_f64()) as u64).clamp(LEAST_WINDOW, MOST_WINDOW)
+    }
+
+    /// How far under the window what is on its way falls before more is
+    /// asked for: half of what arrives in [`WAITING`]. A file is then a
+    /// few questions a second, and not one for every piece that arrived
+    /// (which is more, faster, than a program that works in a song says,
+    /// and is let go of for it).
+    fn stride(&self) -> u64 {
+        let window = self.window();
+        let Some(rate) = self.rate() else { return window / 2 };
+        ((rate * WAITING.as_secs_f64() / 2.0) as u64).clamp(LEAST_STRIDE, window / 2)
+    }
+
+    /// Bytes arrived over it, in one piece.
+    fn arrived(&mut self, bytes: u64) {
+        let now = Instant::now();
+        if let Some(asked) = self.dry.take() {
+            // The first piece of a question put while nothing was on its
+            // way: how long there and back takes.
+            self.turns.rotate_right(1);
+            self.turns[0] = Some(now.duration_since(asked).min(LONGEST_TURN));
+            // What arrives is counted from here, after this piece: not
+            // the time the question took to get there.
+            (self.since, self.arrived) = (now, 0);
+            return;
+        }
+        self.arrived += bytes;
+        let counted = now.duration_since(self.since);
+        // (The first time as soon as there is anything to go by: until
+        // then little is asked for, whatever the way would take.)
+        let enough = counted >= COUNTED || (self.rate().is_none() && self.arrived >= 2 * MAX_PIECE as u64);
+        if enough && !counted.is_zero() {
+            self.rates.rotate_right(1);
+            self.rates[0] = Some(self.arrived as f64 / counted.as_secs_f64());
+            (self.since, self.arrived) = (now, 0);
+        }
+    }
+
+    /// Whether one more question may be put to it this second, which it
+    /// then is.
+    fn may_ask(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.asked.0) >= Duration::from_secs(1) {
+            self.asked = (now, 0);
+        }
+        self.asked.1 += 1;
+        self.asked.1 <= WANTS_A_SECOND
+    }
 }
 
 /// What came of something that was heard, for the thread that drives the
@@ -585,6 +734,8 @@ pub(crate) struct Files {
     /// What each program said it has.
     theirs: HashMap<LinkId, HashSet<Content>>,
     incoming: HashMap<Content, Incoming>,
+    /// What each program that files are asked of is asked for at once.
+    ways: HashMap<LinkId, Way>,
     /// Programs that are not asked for a file for a while, and until
     /// when: what they sent as it was not it, or they said they have not
     /// got it.
@@ -597,6 +748,9 @@ pub(crate) struct Files {
     /// a meeting point whose keeper's allowance for the day is nearly
     /// spent. On such a way nothing is asked for and nothing handed out.
     closed: HashMap<LinkId, Instant>,
+    /// How many bytes of files the thread that hands out was last told
+    /// it may still hand each program.
+    budgets: HashMap<LinkId, u64>,
     /// Whether the user was told that files wait for their word.
     asked_for_a_word: bool,
     /// How many bytes of files arrived, and what counts the ones that
@@ -641,11 +795,13 @@ impl Files {
             lacking: HashSet::new(),
             told: HashMap::new(),
             theirs: HashMap::new(),
+            ways: HashMap::new(),
             incoming: HashMap::new(),
             not_from: HashMap::new(),
             forgiven: HashMap::new(),
             failed: HashSet::new(),
             closed: HashMap::new(),
+            budgets: HashMap::new(),
             asked_for_a_word: false,
             got: 0,
             pieces,
@@ -705,7 +861,9 @@ impl Files {
     pub fn lost(&mut self, link: LinkId) {
         self.told.remove(&link);
         self.theirs.remove(&link);
+        self.ways.remove(&link);
         self.closed.remove(&link);
+        self.budgets.remove(&link);
         self.not_from.retain(|(from, _), _| *from != link);
         self.forgiven.retain(|(from, _), _| *from != link);
         let _ = self.jobs.send(Job::Gone(link));
@@ -735,7 +893,27 @@ impl Files {
             0 => drop(self.closed.remove(&link)),
             seconds => drop(self.closed.insert(link, Instant::now() + Duration::from_secs(seconds))),
         }
-        was != (seconds > 0)
+        let news = was != (seconds > 0);
+        if news && seconds > 0 {
+            // What was asked for over it before is not handed over either.
+            let _ = self.jobs.send(Job::Gone(link));
+        }
+        news
+    }
+
+    /// How many bytes of files may still be handed to a program, where
+    /// the way to it passes only so many more today: the thread that
+    /// hands out stops at that, whatever was asked for, between one look
+    /// of whoever counts and the next. `None` for a way that passes what
+    /// it is asked.
+    pub fn may_hand(&mut self, link: LinkId, bytes: Option<u64>) {
+        if self.budgets.get(&link).copied() != bytes {
+            match bytes {
+                Some(bytes) => drop(self.budgets.insert(link, bytes)),
+                None => drop(self.budgets.remove(&link)),
+            }
+            let _ = self.jobs.send(Job::Budget(link, bytes));
+        }
     }
 
     /// How many bytes of files have passed between this program and the
@@ -808,21 +986,29 @@ impl Files {
                 let Some(incoming) = asked else {
                     // Bytes that were asked for and were on their way when
                     // their file was no longer wanted from there pass.
-                    return match self.forgiven.get(&(link, file)).is_some_and(|until| *until > Instant::now()) {
-                        true => Heard::Fine,
-                        false => Heard::LetGo("it sent bytes of a file that were not asked for"),
-                    };
+                    if self.forgiven.get(&(link, file)).is_some_and(|until| *until > Instant::now()) {
+                        return Heard::Fine;
+                    }
+                    // Whoever sends what nobody asked for may have sent
+                    // other bytes than the file's where they were asked
+                    // for: nothing that came from there is gone on with.
+                    // (A part with wrong bytes in it would be found out
+                    // when it is whole, and whoever sent the rest of it
+                    // in good faith would be taken for the one who did.)
+                    for (file, incoming) in &mut self.incoming {
+                        if incoming.source == Some(link) {
+                            let _ = self.jobs.send(Job::ThrowAway(file.clone()));
+                            (incoming.source, incoming.stage) = (None, Stage::New);
+                            (incoming.here, incoming.expect, incoming.asked_to) = (0, 0, 0);
+                        }
+                    }
+                    return Heard::LetGo("it sent bytes of a file that were not asked for");
                 };
                 incoming.expect += len;
-                incoming.arrived += len;
                 incoming.heard = Instant::now();
-                // As much is asked for ahead as arrives in a moment.
-                let counted = incoming.since.elapsed();
-                if counted >= AHEAD {
-                    let rate = incoming.arrived as f64 / counted.as_secs_f64();
-                    incoming.window = ((rate * AHEAD.as_secs_f64()) as u64).clamp(LEAST_WINDOW, MAX_WANT);
-                    (incoming.since, incoming.arrived) = (Instant::now(), 0);
-                }
+                // What is asked for ahead over this connection goes by
+                // what arrives over it.
+                self.ways.entry(link).or_insert_with(Way::new).arrived(len);
                 let _ = self.jobs.send(Job::Piece { file, at, bytes });
                 Heard::Fine
             }
@@ -850,18 +1036,8 @@ impl Files {
                 self.lacking.insert(file.clone());
                 if !self.failed.contains(&file) && !self.incoming.contains_key(&file) {
                     let now = Instant::now();
-                    let incoming = Incoming {
-                        is,
-                        source: None,
-                        stage: Stage::New,
-                        here: 0,
-                        expect: 0,
-                        asked_to: 0,
-                        window: FIRST_WINDOW,
-                        since: now,
-                        arrived: 0,
-                        heard: now,
-                    };
+                    let incoming =
+                        Incoming { is, source: None, stage: Stage::New, here: 0, expect: 0, asked_to: 0, heard: now };
                     self.incoming.insert(file, incoming);
                 }
             }
@@ -892,6 +1068,7 @@ impl Files {
                 Done::TooMuch(link) => {
                     out.push(Tended::LetGo(link, "it asked for more of the song's files than it took"));
                 }
+                Done::NotHere(link, file) => out.push(Tended::Say(link, Message::Nothing { file })),
             }
         }
         if offer_anew {
@@ -928,7 +1105,6 @@ impl Files {
             Ok(Begun::From(here)) => {
                 (incoming.here, incoming.expect, incoming.asked_to) = (here, here, here);
                 (incoming.stage, incoming.heard) = (Stage::Arriving, Instant::now());
-                (incoming.since, incoming.arrived) = (Instant::now(), 0);
             }
             Ok(Begun::Waits(waits)) => {
                 // Room may come by itself; the user's word does not.
@@ -1012,7 +1188,8 @@ impl Files {
     }
 
     /// Asks for what is lacked: each file from one program that said it
-    /// has it, as far ahead as arrives in a moment.
+    /// has it, and of each program as far ahead as arrives from it in a
+    /// moment, of all the files it is asked for together.
     fn ask(&mut self, synced: &[LinkId], out: &mut Vec<Tended>) {
         let now = Instant::now();
         for (file, incoming) in &mut self.incoming {
@@ -1048,31 +1225,72 @@ impl Files {
                     incoming.stage = Stage::Asked;
                     let _ = self.jobs.send(Job::Begin(incoming.is.clone()));
                 }
-                Stage::Asked | Stage::Waits(..) => {}
-                Stage::Arriving => {
-                    let Some(source) = incoming.source else { continue };
-                    // Ahead of what is *written* here, not of what has
-                    // arrived: where the disk is slower than the way,
-                    // nothing piles up in memory waiting to be written.
-                    let ahead = |incoming: &Incoming| incoming.asked_to.saturating_sub(incoming.here);
-                    // And in strides: asked again once half of what was
-                    // asked for ahead is here. A file is then a few
-                    // questions a second, and not one for every piece
-                    // that arrived (which is more, faster, than a program
-                    // that works in a song says, and is let go of for it).
-                    if ahead(incoming) > incoming.window / 2 {
-                        continue;
+                Stage::Asked | Stage::Waits(..) | Stage::Arriving => {}
+            }
+        }
+        // The bytes, a connection at a time: the files that arrive over
+        // one share what is asked for ahead over it, in turn.
+        let mut from: BTreeMap<LinkId, Vec<&Content>> = BTreeMap::new();
+        for (file, incoming) in &self.incoming {
+            if let (Stage::Arriving, Some(source)) = (&incoming.stage, incoming.source) {
+                from.entry(source).or_default().push(file);
+            }
+        }
+        // Ahead of what is *written* here, not of what has arrived: where
+        // the disk is slower than the way, nothing piles up in memory
+        // waiting to be written.
+        let ahead = |incoming: &Incoming| incoming.asked_to.saturating_sub(incoming.here);
+        let mut wants = Vec::new();
+        for (source, mut files) in from {
+            let on_their_way: u64 = files.iter().map(|file| ahead(&self.incoming[*file])).sum();
+            let way = self.ways.entry(source).or_insert_with(Way::new);
+            // In strides: more is asked for once a stride of what was
+            // asked for ahead is here.
+            let window = way.window();
+            if on_their_way > window - way.stride() {
+                continue;
+            }
+            // The file that has least to go first, and each to its end
+            // before the next: one after another is as fast over one
+            // connection as all at once, and so the most files are whole
+            // the soonest. A long recording does not keep the short ones
+            // behind it waiting.
+            files.sort_by_key(|file| {
+                let incoming = &self.incoming[*file];
+                (file.bytes.saturating_sub(incoming.asked_to), incoming.is.name.clone(), (*file).clone())
+            });
+            let mut room = window - on_their_way;
+            let mut asked = false;
+            // Nothing is on its way: the first question is for a little,
+            // and how long that takes to get there and back is how long
+            // the way is.
+            let mut first = (on_their_way == 0).then_some(LEAST_STRIDE);
+            'files: for file in files {
+                let mut at = self.incoming[file].asked_to;
+                while at < file.bytes {
+                    if !way.may_ask(now) {
+                        break 'files;
                     }
-                    while incoming.asked_to < file.bytes && ahead(incoming) < incoming.window {
-                        let room = incoming.window - ahead(incoming);
-                        let len = room.min(MAX_WANT).min(file.bytes - incoming.asked_to);
-                        let want = Message::Want { file: file.clone(), at: incoming.asked_to, len };
-                        out.push(Tended::Say(source, want));
-                        incoming.asked_to += len;
-                        incoming.heard = now;
+                    // (Not a few bytes at a time: what is left of the room
+                    // is asked for with the next stride.)
+                    let left = file.bytes - at;
+                    if room < LEAST_STRIDE.min(left) {
+                        break 'files;
                     }
+                    let len = room.min(MAX_WANT).min(left).min(first.take().unwrap_or(u64::MAX));
+                    wants.push((source, file.clone(), at, len));
+                    (at, room, asked) = (at + len, room - len, true);
                 }
             }
+            if asked && on_their_way == 0 {
+                way.dry = Some(now);
+            }
+        }
+        for (source, file, at, len) in wants {
+            if let Some(incoming) = self.incoming.get_mut(&file) {
+                (incoming.asked_to, incoming.heard) = (at + len, now);
+            }
+            out.push(Tended::Say(source, Message::Want { file, at, len }));
         }
     }
 
@@ -1211,5 +1429,109 @@ impl Runtime {
     /// ([`Runtime::files_to_go`], [`Together::held`](crate::Together)).
     pub fn let_files_go(&self) {
         self.session.lock().let_files_go();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A way over which `rate` bytes a second were found to arrive, a
+    /// question and the first of its answer taking `turn`.
+    fn way(rate: f64, turn: Duration) -> Way {
+        Way { rates: [Some(rate), None, None, None], turns: [Some(turn), None, None, None], ..Way::new() }
+    }
+
+    /// Whether two counts of bytes are the same but for a rounding.
+    fn near(bytes: u64, wanted: u64) -> bool {
+        bytes.abs_diff(wanted) <= 2
+    }
+
+    #[test]
+    fn what_is_asked_for_ahead_is_what_is_on_its_way_and_an_eighth_of_a_second_more() {
+        // Nothing is known yet: three pieces, and half of them a stride.
+        let unknown = Way::new();
+        assert_eq!((unknown.window(), unknown.stride()), (3 * MAX_PIECE as u64, 3 * MAX_PIECE as u64 / 2));
+
+        // A home's line of five megabits a second, eighty milliseconds
+        // there and back: what is on its way (50 kB) and what arrives in
+        // an eighth of a second (78 kB), asked for again when half of the
+        // second is here.
+        let home = way(625_000.0, Duration::from_millis(80));
+        assert!(near(home.window(), 128_125) && near(home.stride(), 39_062), "{} {}", home.window(), home.stride());
+        // Where the way is longer, more is on its way, and no more waits.
+        let far = way(625_000.0, Duration::from_millis(480));
+        assert!(near(far.window(), 378_125) && near(far.stride(), 39_062), "{} {}", far.window(), far.stride());
+        // A slow line is asked for less than a piece at a time, and never
+        // for a few bytes.
+        let slow = way(60_000.0, Duration::from_millis(100));
+        assert_eq!((slow.window(), slow.stride()), (LEAST_WINDOW, LEAST_STRIDE));
+        // A fast one for no more than sixteen megabytes ahead.
+        let fast = way(400e6, Duration::from_millis(1));
+        assert_eq!((fast.window(), fast.stride()), (MOST_WINDOW, MOST_WINDOW / 2));
+        // A way that says it takes a minute is taken to take two seconds.
+        let lost = way(1e6, Duration::from_secs(60));
+        assert!(near(lost.window(), 2_125_000), "{}", lost.window());
+    }
+
+    #[test]
+    fn how_long_the_way_is_is_taken_from_a_question_put_while_nothing_was_on_its_way() {
+        let mut way = Way::new();
+        let piece = MAX_PIECE as u64;
+        assert_eq!(way.turn(), Duration::ZERO);
+        // The first piece of the first answer says how long the way is,
+        // and is not counted towards how fast it is.
+        way.dry = Some(Instant::now() - Duration::from_millis(200));
+        way.arrived(LEAST_STRIDE);
+        let turn = way.turn();
+        assert!(turn >= Duration::from_millis(200) && turn < Duration::from_millis(400), "{turn:?}");
+        assert_eq!((way.arrived, way.rate()), (0, None));
+        assert!(way.dry.is_none());
+        // Two more pieces say how fast: the first time as soon as that.
+        way.since = Instant::now() - Duration::from_millis(100);
+        way.arrived(piece);
+        assert_eq!(way.rate(), None);
+        way.arrived(piece);
+        let rate = way.rate().expect("how fast was measured");
+        assert!(rate > 400_000.0 && rate < 1_000_000.0, "{rate}");
+        // From then on over a quarter of a second at a time.
+        way.arrived(piece);
+        assert_eq!(way.rate(), Some(rate), "not again a moment later");
+        // What the way carries is the most that was found to arrive of
+        // late: a count that came out low (less was asked for than it
+        // carries) does not have less asked for.
+        way.since = Instant::now() - Duration::from_secs(1);
+        way.arrived(piece);
+        assert_eq!(way.rates[0].map(|low| low < 200_000.0), Some(true));
+        assert_eq!(way.rate(), Some(rate));
+        // A way that got slower is believed once the faster counts are old.
+        for _ in 0..3 {
+            way.since = Instant::now() - Duration::from_secs(1);
+            way.arrived(piece);
+        }
+        assert!(way.rate().is_some_and(|slower| slower < 200_000.0), "{:?}", way.rate());
+        // The way is the shortest of the last few times it was measured:
+        // whatever else is in a measurement makes it longer.
+        way.dry = Some(Instant::now() - Duration::from_millis(840));
+        way.arrived(LEAST_STRIDE);
+        assert_eq!(way.turn(), turn, "a longer one changes nothing while a shorter one is remembered");
+        way.dry = Some(Instant::now() - Duration::from_millis(40));
+        way.arrived(LEAST_STRIDE);
+        assert!(way.turn() < Duration::from_millis(100), "a shorter one is taken at once: {:?}", way.turn());
+        // A way that got longer is believed once the shorter ones are old.
+        for _ in 0..4 {
+            way.dry = Some(Instant::now() - Duration::from_millis(600));
+            way.arrived(LEAST_STRIDE);
+        }
+        assert!(way.turn() >= Duration::from_millis(600), "{:?}", way.turn());
+    }
+
+    #[test]
+    fn no_more_questions_are_put_in_a_second_than_a_program_that_works_in_a_song_says_things() {
+        let mut way = Way::new();
+        let now = Instant::now();
+        assert!((0..WANTS_A_SECOND).all(|_| way.may_ask(now)));
+        assert!(!way.may_ask(now), "and no more in the same second");
+        assert!(way.may_ask(now + Duration::from_secs(1)), "in the next one again");
     }
 }
