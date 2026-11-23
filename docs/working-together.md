@@ -118,6 +118,11 @@ away from the song, so that no edit that arrives meanwhile waits for it.
 **It survives the connection.** A file that was half here when a link dropped, or when Trill was closed, goes
 on from where it was when the song is in company again, from anyone who has it.
 
+**A file is read once.** Saying what a file is means reading all of it. What was read is kept in Trill's own
+folder (`files-read.json`): a file that is as long as it was and was last written when it was is not read again
+in a later run, so a song of long recordings is said to whoever joins as soon as it is open. Only what was read
+as audio is kept, and nothing of it lets a file go that is held.
+
 **If you have the file already.** Point the clip at it (a relink): where the song says what the file is, yours
 is read and held against that. If it is the file it is taken and nothing is fetched, which is how two people
 with the same sample pack each play their own copy. If it is another file it is refused in a sentence.
@@ -510,8 +515,6 @@ nearly nothing was). The file with least to go is asked for first, so that the m
 - Saying *why* a file someone brought has not been said: whoever waits for it is told that it waits for them,
   and not whether it is missing there, held there or no audio.
 - A list of what arrived and was never saved with a song, with a way to remove it. It stays in Trill's folder.
-- What was read of a file (its hash) kept from one run to the next: every file a shared song names is read once
-  each time Trill is started and the song is in company.
 - A file that arrives while the meeting point's day is nearly spent waits for the next day; there is no asking
   the keeper for more from inside Trill.
 - Giving way when its maker is not there: of two recordings put over one stretch at once, it is the program of

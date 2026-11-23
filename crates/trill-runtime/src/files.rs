@@ -268,13 +268,111 @@ struct Read {
     bytes: u64,
     written: Option<SystemTime>,
     content: Option<Content>,
+    /// The day a look last named the file, in days since 1970.
+    seen: u64,
+}
+
+// ---- what was read, from one run to the next --------------------------------
+//
+// Saying what a file is means reading all of it, and a song of long
+// recordings is gigabytes: read again at every start, it would be minutes
+// before whoever joins is told what the song plays. What was read is
+// therefore kept, in the program's own folder: a file that is as long as
+// it was and was last written when it was is taken to be what it was.
+// (That is what a run does already for a file it read a minute ago.)
+//
+// Only what was read *as audio* is kept. That a file was none, or could
+// not be read, is found out again by every run: it may have been open in
+// another program at the time. And nothing here lets a file go: one that
+// may not go is not looked up at all (`read`), whatever was once read of it.
+
+/// The file what was read is kept in, beside the folder of files from
+/// other programs.
+pub const READ_FILE: &str = "files-read.json";
+/// What the file says it is written as: one that says another is not read.
+const KEPT_VERSION: u32 = 1;
+/// How many files' readings are kept, and for how many days one is kept
+/// that no look has named.
+const MAX_KEPT: usize = 65_536;
+const KEPT_DAYS: u64 = 180;
+/// The longest the file is read at: a longer one is not this program's.
+const MAX_KEPT_BYTES: u64 = 64 << 20;
+/// How often what was read is written down while a look is still reading.
+const KEEP_EVERY: Duration = Duration::from_secs(2);
+
+/// A reading as it is kept.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptRead {
+    path: String,
+    bytes: u64,
+    /// When the file had last been written, in nanoseconds since 1970.
+    written_ns: u64,
+    sha256: String,
+    seen: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptReads {
+    version: u32,
+    files: Vec<KeptRead>,
+}
+
+/// Today, in days since 1970.
+fn today() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |since| since.as_secs() / 86_400)
+}
+
+/// What earlier runs read, as it was kept at `kept`. Whatever is not
+/// written as this program writes it is nothing: a file that does not
+/// read, another version, a hash that is none, a reading no look has named
+/// for half a year.
+fn reads_kept(kept: &Path, today: u64) -> HashMap<String, Read> {
+    let ours = std::fs::metadata(kept).is_ok_and(|file| file.is_file() && file.len() <= MAX_KEPT_BYTES);
+    let text = if ours { std::fs::read(kept).ok() } else { None };
+    let held = text.and_then(|text| serde_json::from_slice::<KeptReads>(&text).ok());
+    let Some(held) = held.filter(|held| held.version == KEPT_VERSION) else { return HashMap::new() };
+    let mut index = HashMap::new();
+    for file in held.files.into_iter().take(MAX_KEPT) {
+        let content = Content { sha256: file.sha256, bytes: file.bytes };
+        let written = SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(file.written_ns));
+        if content.is_well_formed() && written.is_some() && today.saturating_sub(file.seen) <= KEPT_DAYS {
+            index.insert(file.path, Read { bytes: file.bytes, written, content: Some(content), seen: file.seen });
+        }
+    }
+    index
+}
+
+/// Writes down at `kept` what was read as audio, whole or not at all: the
+/// readings that were named last, where there are more than are kept.
+fn keep_reads(kept: &Path, index: &HashMap<String, Read>) {
+    let kept_as = |(path, read): (&String, &Read)| {
+        let since = read.written?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+        Some(KeptRead {
+            path: path.clone(),
+            bytes: read.bytes,
+            written_ns: u64::try_from(since.as_nanos()).ok()?,
+            sha256: read.content.as_ref()?.sha256.clone(),
+            seen: read.seen,
+        })
+    };
+    let mut files: Vec<KeptRead> = index.iter().filter_map(kept_as).collect();
+    files.sort_by(|a, b| b.seen.cmp(&a.seen).then_with(|| a.path.cmp(&b.path)));
+    files.truncate(MAX_KEPT);
+    if let Err(error) = trill_fetch::whole::write_json(kept, &KeptReads { version: KEPT_VERSION, files }) {
+        log::warn!("what was read of the song's files was not kept for the next run: {error}");
+    }
 }
 
 /// The thread that reads files to say what they are. One look at a time;
-/// a file is read once, and again only if it was written since.
-fn read(looks: Receiver<Look>, looked: Sender<Looked>, media: Arc<MediaCache>) {
-    let mut index: HashMap<String, Read> = HashMap::new();
+/// a file is read once, and again only if it was written since: also
+/// since an earlier run read it, where `kept` names the file that is
+/// written down in ([`READ_FILE`]).
+fn read(looks: Receiver<Look>, looked: Sender<Looked>, media: Arc<MediaCache>, kept: Option<PathBuf>) {
+    let mut index: HashMap<String, Read> = kept.as_deref().map(|kept| reads_kept(kept, today())).unwrap_or_default();
+    // Whether something was read, or named, that is not written down yet.
+    let (mut news, mut written_down) = (false, Instant::now());
     while let Ok(mut look) = looks.recv() {
+        let today = today();
         // (Of several looks that waited, the last is the song as it is.)
         while let Ok(later) = looks.try_recv() {
             look = later;
@@ -312,13 +410,16 @@ fn read(looks: Receiver<Look>, looked: Sender<Looked>, media: Arc<MediaCache>) {
                 (Some(_), None) if places.iter().any(|file| !file.may_go) => {}
                 (Some(found), None) => {
                     let written = found.modified().ok();
-                    match index.get(path) {
-                        Some(read) if read.bytes == found.len() && read.written == written => {
+                    let as_it_was = |read: &&mut Read| read.bytes == found.len() && read.written == written;
+                    match index.get_mut(path).filter(as_it_was) {
+                        Some(read) => {
+                            // (Named today: kept on.)
+                            news |= std::mem::replace(&mut read.seen, today) != today;
                             if let Some(content) = &read.content {
                                 found_to_be(content, written, path, places, &mut first);
                             }
                         }
-                        _ => unread.push((path.to_string(), found.len(), written)),
+                        None => unread.push((path.to_string(), found.len(), written)),
                     }
                 }
                 // A file of one's own that is gone is a missing file, as
@@ -353,11 +454,26 @@ fn read(looks: Receiver<Look>, looked: Sender<Looked>, media: Arc<MediaCache>) {
                 if let Some(content) = &content {
                     found_to_be(content, written, &path, &by_path[&path], &mut next);
                 }
-                index.insert(path, Read { bytes, written, content });
+                let is_audio = content.is_some();
+                let before = index.insert(path, Read { bytes, written, content, seen: today });
+                // (Also where it was audio before and is none now: what
+                // was kept of it is no longer so.)
+                news |= is_audio || before.is_some_and(|before| before.content.is_some());
             }
-            if looked.send(next).is_err() {
+            // Written down as it goes: a look at a song of long recordings
+            // takes minutes, and a program is closed whenever.
+            let gone = looked.send(next).is_err();
+            if let Some(kept) = kept.as_deref().filter(|_| news && (gone || written_down.elapsed() >= KEEP_EVERY)) {
+                keep_reads(kept, &index);
+                (news, written_down) = (false, Instant::now());
+            }
+            if gone {
                 return;
             }
+        }
+        if let Some(kept) = kept.as_deref().filter(|_| news) {
+            keep_reads(kept, &index);
+            (news, written_down) = (false, Instant::now());
         }
     }
 }
@@ -811,14 +927,23 @@ const MAX_THEIRS: usize = 65_536;
 
 impl Files {
     /// Starts the two threads. `media` is what reads a file as audio;
-    /// `bounds` and `room` are what taking a file in may cost.
-    pub fn new(pieces: Pieces, media: Arc<MediaCache>, bounds: Bounds, room: Room) -> std::io::Result<Self> {
+    /// `bounds` and `room` are what taking a file in may cost. `kept` is
+    /// the file what was read of this machine's files is kept in from one
+    /// run to the next ([`READ_FILE`]); `None` for a program that keeps
+    /// nothing.
+    pub fn new(
+        pieces: Pieces,
+        media: Arc<MediaCache>,
+        bounds: Bounds,
+        room: Room,
+        kept: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
         let (looks, to_look) = channel();
         let (say_looked, looked) = channel();
         let reading = media.clone();
         std::thread::Builder::new()
             .name("trill-files-read".into())
-            .spawn(move || read(to_look, say_looked, reading))?;
+            .spawn(move || read(to_look, say_looked, reading, kept))?;
         let (jobs, to_do) = channel();
         let (say_done, done) = channel();
         let (saying, playing) = (pieces.clone(), media.clone());
@@ -1499,6 +1624,106 @@ mod tests {
     /// Whether two counts of bytes are the same but for a rounding.
     fn near(bytes: u64, wanted: u64) -> bool {
         bytes.abs_diff(wanted) <= 2
+    }
+
+    /// Writes `seconds` of a tone to `path`.
+    fn tone(path: &Path, seconds: f64) {
+        let rate = 44_100.0;
+        let channel: Vec<f32> = (0..(seconds * rate) as usize).map(|n| (n as f32 * 0.03).sin() * 0.5).collect();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let buffer = trill_core::audio::AudioBuffer { sample_rate: rate, left: channel.clone(), right: channel };
+        trill_media::write_wav(path, &buffer, trill_media::WavFormat::Int16).unwrap();
+    }
+
+    /// One run of a program that keeps what it reads at `kept`: the
+    /// thread that reads is started, looks at `files` once, and ends.
+    /// What it answered, the first answer first.
+    fn a_run_looks_at(kept: &Path, files: &[&Path]) -> Vec<Looked> {
+        let (looks, to_look) = channel();
+        let (say, looked) = channel();
+        let (media, kept) = (Arc::new(MediaCache::new(64 << 20)), kept.to_owned());
+        let thread = std::thread::spawn(move || read(to_look, say, media, Some(kept)));
+        let here = |(at, path): (usize, &&Path)| FileHere {
+            place: FilePlace::Clip(trill_core::ClipId(at as u64 + 1)),
+            path: path.to_string_lossy().into_owned(),
+            is: None,
+            may_go: true,
+            wanted: true,
+        };
+        looks.send(Look { files: files.iter().enumerate().map(here).collect(), received: None }).unwrap();
+        let mut answers = Vec::new();
+        while answers.last().is_none_or(|answer: &Looked| !answer.all) {
+            answers.push(looked.recv().unwrap());
+        }
+        drop(looks);
+        thread.join().unwrap();
+        answers
+    }
+
+    /// What the answers of a look say the files are, each by its name.
+    fn said_in(answers: &[Looked]) -> Vec<(String, String)> {
+        let said = answers.iter().flat_map(|answer| &answer.say);
+        said.map(|(_, path, is)| (trill_core::files::file_name(path).to_owned(), is.sha256.clone())).collect()
+    }
+
+    #[test]
+    fn what_was_read_as_audio_is_kept_for_the_next_run_and_a_file_is_read_again_only_if_it_was_written_since() {
+        let folder = tempfile::tempdir().unwrap();
+        let kept = folder.path().join("program").join(READ_FILE);
+        let (take, words) =
+            (folder.path().join("music").join("take.wav"), folder.path().join("music").join("notes.wav"));
+        tone(&take, 1.0);
+        std::fs::write(&words, b"RIFF these are only words, under a name that says audio").unwrap();
+        let hash = |path: &Path| content_of(path, |_| true).unwrap().unwrap().sha256;
+
+        // The first run reads both, and says what the recording is. Of
+        // what is no audio it says nothing, as ever.
+        let first = a_run_looks_at(&kept, &[&take, &words]);
+        assert!(first[0].say.is_empty() && !first[0].all, "nothing is known before anything was read");
+        assert_eq!(said_in(&first), [("take.wav".to_owned(), hash(&take))]);
+        // That is written down, in the program's own folder: the
+        // recording, and nothing of the file that is no audio.
+        let written = std::fs::read_to_string(&kept).unwrap();
+        assert!(written.contains(&hash(&take)) && written.contains("take.wav"), "{written}");
+        assert!(!written.contains("notes.wav"), "that a file is no audio is found out again by every run: {written}");
+
+        // Another run takes the recording for what it was, without reading
+        // it: it is as long as it was and was written when it was. (Told
+        // here by what was written down being another hash than the
+        // file's: the run says that one, and at once.)
+        let planted = "5a".repeat(32);
+        std::fs::write(&kept, written.replace(&hash(&take), &planted)).unwrap();
+        let second = a_run_looks_at(&kept, &[&take, &words]);
+        assert_eq!(said_in(&second[..1]), [("take.wav".to_owned(), planted.clone())], "in its first answer");
+        assert_eq!(said_in(&second).len(), 1, "and the file that is no audio was asked again, and is none");
+
+        // The file is written again: it is read again, and what is kept
+        // is what it is now.
+        tone(&take, 1.5);
+        let third = a_run_looks_at(&kept, &[&take]);
+        assert!(third[0].say.is_empty(), "nothing is said of it before it was read");
+        assert_eq!(said_in(&third), [("take.wav".to_owned(), hash(&take))]);
+        let written = std::fs::read_to_string(&kept).unwrap();
+        assert!(written.contains(&hash(&take)) && !written.contains(&planted), "{written}");
+
+        // What is not written as this program writes it is nothing, and
+        // so is a reading that no look has named for half a year.
+        let day = today();
+        assert_eq!(reads_kept(&kept, day).len(), 1);
+        assert!(reads_kept(&kept, day + KEPT_DAYS + 1).is_empty(), "forgotten");
+        for other in [
+            written.replace("\"version\":1", "\"version\":2"),
+            written.replace(&hash(&take), "../../somewhere/else"),
+            "not a file of this program's".to_owned(),
+        ] {
+            assert_ne!(other, written);
+            std::fs::write(&kept, &other).unwrap();
+            assert!(reads_kept(&kept, day).is_empty(), "{other}");
+        }
+        // And a run that finds such a file reads the recording itself.
+        let fourth = a_run_looks_at(&kept, &[&take]);
+        assert!(fourth[0].say.is_empty());
+        assert_eq!(said_in(&fourth), [("take.wav".to_owned(), hash(&take))]);
     }
 
     #[test]

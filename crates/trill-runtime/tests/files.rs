@@ -203,6 +203,14 @@ fn the_audio_of_a_song_arrives_with_the_song_by_what_it_is_and_nobody_is_told_a_
     assert_eq!(file_of(&ada, verse).0, vocal.to_string_lossy(), "and has it where she had it");
     eventually("the recording is at Ben's", || arrived(&ben, verse, &vocal));
     eventually("and what the sampler plays", || arrived_at(&ben, &in_sampler, &kick));
+    // What Ada's program read of her two files is written down in its own
+    // folder, for its next run: they are not read again unless they are
+    // written again.
+    let kept = folder.path().join("Ada").join("files-read.json");
+    eventually("what Ada's program read is kept", || {
+        let written = std::fs::read_to_string(&kept).unwrap_or_default();
+        written.contains(&is.sha256) && written.contains(&content(&kick).sha256)
+    });
     eventually("and nothing is on its way any more", || ben.together().files.is_empty());
     let song = format!("{:032x}", ada.session.lock().shared_song().unwrap().0);
     let at_ben = folder.path().join("Ben").join("received").join(&song);
