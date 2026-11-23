@@ -301,7 +301,11 @@ fn audio_that_is_on_its_way_and_files_that_are_held_are_said_in_the_status_bar_a
 #[test]
 fn before_a_song_is_shared_the_panel_says_what_goes_with_it_and_its_audio_arrives_at_whoever_joins() {
     let folder = tempfile::tempdir().unwrap();
-    let vocal = super::sounds::tone(folder.path().join("Elsewhere").join("vocal take.wav"), 1.0);
+    // The panel says a file by the path the file system has for it. On
+    // macOS the temporary folder is reached through a link (`/var` is
+    // `/private/var`), so the file is named by its real path from the start.
+    let base = if cfg!(windows) { folder.path().to_path_buf() } else { folder.path().canonicalize().unwrap() };
+    let vocal = super::sounds::tone(base.join("Elsewhere").join("vocal take.wav"), 1.0);
     let named = vocal.to_string_lossy().into_owned();
     let mut ada = window("Ada", |session| {
         let track = session.edit(|song| Ok(song.add_track("Vocal"))).unwrap();

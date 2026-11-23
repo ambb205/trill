@@ -292,6 +292,7 @@ impl SetupScene {
             look_at_start: true,
             quiet_about: None,
         };
+        let runtime_listed = lists[0].parts.iter().any(|status| status.part.id == "runtime");
         Staged {
             program: made_up,
             on_program,
@@ -329,6 +330,8 @@ impl SetupScene {
             on_machine: self == SetupScene::Machine,
             selected: match self {
                 SetupScene::Fetching => "stems",
+                // The runtime is listed only where it is pinned (Windows on x86-64).
+                _ if !runtime_listed => "stems",
                 _ => "runtime",
             },
             instruments,

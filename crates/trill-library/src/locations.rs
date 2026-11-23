@@ -29,6 +29,7 @@ struct Places {
     /// Windows, `/Applications` on macOS.
     programs: Vec<PathBuf>,
     /// Windows' `ProgramData`.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))] // Read only where Windows' places are.
     program_data: Option<PathBuf>,
 }
 

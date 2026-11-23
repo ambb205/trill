@@ -306,8 +306,28 @@ pub fn run(runtime: Arc<Runtime>, options: UiOptions) -> anyhow::Result<()> {
         // taskbar, and without taking the keyboard. (Hidden would be
         // simpler, but a hidden window is never asked to paint.)
         viewport = viewport.with_position(OFF_SCREEN).with_active(false).with_taskbar(false);
+        // macOS puts a window with a title bar back on a screen, so this one
+        // has none; its content is the same.
+        #[cfg(target_os = "macos")]
+        {
+            viewport = viewport.with_decorations(false);
+        }
     }
-    let native = eframe::NativeOptions { viewport, ..Default::default() };
+    #[allow(unused_mut)] // Changed on macOS only.
+    let mut native = eframe::NativeOptions { viewport, ..Default::default() };
+    #[cfg(target_os = "macos")]
+    if options.screenshot.is_some() {
+        // Nor is the program brought to the front, as macOS does with any
+        // program that opens a window: it gets no Dock icon and no menu bar,
+        // and never takes the keyboard from whoever is at the machine.
+        native.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder
+                .with_activation_policy(ActivationPolicy::Prohibited)
+                .with_activate_ignoring_other_apps(false)
+                .with_default_menu(false);
+        }));
+    }
     // Failures inside the event loop (a screenshot that could not be saved)
     // have no way to return a value, so they are left here.
     let failure = Arc::new(Mutex::new(None));

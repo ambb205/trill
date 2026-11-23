@@ -42,5 +42,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# How much memory a process that studies has taken (`proc_pid_rusage`).
+# In the tree already, through other crates.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

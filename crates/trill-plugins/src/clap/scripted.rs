@@ -340,6 +340,7 @@ pub(crate) fn lifecycle(serial: u64) -> Vec<&'static str> {
 
 /// Something the user of an editor does in it.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) enum Action {
     /// Turns the gain knob to this value, as one gesture.
     TurnKnob(f64),
@@ -357,6 +358,7 @@ static ACTIONS: Mutex<Vec<(u64, Action)>> = Mutex::new(Vec::new());
 /// Has the user of the editor of the instance with this serial do
 /// `action`. The editor carries it out on its next timer tick, which only
 /// comes while the editor is open.
+#[cfg_attr(not(windows), allow(dead_code))] // Editors are hosted, and their tests run, on Windows only.
 pub(crate) fn act(serial: u64, action: Action) {
     ACTIONS.lock().unwrap().push((serial, action));
 }

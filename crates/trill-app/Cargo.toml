@@ -45,6 +45,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # owner. The version eframe itself is built on.
 raw-window-handle = "0.6"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# What a window that is only there to have its picture taken is to macOS: a
+# program that is never brought to the front. The version eframe itself is
+# built on.
+winit = { version = "0.30", default-features = false }
+
 [dev-dependencies]
 # Sample packs for the interaction tests, away from the user's own.
 tempfile = "3"

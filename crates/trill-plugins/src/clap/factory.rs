@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn a_broken_plugin_file_is_reported_and_remembered() {
         let dir = TestDir::new();
-        let broken = dir.file("plugins/broken.clap", b"this is not a shared library");
+        let broken = dir.broken_clap("plugins/broken.clap");
         let factory = empty_factory(&dir);
 
         assert!(factory.descriptors().is_empty());
