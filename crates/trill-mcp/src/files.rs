@@ -183,6 +183,8 @@ fn use_json(used: &FileUse, track: &str) -> Value {
     let mut out = match &used.place {
         FilePlace::Clip(clip) => json!({ "clip": clip.0 }),
         FilePlace::Sample { device, slot } => json!({ "device": device.0, "slot": slot }),
+        // (No file the song is missing is one: it is made again.)
+        FilePlace::Rendition(track) => json!({ "rendition_of_track": track.0 }),
     };
     out["name"] = json!(used.name);
     out["track"] = json!(track);
@@ -495,7 +497,7 @@ impl TrillServer {
             .iter()
             .filter_map(|relink| match &relink.place {
                 FilePlace::Clip(clip) => Some(clip.0),
-                FilePlace::Sample { .. } => None,
+                FilePlace::Sample { .. } | FilePlace::Rendition(_) => None,
             })
             .collect();
         let mut out = json!({

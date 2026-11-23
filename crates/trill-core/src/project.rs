@@ -1059,6 +1059,18 @@ pub struct Track {
     /// played from there: see [`takes`](crate::takes).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<Take>,
+    /// What stands in for the track's first devices where a program has
+    /// not got them: a recording of what they make of the track, by a
+    /// program that has them. See [`renditions`](crate::renditions). A file
+    /// saved before there were any has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendition: Option<crate::renditions::Rendition>,
+    /// The recording this machine plays for the rendition: each machine's
+    /// own, as a clip's path is, and said to nobody. It is the rendition's
+    /// own once that is here, and the one before it until then. Empty
+    /// where the machine has none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rendition_at: String,
 }
 
 impl Track {
@@ -1817,6 +1829,8 @@ impl Project {
             reference: None,
             input: None,
             takes: Vec::new(),
+            rendition: None,
+            rendition_at: String::new(),
         });
         id
     }
@@ -1998,6 +2012,9 @@ impl Project {
         copy.id = TrackId(self.alloc_id());
         copy.name = format!("{} copy", copy.name);
         copy.solo = false;
+        // (A rendition is of the track it was made of: the copy's devices
+        // are others, and it has none until one is made of it.)
+        (copy.rendition, copy.rendition_at) = (None, String::new());
         for clip in &mut copy.clips {
             clip.id = ClipId(self.alloc_id());
         }

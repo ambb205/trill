@@ -64,6 +64,7 @@ mod missing;
 mod recording;
 pub use recording::{PlayedElsewhere, UnusedRecordings};
 mod recovery;
+mod renditions;
 mod settings;
 mod sounds;
 pub mod study_files;

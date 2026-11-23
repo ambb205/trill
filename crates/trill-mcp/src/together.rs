@@ -136,6 +136,10 @@ impl TrillServer {
         let session = self.session.lock();
         let name = |id: &trill_core::TrackId| session.project().track(*id).map(|track| track.name.clone()).ok();
         let clip = |id: &trill_core::ClipId| session.project().clip(*id).map(|clip| clip.name.clone()).ok();
+        let device = |id: &trill_core::DeviceId| {
+            let device = session.project().device(*id).ok()?;
+            Some(format!("{} ({})", device.name, device.uri))
+        };
         let here: Vec<Value> = (status.people.iter())
             .map(|here| {
                 let mut person = json!({
@@ -157,6 +161,12 @@ impl TrillServer {
                 }
                 if let Some(holding) = &here.holding {
                     person["holding"] = json!(holding);
+                }
+                // The plugins of the song their computer has not got: what
+                // these play they hear as someone who has them recorded it.
+                let lacks: Vec<String> = here.lacks.iter().filter_map(device).collect();
+                if !lacks.is_empty() {
+                    person["has_not_got"] = json!(lacks);
                 }
                 person
             })
@@ -245,6 +255,37 @@ impl TrillServer {
         }
         if let Some(seconds) = status.files_wait {
             out["audio_files_wait_minutes"] = json!(seconds.div_ceil(60));
+        }
+        // Tracks with devices that are not on every computer: what stands
+        // in for those where they are not.
+        let recorded: Vec<Value> = (session.renditions().iter())
+            .map(|found| {
+                let mut said = json!({
+                    "track": name(&found.track).unwrap_or_default(),
+                    "in_place_of": found.devices.iter().filter_map(device).collect::<Vec<_>>(),
+                    "recorded_by": found.by,
+                    "played_here": found.played,
+                    "of_the_song_as_it_is": found.as_the_song_is(),
+                });
+                if !found.lacking.is_empty() {
+                    said["not_on_this_computer"] = json!(found.lacking.iter().filter_map(device).collect::<Vec<_>>());
+                }
+                if found.played && !found.as_the_song_is() {
+                    said["note"] = json!(
+                        "what is heard here is this track as it was before something it depends on was changed \
+                         (its notes, those devices, the tempo); a program that has the devices records it again \
+                         by itself once the change has stood for a moment. The fader, the pan, the sends and the \
+                         devices after those are heard at once."
+                    );
+                }
+                said
+            })
+            .collect();
+        if !recorded.is_empty() {
+            out["heard_as_recorded"] = json!(recorded);
+        }
+        if let Some(track) = &status.recording_for_others {
+            out["recording_for_the_others"] = json!(track);
         }
         let said: Vec<String> =
             self.runtime.said_together(0).into_iter().rev().take(5).rev().map(|(_, said)| said).collect();

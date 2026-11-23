@@ -26,6 +26,7 @@ mod opening;
 mod perf;
 mod recording;
 mod recovery;
+mod renditions;
 mod ruler;
 mod setup;
 mod setup_instruments;

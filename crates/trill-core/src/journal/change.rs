@@ -353,6 +353,10 @@ fn same_track(a: &Track, b: &Track) -> bool {
         reference,
         input,
         takes,
+        // (A rendition is no setting of a track's: it is made of the song
+        // by a program, and no step of anyone's.)
+        rendition: _,
+        rendition_at: _,
     } = a;
     *id == b.id
         && *reference == b.reference
@@ -389,6 +393,8 @@ fn track_of(track: &Track) -> Track {
         reference,
         input,
         takes,
+        rendition: _,
+        rendition_at: _,
     } = track;
     Track {
         id: *id,
@@ -409,6 +415,10 @@ fn track_of(track: &Track) -> Track {
         // beside it, each a few words and a path.
         input: *input,
         takes: takes.clone(),
+        // A journal tells how a song was made, and keeps no rendition:
+        // the song it leads to is the song without them.
+        rendition: None,
+        rendition_at: String::new(),
     }
 }
 

@@ -212,7 +212,7 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
         _ => AutomationTarget::Send { track, to: other },
     };
     let kinds = [TrackKind::Normal, TrackKind::Normal, TrackKind::Group, TrackKind::Return];
-    match lot.below(55) {
+    match lot.below(56) {
         0 => Box::new(move |song| {
             song.add_track_of_kind(format!("Track {a}"), kinds[b % 4]);
             Ok(())
@@ -356,6 +356,22 @@ pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
             match b % 4 {
                 0 => drop(song.device_mut(device)?.files.remove(&slot)),
                 _ => drop(song.device_mut(device)?.files.insert(slot, is)),
+            }
+            Ok(())
+        }),
+        54 => Box::new(move |song| {
+            // What stands in for a track's first devices where they are
+            // not, as a program that has them makes it; and, one's own,
+            // where this machine has that recording.
+            let is = crate::files::FileIs::new(
+                crate::files::Content::new(&[(b % 5) as u8; 32], 3000 + (c % 4) as u64),
+                &format!("rendition {}.wav", c % 3),
+            );
+            let (of, by) = (format!("{:032x}", b % 7), format!("Maker {}", c % 3));
+            let made = crate::Rendition { after: device, of, is, by, from: (c % 5) as f64 * 4.0 };
+            song.set_rendition(track, (a % 4 != 0).then_some(made))?;
+            if a % 3 == 0 {
+                song.track_mut(track)?.rendition_at = format!("here/{}.wav", b % 5);
             }
             Ok(())
         }),

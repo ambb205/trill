@@ -312,6 +312,14 @@ fn panel(ui: &mut Ui, cx: &mut Cx, device: &Device, rect: Rect, accent: Color32)
             let galley = painter.layout(words, FontId::proportional(12.0), theme.ink_dim, body.width().min(420.0));
             painter.galley(body.min, galley, theme.ink_dim);
         }
+        // Not on this computer, and heard as someone else's recorded it:
+        // its panel says so, in place of what went wrong with it.
+        _ if super::renditions::of_device(&cx.snap.renditions, device.id).is_some() => {
+            let words = super::renditions::device_words(&cx.snap.renditions, device, &cx.snap.project);
+            let words = words.unwrap_or_default();
+            let galley = painter.layout(words, FontId::proportional(12.0), theme.ink_dim, body.width().min(420.0));
+            painter.galley(body.min, galley, theme.ink_dim);
+        }
         Some(Ok(params)) => {
             let body_of = Body { device, params, accent, dimmed: !device.enabled, id };
             match device_layouts::layout_for(&device.uri) {

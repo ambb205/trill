@@ -112,11 +112,30 @@ pub struct RenderOptions {
     /// [`Measured::draws`] names them.
     #[serde(default)]
     pub repeatable: bool,
+    /// A track as it leaves one of its devices, written to a file of its
+    /// own as the render goes: what a rendition is made with.
+    #[serde(default)]
+    pub after: Option<After>,
     /// Who watches the render: it is stopped through it, and says how far
     /// it has come. It stays with whoever asks: a render that is done in a
     /// process of its own is watched from here.
     #[serde(skip)]
     pub watch: Option<Arc<Watch>>,
+}
+
+/// What some of a track's devices make of it, to be written to a file as
+/// a render goes: the track's sound as it leaves the last of its first
+/// `devices` devices, ahead of every device after it, of its fader and of
+/// its pan. A 16-bit WAV file as long as the render, laid from where the
+/// render starts. (`trill_core::renditions` is what it is for: a recording
+/// that stands in for those devices where a machine has not got them.)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct After {
+    pub track: TrackId,
+    /// How many of the track's devices, from the first.
+    pub devices: usize,
+    /// The file. One of that name is replaced.
+    pub file: PathBuf,
 }
 
 /// A render as someone watches it from another thread: how far it has
@@ -274,6 +293,7 @@ impl Default for RenderOptions {
             threads: None,
             trusting: false,
             repeatable: false,
+            after: None,
             watch: None,
         }
     }
@@ -835,6 +855,12 @@ fn render_from(
         {
             let file = stems.begin(StemKind::Instrument, Some(track), sample_rate)?;
             node.source = Some((source_devices(track, node, &plugins), listener(Some(file))));
+        }
+        // What it is as it leaves one of its devices, where that is asked
+        // for: heard at that device, in place of what goes into its effects.
+        if let Some(after) = options.after.as_ref().filter(|after| after.track == node.id) {
+            let file = WavWriter::create(&after.file, sample_rate, WavFormat::Int16)?;
+            node.source = Some((after.devices, listener(Some(file))));
         }
     }
     if let Some(stems) = stems.filter(|stems| stems.premaster) {

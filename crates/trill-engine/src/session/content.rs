@@ -77,6 +77,11 @@ pub struct FileHere {
     /// Whether it may be read to be said and handed out: it is what the
     /// song brought here, or its user's hand let it go.
     pub may_go: bool,
+    /// Whether this machine wants the file where it has not got it. Every
+    /// file the song plays is wanted; the recording of a rendition only
+    /// where this machine, or someone else who holds the song, has not
+    /// got the devices it stands in for.
+    pub wanted: bool,
 }
 
 /// The folder, in a song's folder of files from other programs, of the
@@ -387,6 +392,7 @@ impl Session {
                         path: audio.path.clone(),
                         is: audio.is.clone(),
                         may_go: may_go(&audio.path),
+                        wanted: true,
                     });
                 }
             }
@@ -394,7 +400,28 @@ impl Session {
         for device in self.project.devices().filter(|device| SAMPLE_PLAYERS.contains(&device.uri.as_str())) {
             for (slot, path) in named_by(device).into_iter().filter(|(_, path)| !path.is_empty()) {
                 let (is, may_go) = (device.files.get(&slot).cloned(), may_go(&path));
-                files.push(FileHere { place: FilePlace::Sample { device: device.id, slot }, path, is, may_go });
+                let place = FilePlace::Sample { device: device.id, slot };
+                files.push(FileHere { place, path, is, may_go, wanted: true });
+            }
+        }
+        // The recordings that stand in for devices: each where it lies, or
+        // will, in the song's own folder. A program that made one, or was
+        // brought one, hands it on; it is wanted where a device it stands
+        // in for is lacking, here or at someone else's.
+        if let Some(folder) = &folder {
+            for track in &self.project.tracks {
+                let (Some(rendition), Some(count)) = (&track.rendition, track.stood_in()) else { continue };
+                let lacking = |device: &Device| {
+                    self.bank.devices.get(&device.id).is_some_and(|meta| meta.error.is_some())
+                        || self.lacked_elsewhere.contains(&device.id)
+                };
+                files.push(FileHere {
+                    place: FilePlace::Rendition(track.id),
+                    path: folder.join(rendition.is.kept_as()).to_string_lossy().into_owned(),
+                    is: Some(rendition.is.clone()),
+                    may_go: true,
+                    wanted: track.devices[..count].iter().any(lacking),
+                });
             }
         }
         files
@@ -415,6 +442,8 @@ impl Session {
         let op = match place {
             FilePlace::Clip(clip) => Op::Clip(*clip, ClipOp::Audio(AudioSet::Is(Some(is)))),
             FilePlace::Sample { device, slot } => Op::Sample(*device, slot.clone(), Some(is)),
+            // (What a rendition's recording is, its maker said with it.)
+            FilePlace::Rendition(_) => return false,
         };
         self.write_quietly(vec![op]);
         let _ = self.rederive();
@@ -459,6 +488,9 @@ impl Session {
     pub fn files_were_read(&mut self, paths: &[PathBuf]) {
         // A device that plays one of them is made anew: it looked for its
         // file when it was made, and found none.
+        // (A recording that stands in for devices and is here now is the
+        // one its track plays from here on.)
+        self.place_renditions();
         let arrived = |path: &String| paths.iter().any(|here| here == Path::new(path));
         let players: Vec<DeviceId> = (self.project.devices())
             .filter(|device| named_by(device).iter().any(|(_, path)| arrived(path)))
@@ -555,6 +587,7 @@ impl Session {
         for problem in problems {
             let place = match &problem {
                 crate::Problem::AudioFile { clip, path, .. } if within(path) => Some(FilePlace::Clip(*clip)),
+                crate::Problem::Rendition { track, path, .. } if within(path) => Some(FilePlace::Rendition(*track)),
                 crate::Problem::Sample { device, slot: Some(slot), .. } => {
                     // Only a file of which the song says what it is can
                     // arrive: one that nobody said anything of (it stayed

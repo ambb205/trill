@@ -111,6 +111,9 @@ pub struct Seen {
     /// Where the song is shared through a meeting point: its address,
     /// and how the meeting stands there.
     pub meeting: Option<(String, Meeting)>,
+    /// The track this program is recording for the others, who have not
+    /// got all its devices, while it does.
+    pub recording_for_others: Option<String>,
     /// The connections that were lost and are being asked for again.
     pub away: Vec<Away>,
     /// The song's audio that is on its way here from the others.
@@ -212,6 +215,7 @@ impl TogetherScene {
             clips: nth(&clips, 1).into_iter().collect(),
             notes: notes(0),
             holding: Some("the volume of the track \u{201C}Bass\u{201D}".to_owned()),
+            lacks: Vec::new(),
         };
         let sam = Here {
             person: Person { id: 1, name: "Sam".into(), colour: 1 },
@@ -222,6 +226,7 @@ impl TogetherScene {
             clips: nth(&clips, 4).into_iter().chain(nth(&clips, 5)).collect(),
             notes: notes(1),
             holding: None,
+            lacks: Vec::new(),
         };
         // And a clash to answer, in the words a real one has.
         let text = "Jo set where the clip \u{201C}Lead\u{201D} starts at the same moment as you, and theirs is what the song has.";
@@ -277,6 +282,7 @@ pub fn sync(state: &mut UiState, live: &mut Live, snapshot: &Snapshot, runtime: 
         files: status.files,
         held: status.held,
         files_wait: status.files_wait,
+        recording_for_others: status.recording_for_others,
     };
     // What happened: who came, who went and why, what was refused, what
     // was lost and is being tried again.

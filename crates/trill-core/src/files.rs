@@ -193,6 +193,12 @@ pub enum FilePlace {
     /// A sample of a device: `slot` is what the device calls it, such as
     /// `sample` on a sampler and `pad 36` on a drum rack.
     Sample { device: DeviceId, slot: String },
+    /// The recording that stands in for a track's first devices where a
+    /// program has not got them ([`renditions`](crate::renditions)). It is
+    /// a file of the song between the programs that hold it; it is not
+    /// among [`Project::files`], and is neither looked for nor relinked:
+    /// one that is gone is made again by a program that has the devices.
+    Rendition(TrackId),
 }
 
 impl std::fmt::Display for FilePlace {
@@ -200,6 +206,7 @@ impl std::fmt::Display for FilePlace {
         match self {
             FilePlace::Clip(clip) => clip.fmt(f),
             FilePlace::Sample { device, slot } => write!(f, "{slot} of {device}"),
+            FilePlace::Rendition(track) => write!(f, "the rendition of {track}"),
         }
     }
 }
@@ -332,6 +339,12 @@ impl Project {
                 }
                 FilePlace::Sample { device, slot } => {
                     slots.entry(*device).or_default().insert(slot, path);
+                }
+                FilePlace::Rendition(track) => {
+                    return invalid(format!(
+                        "{place} is no file to point anywhere: it is made again by a program that has the devices \
+                         of {track}"
+                    ));
                 }
             }
         }

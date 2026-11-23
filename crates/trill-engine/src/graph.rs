@@ -709,6 +709,23 @@ pub(crate) struct TrackNode {
     /// made, before anything else is done to it. Only in a render that
     /// was asked for it.
     pub source: Option<(usize, Box<Tap>)>,
+    /// A recording that stands in for the first devices of the track,
+    /// which this machine has not all got: see [`StoodIn`].
+    pub rendition: Option<Box<StoodIn>>,
+}
+
+/// What stands in for the first devices of a track where one of them is
+/// not on this machine: a recording of what they make of the track, by a
+/// program that has them (`trill_core::renditions`). None of those devices
+/// is run; where the last of them would have left the track's sound, the
+/// recording is, and the devices after it, the fader and the sends go on
+/// as on any track.
+pub(crate) struct StoodIn {
+    /// How many devices it stands in for, from the first.
+    pub devices: usize,
+    /// The recording, laid where in the song it was made from, as the
+    /// song's time has that beat.
+    pub audio: RegionAudio,
 }
 
 /// What a render listens with at one point of the graph: it measures what

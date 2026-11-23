@@ -4,7 +4,7 @@
 
 use crate::graph::{
     AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, InputTap, MAX_BLOCK, MasterNode, Meter, NoteEvent,
-    ParamAutomation, RegionAudio, SendNode, TrackNode, TrackState,
+    ParamAutomation, RegionAudio, SendNode, StoodIn, TrackNode, TrackState,
 };
 use crate::processor::{CLIP_FADE_SECONDS, CROSS_FADE_SECONDS};
 use crate::ready::{LoadWatch, Plugins};
@@ -147,6 +147,11 @@ pub enum Problem {
     /// The clip's file cannot be read, so the clip is silent, or cannot be
     /// stretched, so it plays repitched. `reason` names the file.
     AudioFile { clip: ClipId, path: String, reason: String },
+    /// The recording that stands in for devices of the track that are not
+    /// on this machine cannot be read: the track is as it is without
+    /// them. (Where it is on its way from another program this is no
+    /// problem, and is not said as one.)
+    Rendition { track: TrackId, path: String, reason: String },
 }
 
 /// Whether `device` is a plugin that loaded a preset itself, in a program
@@ -194,6 +199,7 @@ impl std::fmt::Display for Problem {
                 write!(f, "{device}: {reason}")
             }
             Problem::AudioFile { clip, reason, .. } => write!(f, "{clip}: {reason}"),
+            Problem::Rendition { track, reason, .. } => write!(f, "{track}: {reason}"),
         }
     }
 }
@@ -371,6 +377,7 @@ impl Compiler<'_> {
 
             let meter = self.meters.tracks.entry(track.id).or_default().clone();
             let chain = self.chain(&track.devices, project, &routing.keys, &mut problems);
+            let rendition = self.rendition_of(track, &tempo_map, &mut problems);
             let switches = crate::graph::switches_of(&notes, &track.profile);
             let (switch_keys, stay_keys) = crate::graph::switch_keys(&switches);
             let unsaid = track.profile.articulations.iter().find(|way| way.default && way.key.is_some());
@@ -407,6 +414,7 @@ impl Compiler<'_> {
                 key_out: routing.key(track.id),
                 tap: None,
                 source: None,
+                rendition,
             });
         }
         // Every node must run before the bus it feeds is read, and before
@@ -462,6 +470,39 @@ impl Compiler<'_> {
             graph.tracks.len()
         );
         (Box::new(graph), problems)
+    }
+
+    /// What stands in for the first devices of `track` in this graph: the
+    /// recording of its rendition, where this machine has not got one of
+    /// the devices it was made after and has the recording. A machine that
+    /// has them all plays them, whatever recording there is.
+    fn rendition_of(&mut self, track: &Track, tempo: &TempoMap, problems: &mut Vec<Problem>) -> Option<Box<StoodIn>> {
+        let devices = track.stood_in()?;
+        let from = track.rendition.as_ref()?.from;
+        let lacking = |device: &Device| self.bank.devices.get(&device.id).is_some_and(|meta| meta.error.is_some());
+        if !track.devices[..devices].iter().any(lacking) {
+            return None;
+        }
+        // (No place for it here: it has not been asked for yet, and the
+        // devices that are not there are said as they always were.)
+        let path = track.rendition_here()?;
+        let asked = Instant::now();
+        let read = self.audio.media().audio_at_rate(std::path::Path::new(path), self.sample_rate);
+        said_if_slow(asked, || format!("the rendition of '{}' was on hand", track.name));
+        match read {
+            Ok(data) => {
+                // It begins on the frame of the song its first beat is
+                // nearest to, as a render that starts there does.
+                let step = data.sample_rate / self.sample_rate;
+                let origin = -tempo.frames_at(from, self.sample_rate).round() * step;
+                Some(Box::new(StoodIn { devices, audio: RegionAudio { data, origin, step } }))
+            }
+            Err(error) => {
+                let (track, path) = (track.id, path.to_owned());
+                problems.push(Problem::Rendition { track, path, reason: error.to_string() });
+                None
+            }
+        }
     }
 
     /// The devices of a chain, and what moves their parameters. `keys` are

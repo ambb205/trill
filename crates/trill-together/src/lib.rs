@@ -229,7 +229,10 @@ mod tests {
             }
         }
         let overtaken = PIECES - before;
-        assert!(overtaken > waited / 2, "the song waited for {before} of {PIECES} pieces, {waited} of which waited then");
+        assert!(
+            overtaken > waited / 2,
+            "the song waited for {before} of {PIECES} pieces, {waited} of which waited then"
+        );
         // A connection that is ended does not say the rest of a file first.
         let began = Instant::now();
         let waited = pieces.waiting(ours).unwrap() / (MAX_PIECE + 64);
