@@ -5041,6 +5041,7 @@ name = "trill-fetch"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "libc",
  "log",
  "parking_lot",
  "serde",

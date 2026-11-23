@@ -39,8 +39,8 @@ pub fn need(seconds: f64, models: &Which) -> u64 {
 }
 
 /// The memory that is free to be used at once, in bytes. `None` where
-/// the machine cannot be asked (Windows and macOS can), and then nothing
-/// is refused for want of it.
+/// the machine cannot be asked (Windows, macOS and Linux can), and then
+/// nothing is refused for want of it.
 pub fn free() -> Option<u64> {
     #[cfg(windows)]
     {
@@ -54,7 +54,12 @@ pub fn free() -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     return macos_memory().map(|(_, free)| free);
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        // What the system reckons can be had without swapping.
+        linux::kilobytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemAvailable:")
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     None
 }
 
@@ -104,7 +109,7 @@ pub struct Held {
 }
 
 /// What the process `pid` holds. `None` when it is gone, or where a
-/// process cannot be asked (Windows and macOS can).
+/// process cannot be asked (Windows, macOS and Linux can).
 pub fn held_by(pid: u32) -> Option<Held> {
     #[cfg(windows)]
     {
@@ -123,6 +128,15 @@ pub fn held_by(pid: u32) -> Option<Held> {
                 .then_some(Held { now: counters.PagefileUsage as u64, peak: counters.PeakPagefileUsage as u64 })
         }
     }
+    // Linux gives memory to a program as it touches it, so what a process
+    // holds is what is resident, and what of it was put out to swap.
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let field = |name| linux::kilobytes(&status, name);
+        let now = field("VmRSS:")? + field("VmSwap:").unwrap_or(0);
+        Some(Held { now, peak: field("VmHWM:").unwrap_or(0).max(now) })
+    }
     #[cfg(target_os = "macos")]
     {
         // What the system counts against a process (its footprint: what it
@@ -139,10 +153,20 @@ pub fn held_by(pid: u32) -> Option<Held> {
             Held { now: info.ri_phys_footprint, peak: info.ri_lifetime_max_phys_footprint.max(info.ri_phys_footprint) }
         })
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    /// The field `name` of a file of `/proc` that says sizes as "Name:  123 kB", in bytes.
+    pub(super) fn kilobytes(text: &str, name: &str) -> Option<u64> {
+        let line = text.lines().find(|line| line.starts_with(name))?;
+        let number = line[name.len()..].trim().strip_suffix("kB")?.trim();
+        number.parse::<u64>().ok().map(|kilobytes| kilobytes * 1024)
     }
 }
 
@@ -179,12 +203,21 @@ mod tests {
         assert_eq!(held_by(u32::MAX - 7), None);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn the_machine_and_this_process_say_what_they_hold() {
-        assert!(free().expect("Windows can be asked") > 0);
+        assert!(free().expect("the machine can be asked") > 0);
         let own = held_by(std::process::id()).expect("this process is there");
         assert!(own.now > 0 && own.peak >= own.now, "{own:?}");
         assert_eq!(held_by(u32::MAX - 7), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_size_is_read_from_its_line() {
+        let text = "VmPeak:\t  100 kB\nVmHWM:\t   12 kB\nThreads:\t3\n";
+        assert_eq!(linux::kilobytes(text, "VmHWM:"), Some(12 * 1024));
+        assert_eq!(linux::kilobytes(text, "Threads:"), None);
+        assert_eq!(linux::kilobytes(text, "VmSwap:"), None);
     }
 }

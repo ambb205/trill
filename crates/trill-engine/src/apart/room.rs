@@ -77,12 +77,11 @@ fn macos_memory() -> Option<(u64, u64)> {
     Some((total, total.saturating_sub(held * page)))
 }
 
-#[cfg(test)]
+// Only Windows and macOS can be asked yet.
+#[cfg(all(test, any(windows, target_os = "macos")))]
 mod tests {
-    #[cfg(any(windows, target_os = "macos"))]
     use super::*;
 
-    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn the_machine_says_how_much_memory_it_has_left() {
         let room = Room::now().expect("the system can be asked");

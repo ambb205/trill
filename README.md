@@ -17,8 +17,8 @@ Three goals decide every trade-off:
 - **It hosts your plugins.** CLAP and VST3, with their presets and their own editor windows.
 - **An AI can drive all of it.** Every edit has one implementation, which the window and the MCP server share.
 
-Trill is an early build, made on Windows and built and tested on macOS too. [Status](docs/status.md) lists what is
-not built yet, and what macOS has not got.
+Trill is an early build, made on Windows and built and tested on macOS and Linux too. [Status](docs/status.md)
+lists what is not built yet, and what macOS and Linux have not got.
 
 ## What is in it
 
@@ -45,8 +45,9 @@ not built yet, and what macOS has not got.
 
 ## Getting started
 
-Trill needs 64-bit Windows, or macOS on Apple silicon. It is developed on Windows 11; on macOS it is built from the
-repository, and some of it is not there yet ([what](docs/status.md#macos)). Linux has not been run.
+Trill needs 64-bit Windows, macOS on Apple silicon, or Linux on x86-64. It is developed on Windows 11; on macOS
+and Linux it is built from the repository, and some of it is not there yet ([macOS](docs/status.md#macos),
+[Linux](docs/status.md#linux)).
 
 **Install it.** Download `Trill-<version>-setup.exe` from the
 [latest release](https://github.com/ambb205/trill/releases/latest) and run it. It installs for you alone, asks for
@@ -55,7 +56,9 @@ asks before it runs the installer. ([Installing and updating](docs/installing-an
 
 **Or build it.** You need [Rust](https://rustup.rs), which fetches the compiler the repository names by itself: on
 Windows with the MSVC toolchain, which needs the "Desktop development with C++" workload of the Visual Studio Build
-Tools; on macOS with Xcode's command-line tools (`xcode-select --install`). Then, from the repository:
+Tools; on macOS with Xcode's command-line tools (`xcode-select --install`); on Linux with a C compiler, `pkg-config`
+and ALSA's headers (`sudo apt install build-essential pkg-config libasound2-dev` on Debian and Ubuntu). Then, from
+the repository:
 
 ```sh
 git clone https://github.com/ambb205/trill.git

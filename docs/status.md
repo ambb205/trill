@@ -3,8 +3,8 @@
 Trill is an early build. Everything the other pages describe works and is held by tests. This page lists what is
 not built yet.
 
-Windows is where Trill is made. macOS on Apple silicon builds, passes the tests and runs the window, the server
-and the engine; what it has not got yet is [below](#macos). Linux has not been run.
+Windows is where Trill is made. macOS on Apple silicon and Linux on x86-64 build, pass the tests and run the
+window, the server and the engine; what each has not got yet is below ([macOS](#macos), [Linux](#linux)).
 
 ## Arrangement and engine
 
@@ -182,7 +182,8 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
   which on what was measured is enough; a song that keeps more threads busy may want the workgroup as well.
 - A plugin that takes a render down named by its file. The render says that its process went down, at which
   stage, and the song is as it was.
-- How much room a disk has. Nothing is refused for want of it.
+- The room on a disk, tried on a Mac. It is asked as on Linux, by a call every Unix has, and that was run on Linux
+  alone.
 - A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
 - Files dragged in from the Finder, tried with a real mouse. Where they will land is shown while they are dragged,
   from where the system says the pointer is, as on Windows.
@@ -191,6 +192,29 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
 - An installer, a release and updates. A build of one's own neither looks for a newer Trill nor is replaced.
 - A picture of the window (`--screenshot`) is taken in a window without a title bar, off every screen, by a
   program that has no Dock icon and never comes to the front.
+
+## Linux
+
+What Windows has and Linux has not, yet. Tried on Ubuntu 26.04 (GNOME on Wayland, PipeWire) on x86-64; what runs
+there and how it was checked is in [Building and testing](development.md#on-linux).
+
+- The audio threads in the class Linux keeps for audio. They run at an ordinary thread's priority (a built-in song
+  of 14 tracks, 30 seconds handed to the system's output as silence: no buffer late), so a song that keeps up on an
+  idle machine may fall short on a busy one; `keeps_up` says the class was refused.
+- Plugins installed on Linux tried: CLAP and VST3 are looked for in their usual Linux folders, and none has been
+  loaded. Plugin editors: opening one says that they are not supported on this system yet.
+- Taking an output for Trill alone (exclusive mode). Asked for, it says the device cannot be taken exclusively on
+  this system, and the device is shared.
+- The trash. A recording that is removed goes to the `removed` folder beside the takes.
+- How much memory the machine has free for a render or a probe in a process of its own, and what a thread ran. A
+  study asks the machine, and measures and ends its own process.
+- The assistant's processes ending with Trill when Trill itself is killed. They are one group, stopped together
+  when a turn is stopped or Trill closes, as on Windows; a Windows job also ends them when Trill is killed.
+- A study. The models' runtime is published for Windows alone so far: a study says that the part `runtime` is not
+  published for this system yet.
+- An installer, a release and updates.
+- A picture of the window (`--screenshot`) is taken in a window that is never seen and never given the keyboard
+  where there is an X server (a Wayland desktop has one beside it); without one the window is shown meanwhile.
 
 ## Installing and updating
 
