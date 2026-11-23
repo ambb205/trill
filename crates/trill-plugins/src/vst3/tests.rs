@@ -924,13 +924,16 @@ fn a_plugin_that_fails_while_running_is_bypassed() {
 fn a_plugin_made_for_a_render_is_set_up_and_processed_offline() {
     use trill_core::device::Purpose;
     use vst3::Steinberg::Vst::ProcessModes_::{kOffline, kRealtime};
+    use vst3::Steinberg::int32;
+    // The SDK's enumerations are an `int` on Windows and an `unsigned` elsewhere; the host says them as `int32`.
+    let (realtime, offline) = (kRealtime as int32, kOffline as int32);
     let factory = factory();
     // Made to be played, as every device of a session is: realtime.
     let mut played = create(&factory, &device(kind::IMPULSE));
     block(&mut played, BLOCK, &[], 0.0);
     let seen = self::seen(&mut played);
-    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kRealtime));
-    assert_eq!(seen.block_mode, Some(kRealtime));
+    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(realtime));
+    assert_eq!(seen.block_mode, Some(realtime));
 
     // Made for a render: told so when it is set up, and with every block,
     // and again when it is set up for another sample rate.
@@ -940,12 +943,12 @@ fn a_plugin_made_for_a_render_is_set_up_and_processed_offline() {
     let (left, _) = block(&mut rendered, BLOCK, &[on(3, 1.0)], 0.0);
     assert_eq!(left[3], 1.0, "it plays as it would played live");
     let seen = self::seen(&mut rendered);
-    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kOffline));
-    assert_eq!(seen.block_mode, Some(kOffline));
+    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(offline));
+    assert_eq!(seen.block_mode, Some(offline));
     rendered.processor.prepare(44_100.0, 32);
     block(&mut rendered, 32, &[], 0.0);
     let seen = self::seen(&mut rendered);
-    assert_eq!(seen.setup, Some((44_100.0, 32, kOffline, 0)));
+    assert_eq!(seen.setup, Some((44_100.0, 32, offline, 0)));
 }
 
 // ---- through the engine --------------------------------------------------

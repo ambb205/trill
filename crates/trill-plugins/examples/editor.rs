@@ -760,6 +760,11 @@ mod platform {
 
     pub struct Owner;
 
+    /// Nothing to take down; it is dropped where the Windows one is.
+    impl Drop for Owner {
+        fn drop(&mut self) {}
+    }
+
     impl Owner {
         pub fn create() -> Self {
             Self

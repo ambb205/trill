@@ -26,9 +26,12 @@ pub fn suggested_locations() -> Vec<SuggestedLocation> {
 struct Places {
     home: Option<PathBuf>,
     /// Where programs are installed: `Program Files` and its 32-bit twin on
-    /// Windows, `/Applications` on macOS.
+    /// Windows, `/Applications` on macOS. Linux's programs keep no samples
+    /// of their own in a place of their own.
+    #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
     programs: Vec<PathBuf>,
     /// Windows' `ProgramData`.
+    #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
     program_data: Option<PathBuf>,
 }
 
@@ -66,6 +69,7 @@ fn suggestion(label: impl Into<String>, path: PathBuf) -> SuggestedLocation {
 /// their names. Programs install under names that carry a version ("FL
 /// Studio 2024", "Live 12 Suite"), so they are found by what they start
 /// with.
+#[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
 fn versions(parent: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
     let mut found: Vec<(String, PathBuf)> = std::fs::read_dir(parent)
         .into_iter()
@@ -159,10 +163,12 @@ fn linux(places: &Places) -> Vec<SuggestedLocation> {
     if let Some(home) = &places.home {
         found.push(suggestion("Splice", home.join("Splice")));
         found.push(suggestion("Bitwig Studio Library", home.join("Bitwig Studio").join("Library")));
-        let bases = [home.join("Music"), home.join("Documents"), home.clone()];
-        found.extend(personal(&bases));
-        // Lower-case folder names are as common as capitalised ones here.
-        found.extend(bases.iter().map(|base| suggestion("Your samples", base.join("samples"))));
+        // Lower-case folder names are as common as capitalised ones here,
+        // and are offered beside them, base by base.
+        for base in [home.join("Music"), home.join("Documents"), home.clone()] {
+            found.extend(personal(std::slice::from_ref(&base)));
+            found.push(suggestion("Your samples", base.join("samples")));
+        }
     }
     found
 }

@@ -60,6 +60,8 @@ pub const TRIAL_INSTALLED_AS: &str = "{7A1D6C5E-3B2F-4D48-8E67-1C9A0F5B2D34}";
 pub const TRIAL_RUNS_AS: &str = "TrillTrialIsRunning";
 
 /// What this build is installed as, and the name it holds while it runs.
+/// Both are Windows' (the list of installed programs, a named mutex).
+#[cfg(windows)]
 fn names() -> (&'static str, &'static str) {
     match release::made_for_a_trial() {
         true => (TRIAL_INSTALLED_AS, TRIAL_RUNS_AS),

@@ -32,11 +32,11 @@ impl Room {
     }
 }
 
-#[cfg(test)]
+// Only Windows can be asked yet.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn the_machine_says_how_much_memory_it_has_left() {
         let room = Room::now().expect("Windows can be asked");

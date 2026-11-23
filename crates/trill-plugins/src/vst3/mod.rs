@@ -56,11 +56,17 @@ mod presets;
 mod probe;
 mod processor;
 mod quirks;
+// What the scripted views do is asked only by the tests of editors, which
+// are Windows' until editors are hosted elsewhere; and the SDK's enumerations
+// are a C `int` on Windows and `unsigned` elsewhere, so a cast to `u32` that
+// a test needs there is none here.
 #[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code, clippy::unnecessary_cast))]
 pub(crate) mod scripted;
 pub(crate) mod state;
 mod stream;
 #[cfg(test)]
+#[cfg_attr(not(windows), allow(clippy::unnecessary_cast))]
 mod tests;
 mod text;
 

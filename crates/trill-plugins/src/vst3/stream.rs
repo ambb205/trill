@@ -147,6 +147,8 @@ impl ISizeableStreamTrait for MemoryStream {
 }
 
 #[cfg(test)]
+// The SDK's enumerations are a C `int` on Windows and `unsigned` elsewhere.
+#[cfg_attr(not(windows), allow(clippy::unnecessary_cast))]
 mod tests {
     use super::*;
     use std::ptr::null_mut;
