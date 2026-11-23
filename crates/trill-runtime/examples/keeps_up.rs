@@ -563,8 +563,15 @@ fn run(options: &Options) -> Result<(), String> {
     }
     // How many cycles a processor runs in a nanosecond, where blocks' own
     // cycles were counted: from this thread kept busy, five times, the
-    // most of them (a thread that was held up meanwhile comes to less).
+    // most of them (a thread that was held up meanwhile comes to less). On
+    // Unix the count is nanoseconds of processor time already, and a thread
+    // kept busy for 20 ms on a machine that is busy too is taken off its
+    // processor for a fifth of that: measured so, it would make every block
+    // run longer than it took.
     let cycles_per_ns = options.whose_time.then(|| {
+        if cfg!(unix) {
+            return 1.0;
+        }
         let mut most = 0.0f64;
         for _ in 0..5 {
             let (began, before) = (Instant::now(), trill_engine::host::thread_cycles());

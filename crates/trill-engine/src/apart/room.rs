@@ -33,8 +33,8 @@ impl Room {
         }
         #[cfg(target_os = "macos")]
         {
-            let (total, free) = macos_memory()?;
-            Some(Self { free, can_take: free, total })
+            let memory = trill_fetch::memory()?;
+            Some(Self { free: memory.free, can_take: memory.free, total: memory.total })
         }
         // Linux gives a program memory as it touches it, and takes what it
         // has from others by swapping before it ends one: what it can take
@@ -47,48 +47,6 @@ impl Room {
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         None
     }
-}
-
-/// What macOS says of its memory, in bytes: what it has, and what can be
-/// had at once (what is free, and what holds files' contents and things a
-/// program said may be thrown away, which the system gives up at once).
-/// Memory compressed or wired is not counted as free.
-#[cfg(target_os = "macos")]
-fn macos_memory() -> Option<(u64, u64)> {
-    unsafe extern "C" {
-        /// Declared here: `libc` has it only under a name it is retiring.
-        fn mach_host_self() -> libc::mach_port_t;
-    }
-    /// The host's port, taken once: each `mach_host_self` is a send right
-    /// that would have to be given back.
-    fn host() -> libc::mach_port_t {
-        static HOST: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
-        // SAFETY: names this machine's host; kept for the life of the process.
-        *HOST.get_or_init(|| unsafe { mach_host_self() })
-    }
-    let mut total = 0u64;
-    let mut size = size_of::<u64>();
-    // SAFETY: the name is a C string, the value a `u64` that says its size.
-    let asked = unsafe {
-        libc::sysctlbyname(c"hw.memsize".as_ptr(), (&raw mut total).cast(), &mut size, std::ptr::null_mut(), 0)
-    };
-    if asked != 0 || total == 0 {
-        return None;
-    }
-    // SAFETY: a structure of numbers, for which nothing is a fine start.
-    let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
-    let mut count = libc::HOST_VM_INFO64_COUNT;
-    // SAFETY: the structure and its count are the ones the flavour is asked with.
-    let asked = unsafe { libc::host_statistics64(host(), libc::HOST_VM_INFO64, (&raw mut stats).cast(), &mut count) };
-    if asked != libc::KERN_SUCCESS {
-        return None;
-    }
-    // SAFETY: a value the system sets before any code runs.
-    let page = unsafe { libc::vm_page_size } as u64;
-    let held = u64::from(stats.wire_count)
-        + u64::from(stats.compressor_page_count)
-        + u64::from(stats.internal_page_count).saturating_sub(u64::from(stats.purgeable_count));
-    Some((total, total.saturating_sub(held * page)))
 }
 
 #[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
