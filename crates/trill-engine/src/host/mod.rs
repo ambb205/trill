@@ -352,7 +352,8 @@ impl AudioHost for NullHost {
             .name("audio-null".into())
             .spawn(move || {
                 if audio_priority {
-                    priority::expect_period(block_frames as u32, f64::from(sample_rate));
+                    // A stand-in: the kernel alone is asked, never the desktop's service.
+                    priority::stream_opens(block_frames as u32, f64::from(sample_rate), false);
                     priority::AudioPriority::raise_for_good();
                 }
                 let period = Duration::from_secs_f64(block_frames as f64 / sample_rate as f64);

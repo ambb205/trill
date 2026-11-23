@@ -251,6 +251,8 @@ fn open_shared_input(found: &Named, on_failure: FailureCallback) -> Result<OpenI
     let supported = device.default_input_config().map_err(failed)?;
     let (channels, rate, format) = (supported.channels() as usize, supported.sample_rate(), supported.sample_format());
     let config: cpal::StreamConfig = supported.config();
+    // Off the input's thread, before its first buffer, as for the output.
+    super::priority::stream_opens(0, f64::from(rate), true);
     let (sink, link) = crate::capture::link(rate as f64, channels);
     let measured = Arc::new(Measured::default());
     let broke = Arc::new(AtomicBool::new(false));
@@ -469,8 +471,9 @@ fn open_shared(
     let mut config: cpal::StreamConfig = supported.config();
     config.buffer_size = request.buffer_size.map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed);
     // Off the audio thread, before its first buffer: the class for audio is
-    // asked for from inside that buffer (on Linux, by a thread this starts).
-    super::priority::expect_period(request.buffer_size.unwrap_or(0), f64::from(rate));
+    // asked for from inside that buffer (on Linux, by a thread this starts),
+    // for a device a person hears.
+    super::priority::stream_opens(request.buffer_size.unwrap_or(0), f64::from(rate), true);
 
     let measured = Arc::new(Measured::default());
     let state = Callback {

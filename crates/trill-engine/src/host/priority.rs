@@ -39,6 +39,42 @@ pub fn expect_period(frames: u32, sample_rate: f64) {
     let _ = (frames, sample_rate);
 }
 
+/// A stream opens, of buffers of `frames` at `sample_rate`: what is said
+/// to [`expect_period`]. `real` is a device a person hears, for which the
+/// desktop's service may be asked (on Linux; a test's stand-in asks the
+/// kernel alone); and on Linux threads taken out of the class may have it
+/// again. May be called from any thread but an audio one.
+pub fn stream_opens(frames: u32, sample_rate: f64, real: bool) {
+    #[cfg(target_os = "linux")]
+    {
+        if real {
+            linux::ask_the_desktop();
+        }
+        linux::stream_opens();
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = real;
+    expect_period(frames, sample_rate);
+}
+
+/// Lets the desktop's service be asked for the class (on Linux), for a
+/// program that measures its threads as the window's are: it is otherwise
+/// asked only for a real device's stream. Nothing elsewhere.
+pub fn ask_the_desktop() {
+    #[cfg(target_os = "linux")]
+    linux::ask_the_desktop();
+}
+
+/// How many of the threads that make sound were given the class since a
+/// stream opened, and how many were refused, where the system says (on
+/// Linux).
+pub fn threads_given() -> Option<(u32, u32)> {
+    #[cfg(target_os = "linux")]
+    return Some(linux::counts());
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
 /// Why the threads that make sound are not in the class the system keeps
 /// for audio, and what the user can do about it, in a sentence. `None`
 /// where they are, where nothing has asked, or where the system says
@@ -59,6 +95,8 @@ pub struct AudioPriority {
     standing: mac::Standing,
     #[cfg(target_os = "linux")]
     standing: linux::Standing,
+    /// It acts on the thread that took it, and stays there.
+    on_this_thread: std::marker::PhantomData<*const ()>,
 }
 
 impl AudioPriority {
@@ -84,24 +122,35 @@ impl AudioPriority {
                 }
             }
         };
-        Self { task }
+        Self { task, on_this_thread: std::marker::PhantomData }
     }
 
     #[cfg(target_os = "macos")]
     pub fn raise() -> Self {
-        Self { standing: mac::raise() }
+        Self { standing: mac::raise(), on_this_thread: std::marker::PhantomData }
     }
 
     /// Neither allocates nor waits: where the service is asked, a thread of
     /// its own asks it.
     #[cfg(target_os = "linux")]
     pub fn raise() -> Self {
-        Self { standing: linux::raise() }
+        Self { standing: linux::raise(linux::Rank::First), on_this_thread: std::marker::PhantomData }
     }
 
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     pub fn raise() -> Self {
-        Self {}
+        Self { on_this_thread: std::marker::PhantomData }
+    }
+
+    /// [`AudioPriority::raise`] for a thread that makes sound beside the
+    /// device's own (the team's): where a service gives the class within
+    /// bounds (on Linux), it is asked for after the device's and the
+    /// input's threads.
+    pub fn raise_beside() -> Self {
+        #[cfg(target_os = "linux")]
+        return Self { standing: linux::raise(linux::Rank::Beside), on_this_thread: std::marker::PhantomData };
+        #[cfg(not(target_os = "linux"))]
+        Self::raise()
     }
 
     /// Whether the thread is in the system's audio class: granted when it
@@ -115,7 +164,7 @@ impl AudioPriority {
         #[cfg(target_os = "macos")]
         return self.standing != mac::Standing::Refused;
         #[cfg(target_os = "linux")]
-        return self.standing != linux::Standing::Refused && linux::in_real_time();
+        return self.standing != linux::Standing::Refused && linux::in_real_time() && !linux::taken_down();
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         false
     }
@@ -130,7 +179,7 @@ impl AudioPriority {
             let Ok(mut raised) = raised.try_borrow_mut() else { return false };
             let raise = || {
                 let before = AudioPriority::level_of_this_thread();
-                (AudioPriority::raise(), before)
+                (kept(AudioPriority::raise()), before)
             };
             raised.get_or_insert_with(raise).0.granted()
         });
@@ -176,10 +225,30 @@ impl AudioPriority {
     }
 }
 
+/// What a thread keeps of [`AudioPriority::raise_for_good`]. On Windows the
+/// class is given up when the thread ends, by the destructor. On Unix the
+/// thread gives it up with its life, and what is kept needs no destructor:
+/// a thread-local with one is registered with the C library on its first
+/// use, which allocates, and that first use is a device's first buffer.
+#[cfg(windows)]
+type Kept = AudioPriority;
+#[cfg(not(windows))]
+type Kept = std::mem::ManuallyDrop<AudioPriority>;
+
+#[cfg(windows)]
+fn kept(priority: AudioPriority) -> Kept {
+    priority
+}
+
+#[cfg(not(windows))]
+fn kept(priority: AudioPriority) -> Kept {
+    std::mem::ManuallyDrop::new(priority)
+}
+
 thread_local! {
     /// What [`AudioPriority::raise_for_good`] got this thread, and the
-    /// priority it had before. Given up when the thread ends.
-    static RAISED: std::cell::RefCell<Option<(AudioPriority, Option<i32>)>> = const { std::cell::RefCell::new(None) };
+    /// priority it had before.
+    static RAISED: std::cell::RefCell<Option<(Kept, Option<i32>)>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Drop for AudioPriority {
