@@ -28,3 +28,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", 
 
 [dev-dependencies]
 tempfile = "3"
+
+# A test marks a file as not to be changed, as macOS lets something that guards it.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = "0.2"
