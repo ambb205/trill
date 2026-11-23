@@ -660,7 +660,8 @@ fn a_probe_plays_a_track_as_it_is_and_changes_nothing_in_the_song() {
 
     // The sound of the track saved as a preset is what a probe of the
     // bare instrument started from that preset plays: half as loud.
-    session.saved_presets().open(tempfile::tempdir().unwrap().keep());
+    let presets = tempfile::tempdir().unwrap();
+    session.saved_presets().open(presets.path().to_path_buf());
     session.save_preset(device, "Quiet take", "", &[]).unwrap();
     let saved = ProbeTarget::Device { uri: BASS.to_string(), preset: Some("Quiet take".to_string()) };
     let from_saved = probe(&mut session, saved, &[plain(40)], &probe_options());

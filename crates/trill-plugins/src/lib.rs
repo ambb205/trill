@@ -85,6 +85,8 @@ mod transport;
 mod transport_tests;
 mod vendor;
 pub mod vst3;
+#[cfg(target_os = "linux")]
+mod x_errors;
 
 pub use clap::{CLAP_SCHEME, ClapConfig, ClapFactory};
 pub use plugin_host::PluginHost;
@@ -93,6 +95,17 @@ pub use presets::file::file_of as preset_file_of;
 pub use scan::{Known, PluginRecord, ScanFailure, ScanMode, Scanner};
 pub use vendor::{VendorPlaces, describe_state, split_state};
 pub use vst3::{VST3_SCHEME, Vst3Config, Vst3Factory};
+
+/// Puts Trill's handler of X errors in place now, where libX11 is loaded, as
+/// the host does after a plugin is made and after an editor opens; and says
+/// how many errors it has taken in this process. For a test in a process of
+/// its own: the handler is the process's.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn hold_x_errors() -> u64 {
+    x_errors::hold();
+    x_errors::heard()
+}
 
 /// Why no plugin's own window can be shown in this run of the program, where
 /// that is so (on Linux, no X server could be reached): a sentence to say

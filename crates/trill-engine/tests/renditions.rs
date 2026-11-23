@@ -42,6 +42,8 @@ struct Song {
     /// The instrument only Ada has, and the effect after it that both have.
     plugin: DeviceId,
     eq: DeviceId,
+    /// Bound first wherever a song is taken apart, so that it goes after
+    /// the sessions, which write into it until they have gone.
     _folder: tempfile::TempDir,
 }
 
@@ -141,7 +143,7 @@ fn arrives(session: &mut Session, rendition: &Rendition, from: &Path) -> PathBuf
 
 #[test]
 fn a_track_whose_plugin_is_not_here_plays_what_another_recorded_of_it_through_its_own_effects_and_fader() {
-    let Song { mut ada, mut ben, bass, plugin, eq, .. } = song();
+    let Song { _folder, mut ada, mut ben, bass, plugin, eq, .. } = song();
 
     // Ben has not got the plugin: it is in his song, and makes no sound.
     assert_eq!((ada.lacking(), ben.lacking()), (Vec::new(), vec![plugin]));
@@ -224,7 +226,7 @@ fn a_track_whose_plugin_is_not_here_plays_what_another_recorded_of_it_through_it
 
 #[test]
 fn a_change_to_what_was_recorded_is_heard_when_it_is_recorded_again_and_the_old_recording_plays_until_then() {
-    let Song { mut ada, mut ben, bass, line, plugin, .. } = song();
+    let Song { _folder, mut ada, mut ben, bass, line, plugin, .. } = song();
     let (first, at_adas) = make(&mut ada, bass, plugin, 1, 1);
     pass(&mut ada, &mut ben, "Ada");
     let at_bens = arrives(&mut ben, &first, &at_adas);
@@ -273,7 +275,7 @@ fn a_change_to_what_was_recorded_is_heard_when_it_is_recorded_again_and_the_old_
 
 #[test]
 fn a_recording_begins_where_the_track_first_plays_and_is_heard_there() {
-    let Song { mut ada, mut ben, bass, line, plugin, .. } = song();
+    let Song { _folder, mut ada, mut ben, bass, line, plugin, .. } = song();
     // The bass comes in at the fifth bar, and plays for two.
     ada.edit(|song| song.move_clip(line, None, 16.0)).unwrap();
     pass(&mut ada, &mut ben, "Ada");
@@ -299,7 +301,7 @@ fn a_recording_begins_where_the_track_first_plays_and_is_heard_there() {
 
 #[test]
 fn which_recording_a_machine_plays_is_its_own_and_is_taken_from_nobody() {
-    let Song { mut ada, mut ben, bass, plugin, .. } = song();
+    let Song { _folder, mut ada, mut ben, bass, plugin, .. } = song();
     let (rendition, _) = make(&mut ada, bass, plugin, 1, 1);
     // What Ada says of it names no place of hers.
     let said = ada.take_said();

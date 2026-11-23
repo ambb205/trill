@@ -182,7 +182,11 @@ impl ClapThread {
     /// is open already.
     pub(crate) fn open_editor(&mut self, id: InstanceId, options: &EditorOptions) -> Result<(), EditorError> {
         let gone = || EditorError::Failed("the plugin instance no longer exists".to_string());
-        self.instances.get_mut(&id).ok_or_else(gone)?.open_editor(id, options)
+        let opened = self.instances.get_mut(&id).ok_or_else(gone)?.open_editor(id, options);
+        // An editor may have set its own handler of X errors as it opened.
+        #[cfg(target_os = "linux")]
+        crate::x_errors::hold();
+        opened
     }
 
     pub(crate) fn close_editor(&mut self, id: InstanceId) {
