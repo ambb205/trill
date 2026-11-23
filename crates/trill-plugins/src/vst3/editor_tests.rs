@@ -453,3 +453,21 @@ fn an_edit_made_in_the_view_is_heard_and_reported_with_its_gesture() {
     assert_eq!(instance.controller.as_mut().unwrap().take_param_edits(), [], "edits are reported once");
     assert!(view(serial).ticks > 0);
 }
+
+/// On macOS an editor that belongs to the application's window floats above
+/// its windows while it is in front and goes out of sight with it, as an
+/// owned window does on Windows; one that belongs to nothing is a window
+/// like any other.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_editor_that_belongs_to_the_applications_window_stays_above_it() {
+    needs_windows!();
+    let factory = factory();
+    let mut owned = create(&factory, kind::EDITOR);
+    // The owner is the application's view; nothing asks it anything.
+    let window = open(&mut owned, &EditorOptions { owner: Some(1), ..options("owned") });
+    assert!(simulate::floats(window));
+    let mut alone = create(&factory, kind::EDITOR);
+    let window = open(&mut alone, &options("alone"));
+    assert!(!simulate::floats(window));
+}

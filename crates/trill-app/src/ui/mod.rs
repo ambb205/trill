@@ -281,12 +281,14 @@ impl Default for UiOptions {
 }
 
 /// The system's handle of the application's window, as a plugin editor's
-/// owner is named: an `HWND` on Windows. `None` elsewhere, where editors
-/// are not hosted yet.
+/// owner is named: an `HWND` on Windows, the window's `NSView` on macOS.
+/// `None` elsewhere.
 fn native_window(creation: &eframe::CreationContext<'_>) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match creation.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(window) => Some(window.hwnd.get()),
+        // The window's view, whose window an editor stays above.
+        RawWindowHandle::AppKit(window) => Some(window.ns_view.as_ptr() as isize),
         _ => None,
     }
 }

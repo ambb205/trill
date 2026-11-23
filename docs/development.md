@@ -33,7 +33,7 @@ cargo test -p trill-mcp --test bank serum -- --ignored --nocapture    # Serum 2'
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_MAGPIE_PROJECTS=<...>/data/projects cargo test -p trill-listen --test magpie -- --ignored --nocapture --test-threads 1    # what Trill hears in recordings that Magpie took apart, against what Magpie found in them (the author's Magpie project and its saved projects; minutes)
 TRILL_MAGPIE_PROJECTS=<...>/data/projects TRILL_STUDY_PARTS=<the fetched parts> TRILL_STUDY_ON=nvidia cargo test -p trill-study --test magpie -- --ignored --nocapture --test-threads 1    # those recordings studied with the real models (stems, beats, words and their times) against what Magpie found; needs the parts File, Setup fetches, and runs a graphics card for a minute a recording (processor, card, card2 or nvidia)
-TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
+TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows (on macOS out of sight, on two installed plugins of each format)
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
 cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency

@@ -119,6 +119,12 @@ pub struct TrillApp {
     /// standing still.
     last_frame: Option<Instant>,
     longest_gap: (Duration, Duration),
+    /// Whether a plugin's own window was asked for at start (`--editor`).
+    asked_for_an_editor: bool,
+    /// When the window asked for it, once its plugin was there; and the
+    /// longest time between two frames from then on.
+    editor_asked: Option<Duration>,
+    longest_gap_since_editor: Duration,
     last_meter_update: Instant,
     /// The selection the session was last told of; `None` before the first
     /// time. Saves asking for the session when nothing moved.
@@ -300,6 +306,9 @@ impl TrillApp {
             frames: 0,
             last_frame: None,
             longest_gap: (Duration::ZERO, Duration::ZERO),
+            asked_for_an_editor: false,
+            editor_asked: None,
+            longest_gap_since_editor: Duration::ZERO,
             last_meter_update: now,
             told_selection: None,
             take_generation: 0,
@@ -767,6 +776,7 @@ impl TrillApp {
                             *self.failure.lock() = Some(format!("could not save the screenshot: {reason}"));
                         }
                         self.capture = Capture::Done;
+                        self.say_how_it_kept_up(elapsed);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
@@ -785,18 +795,7 @@ impl TrillApp {
                     self.audio.info.output,
                     self.live.audio_faults,
                 );
-                // How the window kept up: frames since it opened, and what
-                // the stage's part of them cost while it was shown.
-                eprintln!(
-                    "trill: {} frames, {:.1} a second; the longest time between two was {:.0} ms, until {:.2} s",
-                    self.frames,
-                    self.frames as f32 / elapsed.as_secs_f32().max(1e-3),
-                    self.longest_gap.0.as_secs_f64() * 1000.0,
-                    self.longest_gap.1.as_secs_f64()
-                );
-                if let Some(report) = self.stage.report() {
-                    eprintln!("trill: {report}");
-                }
+                self.say_how_it_kept_up(elapsed);
                 self.capture = Capture::Done;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -983,6 +982,9 @@ impl TrillApp {
             if gap > self.longest_gap.0 {
                 self.longest_gap = (gap, now.duration_since(self.started));
             }
+            if self.editor_asked.is_some() && gap > self.longest_gap_since_editor {
+                self.longest_gap_since_editor = gap;
+            }
         }
         if self.frames == 1 {
             // The window is up: said to a Trill that put this one in its
@@ -1020,7 +1022,22 @@ impl TrillApp {
             browser::keys(&ctx, &mut self.cx(), typing);
         }
         let commands = self.read_commands(&ctx);
-        let open_editor = self.options.open_editor.take();
+        self.asked_for_an_editor |= self.options.open_editor.is_some();
+        // A plugin comes after the song has it: its editor is asked for once
+        // it is there, and not before (it has none until then).
+        let coming = |name: &str| {
+            let project = &self.snapshot.project;
+            let named = project.devices().find(|device| device.name == name).map(|device| device.id);
+            named.is_some_and(|id| self.live.arriving.as_ref().is_some_and(|arriving| arriving.coming.contains(&id)))
+        };
+        let open_editor = match &self.options.open_editor {
+            Some(name) if coming(name) => None,
+            _ => self.options.open_editor.take(),
+        };
+        if open_editor.is_some() {
+            self.editor_asked = Some(self.started.elapsed());
+        }
+
         let open_settings = std::mem::take(&mut self.options.show_settings);
         let mut film_asked = self.film_asked.take();
         if std::mem::take(&mut self.options.show_film) {
@@ -1231,6 +1248,43 @@ impl TrillApp {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
         self.automate(&ctx);
+    }
+
+    /// How the window kept up, said as an unattended run closes it: frames
+    /// since it opened, the longest time between two (what a plugin's work
+    /// on the window's thread stood it still for, on macOS), and what the
+    /// stage's part of them cost while it was shown.
+    fn say_how_it_kept_up(&self, elapsed: Duration) {
+        eprintln!(
+            "trill: {} frames, {:.1} a second; the longest time between two was {:.0} ms, until {:.2} s",
+            self.frames,
+            self.frames as f32 / elapsed.as_secs_f32().max(1e-3),
+            self.longest_gap.0.as_secs_f64() * 1000.0,
+            self.longest_gap.1.as_secs_f64()
+        );
+        if let Some(report) = self.stage.report() {
+            eprintln!("trill: {report}");
+        }
+        // Which plugins' own windows were open, for a run that asked for one.
+        if self.asked_for_an_editor {
+            let session = self.session.lock();
+            let names: Vec<String> = session
+                .open_device_editors()
+                .into_iter()
+                .filter_map(|id| session.project().device(id).ok().map(|device| device.name.clone()))
+                .collect();
+            eprintln!(
+                "trill: the plugins' own windows open: {}",
+                if names.is_empty() { "none".into() } else { names.join(", ") }
+            );
+            if let Some(asked) = self.editor_asked {
+                eprintln!(
+                    "trill: asked for at {:.2} s; the longest time between two frames since was {:.0} ms",
+                    asked.as_secs_f64(),
+                    self.longest_gap_since_editor.as_secs_f64() * 1000.0
+                );
+            }
+        }
     }
 
     /// Names the system's window this runs in, for what must belong to it

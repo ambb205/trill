@@ -26,8 +26,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapFormat, NSScreen, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapFormat, NSFloatingWindowLevel, NSScreen,
+    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::cell::{Cell, RefCell};
@@ -203,8 +203,10 @@ pub(crate) struct Window {
 impl Window {
     /// Makes a hidden window titled `title`.
     ///
-    /// `owner` is a window of the application's that the editor would stay
-    /// above; on macOS it is not used (see `docs/status.md`). `position` is
+    /// `owner` is a view of the application's window (`NSView`), which the
+    /// editor stays above: as on Windows an owned window does, it floats
+    /// above the application's windows while the application is in front,
+    /// and goes out of sight with it when another one is. `position` is
     /// where its top-left corner goes, in points from the top-left of the
     /// main screen; without one, or one on no screen, the window is
     /// centred.
@@ -217,7 +219,6 @@ impl Window {
         position: Option<(i32, i32)>,
         constrain: Box<dyn Fn(Size) -> Size>,
     ) -> Result<Self, String> {
-        let _ = owner;
         let mtm = first_thread().ok_or("an editor's window can only be made on the process's first thread")?;
         // A program without a window of its own has no application yet: it
         // is made, without an icon in the Dock or a menu bar of its own.
@@ -254,6 +255,10 @@ impl Window {
             window
         };
         window.setTitle(&NSString::from_str(title));
+        if owner.is_some_and(|owner| owner != 0) {
+            window.setLevel(NSFloatingWindowLevel);
+            window.setHidesOnDeactivate(true);
+        }
         let content = NSView::initWithFrame(NSView::alloc(mtm), frame);
         window.setContentView(Some(&content));
         let delegate = Delegate::new(mtm, shared.clone());
@@ -510,6 +515,11 @@ pub(crate) mod simulate {
 
     pub(crate) fn exists(handle: isize) -> bool {
         there(move |mtm| window(mtm, handle).is_some())
+    }
+
+    /// Whether the window stays above the application's others.
+    pub(crate) fn floats(window: isize) -> bool {
+        with(window, |window| window.level() == NSFloatingWindowLevel && window.hidesOnDeactivate())
     }
 
     pub(crate) fn is_visible(window: isize) -> bool {
