@@ -182,8 +182,6 @@ What Windows has and macOS has not, yet. Each is said where it would be used, ne
   which on what was measured is enough; a song that keeps more threads busy may want the workgroup as well.
 - A plugin that takes a render down named by its file. The render says that its process went down, at which
   stage, and the song is as it was.
-- The room on a disk, tried on a Mac. It is asked as on Linux, by a call every Unix has, and that was run on Linux
-  alone.
 - A study's models. The runtime and what drives a graphics card are pinned for Windows alone.
 - Files dragged in from the Finder, tried with a real mouse. Where they will land is shown while they are dragged,
   from where the system says the pointer is, as on Windows.
