@@ -130,12 +130,17 @@ pub fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
 }
 
 /// Where a bundle on macOS keeps its programs.
+#[cfg(target_os = "macos")]
 const PROGRAMS_OF_A_BUNDLE: &str = "Contents/MacOS/";
 
 /// Whether the file at `path` (below the folder Trill is in) is one of its
-/// programs: on Windows by its name, in a bundle by where it lies.
+/// programs: on Windows by its name; on macOS also by where it lies in a
+/// bundle.
 fn is_a_program(path: &str) -> bool {
-    path.ends_with(".exe") || path.starts_with(PROGRAMS_OF_A_BUNDLE)
+    #[cfg(target_os = "macos")]
+    return path.ends_with(".exe") || path.starts_with(PROGRAMS_OF_A_BUNDLE);
+    #[cfg(not(target_os = "macos"))]
+    path.ends_with(".exe")
 }
 
 /// The files of an update in the order they go in: programs last, so that
@@ -146,8 +151,12 @@ fn in_order(files: &[Piece]) -> Vec<&Piece> {
     ordered
 }
 
-/// Makes a program that was unpacked one that can be run: an archive keeps
-/// no file's mode. Nothing on Windows, where a program is one by its name.
+/// Makes a program that was unpacked one that can be run: the archive is
+/// unpacked by `trill_fetch::zip`, which makes every file as a plain one and
+/// reads no mode from it. Called only for a file the announcement names,
+/// once it is held to its checksum, and only where [`is_a_program`] says it
+/// is one. On every Unix alike; nothing on Windows, where a program is one
+/// by its name.
 fn make_runnable(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -730,6 +739,7 @@ mod tests {
     /// `Contents/MacOS`, which go in last and are made runnable when they
     /// are staged (an archive keeps no file's mode); the folder it is
     /// installed in is the bundle its program lies in.
+    #[cfg(target_os = "macos")]
     #[test]
     fn in_a_bundle_the_programs_are_known_by_where_they_lie_and_are_staged_runnable() {
         let files = |paths: &[&str]| -> Vec<Piece> {
@@ -745,7 +755,6 @@ mod tests {
         assert_eq!(bundle_of(Path::new("/somewhere/Trill/trill")), None);
         assert_eq!(bundle_of(Path::new("/somewhere/Contents/MacOS/trill")), None, "a folder that is no bundle");
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let (home, shelf) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
