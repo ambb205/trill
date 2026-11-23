@@ -38,7 +38,7 @@ cargo run -p trill-runtime --example together -- SONG.trill      # two programs 
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build -p trill-meet --release --target x86_64-unknown-linux-musl   # the meeting point as one static file for a Linux server (the `load` example beside it holds many meetings open, to see what that takes)
 sh scripts/friend-bundle.sh                         # a release build gathered into target/friend/Trill to hand to a friend: the programs, the licences, a page of what their computer needs
 sh scripts/release.sh --key FILE --notes NOTES.txt  # a release into target/release-out/<version>: the installer, the archive an installed Trill updates from, the signed announcement (publishes nothing; `--trial KEYFILE` is a build to try the updater out with, never to publish; see docs/development.md)
-cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack and announce (see the example)
+cargo run -p trill-update --example release -- read ANNOUNCEMENT   # what an announcement of a release says, read as a program reads it; also key, public, pack, describe (a build worked out from its archive alone) and announce (one or several builds, signed) (see the example)
 ```
 
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine
