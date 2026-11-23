@@ -224,14 +224,19 @@ there and how it was checked is in [Building and testing](development.md#on-linu
   goes to that disk's trash, as the trash's specification has it, where the file manager does not list it.
 - A study. The models' runtime is published for Windows alone so far: a study says that the part `runtime` is not
   published for this system yet.
-- An installer, a release and updates.
+- A build for an older Linux. A release needs a C library (glibc) as new as the one it was built against, which
+  on Ubuntu 26.04 is 2.43 (libm's float functions took new versions there): a desktop of an older glibc
+  (Ubuntu 24.04, Debian 13) cannot start it. Building against an older one is not set up.
+- An entry in the desktop's menu, or songs opened with Trill by a double-click: a release is a folder to unpack, and
+  its `trill` is started from there.
 - A picture of the window (`--screenshot`) is taken in a window that is never seen and never given the keyboard
   where there is an X server (a Wayland desktop has one beside it); without one the window is shown meanwhile.
 
 ## Installing and updating
 
 - A certificate. The installer and the programs are not signed, and Windows says so the first time one is run.
-- Anything but Windows on x86-64. A release has a build for each kind of machine it names, and names one.
+- Anything but Windows on x86-64, macOS on Apple silicon and Linux on x86-64. A release has a build for each kind
+  of machine it names.
 - Starting again from the window. A newer Trill that was fetched goes in at the next start; the window does not
   close and start itself, and says to close every Trill.
 - `trill-mcp` putting a newer Trill in place. It leaves that to the window's next start, and while a client keeps

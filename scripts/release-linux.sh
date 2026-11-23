@@ -173,7 +173,7 @@ for program in trill trill-mcp; do
     done
     # The newest version of the C library it asks for (a symbol that is only taken where it is
     # there, a weak one, asks for nothing).
-    asks=$(objdump -T "$built/$program" | awk '$2 != "w" || $3 != "DF"' | grep -o 'GLIBC_[0-9.]*' | sort -u -V | tail -n 1)
+    asks=$(objdump -T "$built/$program" | awk '$2 != "w" || $3 != "DF"' | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -u -V | tail -n 1)
     newest=$(printf '%s\n%s\n' "$newest" "$asks" | sed '/^$/d' | sort -V | tail -n 1)
 done
 
