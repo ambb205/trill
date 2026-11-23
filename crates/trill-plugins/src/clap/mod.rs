@@ -24,6 +24,8 @@
 
 mod buffers;
 mod controller;
+#[cfg(target_os = "linux")]
+mod descriptors;
 mod events;
 mod factory;
 mod gui;

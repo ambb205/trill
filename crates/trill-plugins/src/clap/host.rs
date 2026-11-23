@@ -7,10 +7,12 @@
 //! take effect the next time the device is created.
 //!
 //! What a plugin asks for while its editor is open is different: timers,
-//! a window of another size, a flush of the parameter changes its editor
-//! made. Those are served, by the plugin main thread when it next idles.
+//! the descriptors it wants to hear of (on Linux), a window of another
+//! size, a flush of the parameter changes its editor made. Those are served, by the plugin main thread when it next idles.
 //! A request can come from any thread, so making one only sets a flag.
 
+#[cfg(target_os = "linux")]
+use super::descriptors::Descriptors;
 use super::timers::Timers;
 use crate::editor::Size;
 use crate::main_thread::request_idle;
@@ -22,6 +24,8 @@ use clack_extensions::note_ports::{HostNotePorts, HostNotePortsImpl, NoteDialect
 use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamRescanFlags,
 };
+#[cfg(target_os = "linux")]
+use clack_extensions::posix_fd::{FdFlags, HostPosixFd, HostPosixFdImpl};
 use clack_extensions::preset_discovery::preset_data::Location;
 use clack_extensions::preset_discovery::{HostPresetLoad, HostPresetLoadImpl};
 use clack_extensions::state::{HostState, HostStateImpl};
@@ -83,6 +87,8 @@ impl HostHandlers for TrillHost {
             .register::<HostGui>()
             .register::<HostTimer>()
             .register::<HostPresetLoad>();
+        #[cfg(target_os = "linux")]
+        builder.register::<HostPosixFd>();
     }
 }
 
@@ -298,11 +304,13 @@ impl HostGuiImpl for HostShared {
 }
 
 /// Callbacks a plugin makes on its main thread, and what they need kept:
-/// the plugin's timers. See the module documentation for why most of the
+/// the plugin's timers, and on Linux its descriptors. See the module documentation for why most of the
 /// other requests change nothing.
 pub(crate) struct HostMainThread<'a> {
     shared: &'a HostShared,
     timers: RefCell<Timers>,
+    #[cfg(target_os = "linux")]
+    descriptors: RefCell<Descriptors>,
     /// What the plugin said went wrong with the preset it was last asked
     /// to load, until someone takes it.
     preset_error: RefCell<Option<String>>,
@@ -310,7 +318,49 @@ pub(crate) struct HostMainThread<'a> {
 
 impl<'a> HostMainThread<'a> {
     pub(crate) fn new(shared: &'a HostShared) -> Self {
-        Self { shared, timers: RefCell::new(Timers::default()), preset_error: RefCell::new(None) }
+        Self {
+            shared,
+            timers: RefCell::new(Timers::default()),
+            #[cfg(target_os = "linux")]
+            descriptors: RefCell::default(),
+            preset_error: RefCell::new(None),
+        }
+    }
+
+    /// Moves the descriptors found ready since the last call into `ready`,
+    /// with what each is ready for.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_ready_descriptors(&self, ready: &mut Vec<(std::os::fd::RawFd, FdFlags)>) {
+        match self.descriptors.try_borrow() {
+            Ok(descriptors) => descriptors.take_ready(ready),
+            Err(_) => ready.clear(),
+        }
+    }
+
+    /// Whether the plugin still has the descriptor `fd` registered.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn has_descriptor(&self, fd: std::os::fd::RawFd) -> bool {
+        self.descriptors.try_borrow().is_ok_and(|descriptors| descriptors.has(fd))
+    }
+
+    /// Lets go of every descriptor the plugin registered, where it cannot be
+    /// told of them. Whether it had any.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn forget_descriptors(&self) -> bool {
+        let Ok(mut descriptors) = self.descriptors.try_borrow_mut() else { return false };
+        let had = !descriptors.is_empty();
+        descriptors.forget();
+        had
+    }
+
+    /// The descriptors, for a request the plugin made on the plugin thread;
+    /// as [`Self::timers`].
+    #[cfg(target_os = "linux")]
+    fn descriptors(&self) -> Result<std::cell::RefMut<'_, Descriptors>, HostError> {
+        if !self.shared.on_host_thread() {
+            return Err(HostError::Message("descriptors are managed on the main thread"));
+        }
+        self.descriptors.try_borrow_mut().map_err(|_| HostError::Message("the descriptors are in use"))
     }
 
     /// What the plugin reported about a preset that failed to load, since
@@ -361,6 +411,24 @@ impl HostTimerImpl for HostMainThread<'_> {
 
     fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
         if self.timers()?.unregister(timer_id) { Ok(()) } else { Err(HostError::Message("no such timer")) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl HostPosixFdImpl for HostMainThread<'_> {
+    fn register_fd(&self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.descriptors()?.register(fd, flags).map_err(|refused| {
+            log::warn!("[{}] registered descriptor {fd}, refused: {refused}", self.shared.plugin_id);
+            HostError::Message(refused)
+        })
+    }
+
+    fn modify_fd(&self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.descriptors()?.modify(fd, flags).map_err(HostError::Message)
+    }
+
+    fn unregister_fd(&self, fd: std::os::fd::RawFd) -> Result<(), HostError> {
+        self.descriptors()?.unregister(fd).map_err(HostError::Message)
     }
 }
 
@@ -547,6 +615,32 @@ mod tests {
         let shared = std::sync::Arc::new(HostShared::new("com.acme.synth"));
         let elsewhere = shared.clone();
         let refused = thread::spawn(move || HostMainThread::new(&elsewhere).register_timer(10).is_err());
+        assert!(refused.join().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_plugins_descriptors_are_registered_once_each_and_on_the_host_thread_only() {
+        let shared = HostShared::new("com.acme.synth");
+        let handler = HostMainThread::new(&shared);
+        // The descriptors are only watched, never read: any number will do.
+        assert!(handler.register_fd(-1, FdFlags::READ).is_err(), "not a descriptor");
+        assert!(handler.register_fd(1_000, FdFlags::READ).is_ok());
+        assert!(handler.register_fd(1_000, FdFlags::WRITE).is_err(), "registered already: modify_fd is for that");
+        assert!(handler.has_descriptor(1_000));
+        assert!(handler.modify_fd(1_000, FdFlags::READ | FdFlags::WRITE).is_ok());
+        assert!(handler.modify_fd(1_001, FdFlags::READ).is_err());
+        assert!(handler.unregister_fd(1_000).is_ok());
+        assert!(handler.unregister_fd(1_000).is_err());
+        assert!(!handler.has_descriptor(1_000));
+
+        assert!(handler.register_fd(1_000, FdFlags::READ).is_ok());
+        assert!(handler.forget_descriptors(), "what a plugin cannot be told of is let go of");
+        assert!(!handler.has_descriptor(1_000));
+
+        let shared = std::sync::Arc::new(HostShared::new("com.acme.synth"));
+        let elsewhere = shared.clone();
+        let refused = thread::spawn(move || HostMainThread::new(&elsewhere).register_fd(1_000, FdFlags::READ).is_err());
         assert!(refused.join().unwrap());
     }
 }

@@ -12,6 +12,7 @@
 //! the plugin thread, so what is registered is that thread's.
 
 use super::instance::InstanceId;
+use crate::main_thread::{Wanted, Watcher};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -75,7 +76,7 @@ pub(crate) unsafe fn register_handler(owner: InstanceId, handler: *mut IEventHan
         log::warn!("a VST3 view registered too many connections; refusing another");
         return kResultFalse;
     }
-    crate::main_thread::watch(fd, Rc::new(move || ready(fd)));
+    crate::main_thread::watch(Watcher::Views, fd, Wanted::READ, Rc::new(move |_| ready(fd)));
     kResultOk
 }
 
@@ -98,7 +99,7 @@ fn unwatch_unheld(fds: Vec<FileDescriptor>) {
     for fd in fds {
         let held = REGISTERED.with_borrow(|registered| registered.handlers.iter().any(|handler| handler.fd == fd));
         if !held {
-            crate::main_thread::unwatch(fd);
+            crate::main_thread::unwatch(Watcher::Views, fd);
         }
     }
 }

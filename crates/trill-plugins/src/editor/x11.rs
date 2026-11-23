@@ -29,6 +29,7 @@
 //! the window follows what it makes of it.
 
 use super::{Events, Size};
+use crate::main_thread::{Wanted, Watcher};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -153,7 +154,12 @@ impl Display {
         // Read whenever it has something, whether a window is open or not:
         // what is not read leaves it ready, and the thread turning.
         let weak = Rc::downgrade(&display);
-        crate::main_thread::watch(fd, Rc::new(move || weak.upgrade().is_some_and(|display| display.read())));
+        crate::main_thread::watch(
+            Watcher::Editors,
+            fd,
+            Wanted::READ,
+            Rc::new(move |_| weak.upgrade().is_some_and(|display| display.read())),
+        );
         DISPLAY.set(Some(display.clone()));
         Ok(display)
     }
@@ -188,7 +194,7 @@ impl Display {
                 // A connection that broke is every window gone.
                 Err(_) => {
                     self.broken.set(true);
-                    crate::main_thread::unwatch(self.conn.stream().as_raw_fd());
+                    crate::main_thread::unwatch(Watcher::Editors, self.conn.stream().as_raw_fd());
                     // Every window there is learns it at its next look.
                     news |= !windows.is_empty();
                     break;
