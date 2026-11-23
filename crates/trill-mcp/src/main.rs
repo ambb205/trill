@@ -25,7 +25,7 @@ OPTIONS:
     --no-plugins         Offer only the built-in devices
     --scratch            Keep nothing between runs: no settings, no sound library,
                          no safety copies of unsaved work
-    --profile <FOLDER>   Keep settings, the library index, saved presets and safety
+    --profile <FOLDER>   Keep settings, the library index, the list of plugins found, saved presets and safety
                          copies in this folder instead of the user's own
     --project <FILE>     Open a project file at startup
     -V, --version        Say which Trill this is: its version, and for a release its build

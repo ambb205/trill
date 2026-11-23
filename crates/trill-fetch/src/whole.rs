@@ -63,7 +63,20 @@ pub fn disk_free(folder: &Path) -> Option<u64> {
         unsafe { GetDiskFreeSpaceExW(&HSTRING::from(there.as_os_str()), Some(&mut free), None, None).ok()? };
         Some(free)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let there = folder.ancestors().find(|folder| folder.is_dir())?;
+        let name = std::ffi::CString::new(there.as_os_str().as_bytes()).ok()?;
+        // SAFETY: the name is a string that ends, and the record is the one the call fills in.
+        let mut said: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(name.as_ptr(), &mut said) } != 0 {
+            return None;
+        }
+        // What may be written by whoever is not the system's own user: the blocks available, not the blocks free.
+        Some((said.f_bavail as u64).saturating_mul(said.f_frsize as u64))
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = folder;
         None
@@ -94,6 +107,38 @@ pub fn hide_console(command: &mut Command) {
 
 #[cfg(not(windows))]
 pub fn hide_console(_command: &mut Command) {}
+
+/// The signal that ended a program, in words ("signal 6, SIGABRT"), where
+/// a signal did: on Unix a program that aborts or faults is ended by one,
+/// and has no code to say. `None` for a program that ended by itself, and
+/// on a system without signals.
+pub fn ended_by_signal(status: &std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        let signal = status.signal()?;
+        let name = match signal {
+            libc::SIGABRT => "SIGABRT",
+            libc::SIGSEGV => "SIGSEGV",
+            libc::SIGBUS => "SIGBUS",
+            libc::SIGILL => "SIGILL",
+            libc::SIGFPE => "SIGFPE",
+            libc::SIGKILL => "SIGKILL",
+            libc::SIGTERM => "SIGTERM",
+            libc::SIGINT => "SIGINT",
+            libc::SIGHUP => "SIGHUP",
+            libc::SIGPIPE => "SIGPIPE",
+            libc::SIGTRAP => "SIGTRAP",
+            _ => return Some(format!("signal {signal}")),
+        };
+        Some(format!("signal {signal}, {name}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
 
 /// The last line a program wrote to its standard error, which is where
 /// they say what went wrong.
@@ -133,10 +178,19 @@ mod tests {
         assert_eq!(last_line(b""), "it did not say why");
     }
 
-    #[cfg(windows)]
+    #[cfg(unix)]
+    #[test]
+    fn a_program_ended_by_a_signal_says_which_and_one_that_ended_by_itself_says_none() {
+        let ended = |script: &str| Command::new("sh").args(["-c", script]).status().unwrap();
+        assert_eq!(ended_by_signal(&ended("kill -ABRT $$")), Some(format!("signal {}, SIGABRT", libc::SIGABRT)));
+        assert_eq!(ended_by_signal(&ended("kill -USR1 $$")), Some(format!("signal {}", libc::SIGUSR1)));
+        assert_eq!(ended_by_signal(&ended("exit 3")), None);
+    }
+
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_folder_that_is_not_there_yet_is_on_the_disk_its_nearest_folder_is_on() {
         let here = std::env::temp_dir();
-        assert!(disk_free(&here.join("not").join("made").join("yet")).expect("Windows can be asked") > 0);
+        assert!(disk_free(&here.join("not").join("made").join("yet")).expect("the system can be asked") > 0);
     }
 }

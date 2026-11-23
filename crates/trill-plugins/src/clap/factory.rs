@@ -24,7 +24,7 @@ const INSTRUMENT_FEATURE: &str = "instrument";
 /// The CLAP features that mark an instrument as one whose keys are drums.
 const DRUM_FEATURES: [&str; 2] = ["drum", "drum-machine"];
 /// File name of the scan cache inside the application's cache directory.
-const CACHE_FILE: &str = "clap-plugins.json";
+pub(crate) const CACHE_FILE: &str = "clap-plugins.json";
 
 /// How CLAP plugins are found and listed.
 static FORMAT: Format = Format {

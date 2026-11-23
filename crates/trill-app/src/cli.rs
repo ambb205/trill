@@ -41,7 +41,7 @@ Options:
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
-  --profile <FOLDER>      Keep settings, the library index and safety copies in this
+  --profile <FOLDER>      Keep settings, the library index, the list of plugins found and safety copies in this
                           folder instead of the user's own
   --null-audio            Run without an audio device
   --no-plugins            Offer only the built-in devices

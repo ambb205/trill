@@ -72,6 +72,26 @@ is not optimized, debug information is limited to file and line (`CARGO_PROFILE_
 session), and on Windows the linker is the one that ships with Rust (`.cargo/config.toml`). Everything from
 scratch, tests included, takes about four minutes on a 16-core machine; after an edit, seconds.
 
+### On Linux
+
+Trill builds and its default tests pass on Linux (tried on Ubuntu 26.04, GNOME on Wayland, PipeWire, x86-64). Besides
+[Rust](https://rustup.rs) it needs a C compiler, `pkg-config` and ALSA's headers, which on Debian and Ubuntu are:
+
+```sh
+sudo apt install build-essential pkg-config libasound2-dev
+```
+
+Nothing else is linked at build time. The window loads what it draws with when it starts (Vulkan or OpenGL,
+Wayland or X11, xkbcommon, fontconfig), which a desktop has. Sound goes through ALSA, which on a desktop of PipeWire
+or PulseAudio is their ALSA plugin, so Trill plays through whatever the system plays through.
+
+A picture of the window (`--screenshot`, `render.sh`) is taken in a window that is never seen and never given the
+keyboard: a Wayland desktop lets no window put itself off the screen, so where there is an X server (`DISPLAY`,
+which a Wayland desktop has for older programs) the window is made through it, as one the window manager leaves
+alone, far off the screen. Without an X server the window is shown while its picture is taken, and the log says so.
+
+What is not done on Linux yet is in [Status](status.md).
+
 Working in a second checkout (`git worktree add`)? `sh scripts/warm-worktree.sh` there copies the libraries the
 first one has already built, and the first build compiles only Trill's own crates: a minute and a half.
 

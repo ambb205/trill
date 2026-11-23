@@ -35,6 +35,15 @@ impl PluginHost {
         )
     }
 
+    /// [`PluginHost::new`], with what a scan found kept in `folder` in
+    /// place of the user's own cache: for a program that was told to keep
+    /// what it keeps in a folder of its own (`--profile`), which then
+    /// neither reads nor writes the list the user's own Trill keeps.
+    pub fn keeping_scans_in(scanner: Scanner, folder: &std::path::Path) -> std::io::Result<Self> {
+        let (clap, vst3) = configs_keeping_scans_in(scanner, folder);
+        Self::with_configs(clap, vst3)
+    }
+
     /// A host with each format configured separately.
     pub fn with_configs(clap: ClapConfig, vst3: Vst3Config) -> std::io::Result<Self> {
         Ok(Self { clap: ClapFactory::new(clap)?, vst3: Vst3Factory::new(vst3)? })
@@ -107,6 +116,18 @@ impl PluginHost {
     }
 }
 
+/// How each format is set up for a host that keeps its scans in `folder`:
+/// as it comes, but for where the list of what was found is kept.
+fn configs_keeping_scans_in(scanner: Scanner, folder: &std::path::Path) -> (ClapConfig, Vst3Config) {
+    let clap = ClapConfig {
+        scanner: scanner.clone(),
+        cache_path: Some(folder.join(crate::clap::CACHE_FILE)),
+        ..ClapConfig::default()
+    };
+    let vst3 = Vst3Config { scanner, cache_path: Some(folder.join(crate::vst3::CACHE_FILE)), ..Vst3Config::default() };
+    (clap, vst3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +154,17 @@ mod tests {
             patient_teardown: true,
         };
         PluginHost::with_configs(clap, vst3).unwrap()
+    }
+
+    #[test]
+    fn a_host_told_to_keep_its_scans_in_a_folder_keeps_both_lists_there_and_nothing_else_differs() {
+        let dir = TestDir::new();
+        let (clap, vst3) = configs_keeping_scans_in(Scanner::InProcess, dir.path());
+        assert_eq!(clap.cache_path, Some(dir.path().join("clap-plugins.json")));
+        assert_eq!(vst3.cache_path, Some(dir.path().join("vst3-plugins.json")));
+        // The plugins are looked for where they are installed, as ever.
+        assert_eq!(clap.search_paths, ClapConfig::default().search_paths);
+        assert_eq!(vst3.search_paths, Vst3Config::default().search_paths);
     }
 
     #[test]
