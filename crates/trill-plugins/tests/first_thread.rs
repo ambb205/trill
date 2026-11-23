@@ -39,8 +39,11 @@ fn main() {
             }
             7
         });
+        // Elsewhere no thread is lent and a program ends when its work
+        // does: it ends as the one that asks expects, with the code a panic
+        // of its work would give where it is asked for one.
         #[cfg(not(target_os = "macos"))]
-        std::process::exit(7);
+        std::process::exit(if std::env::var_os(PANICS).is_some() { 101 } else { 7 });
     }
     let first = thread::current().id();
     #[cfg(target_os = "macos")]

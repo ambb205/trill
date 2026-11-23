@@ -220,6 +220,18 @@ fn scans_kept_in(storage: &Storage, settings_folder: Option<&std::path::Path>) -
     }
 }
 
+/// A folder in the temporary folder for what a program that keeps nothing
+/// receives of a shared song, which goes with the program. Its name is the
+/// program's, the time and a count: the time alone is the same for two that
+/// start in one tick of the clock (a microsecond on macOS), and two that had
+/// one folder had each other's files, which went when the first of them did.
+fn folder_for_the_run() -> std::path::PathBuf {
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+    std::env::temp_dir().join(format!("trill-received-{}-{time}-{count}", std::process::id()))
+}
+
 /// The program's shared parts. Front ends hold it in an `Arc` and reach
 /// into the public fields; everything stops when the last holder lets go.
 pub struct Runtime {
@@ -371,11 +383,7 @@ impl Runtime {
             Storage::Nowhere => None,
         };
         let for_the_run = received.is_none();
-        let received = received.unwrap_or_else(|| {
-            let run =
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
-            std::env::temp_dir().join(format!("trill-received-{}-{run}", std::process::id()))
-        });
+        let received = received.unwrap_or_else(folder_for_the_run);
         session.keep_received_in(Some(received.clone()));
         let live = session.live();
         let session: SharedSession = Arc::new(SessionLock::new(session));
@@ -733,5 +741,17 @@ mod tests {
         let scratch = scans_kept_in(&Storage::Nowhere, None).expect("a folder of its own");
         assert!(scratch.starts_with(std::env::temp_dir()), "{}", scratch.display());
         assert_eq!(scans_kept_in(&Storage::Nowhere, None), Some(scratch));
+    }
+
+    #[test]
+    fn programs_that_keep_nothing_and_start_at_the_same_moment_each_have_a_folder_of_their_own() {
+        // As two runtimes of one test do, on threads of their own: the
+        // clock alone gave two of them one name where it ticks slowly.
+        let made: Vec<_> =
+            (0..8).map(|_| std::thread::spawn(|| (0..64).map(|_| folder_for_the_run()).collect::<Vec<_>>())).collect();
+        let names: Vec<std::path::PathBuf> = made.into_iter().flat_map(|thread| thread.join().unwrap()).collect();
+        let different: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(different.len(), names.len());
+        assert!(names.iter().all(|name| name.starts_with(std::env::temp_dir())));
     }
 }
