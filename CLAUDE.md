@@ -225,9 +225,16 @@ on the samples.
   is *written* here; and one that has arrived is read to be played
   before it has its name (`MediaCache::read_as`, `Received::before_named`), because whatever compiles the song
   meanwhile would wait for a reading that began when the name appeared. A file on its way is no missing file
-  and no problem (`Session::files_arriving`, `is_awaited`). What arrived comes beside the song at a save, with
-  the recordings (`session/beside.rs`, `from others`). Hold all of it with strangers who have the invitation
-  (`trill-runtime/tests/files.rs`), and after touching how bytes are asked for or handed across run the
+  and no problem (`Session::files_arriving`, `is_awaited`). **Nor is one that nobody has said**
+  (`Session::files_unsaid`, `is_unsaid`: a clip that came from another program came without a place, a slot of
+  a sample player with a place made here): its bringer's program is still reading it, has not got it, holds it
+  or does not read it as audio. It is theirs to put right, so it is among what arrives and never among what
+  this machine is missing: shown as waiting for whoever brought it (`Waiting::ToBeSaid`), and nothing is looked
+  for on this disk. What a song would hand over is shown before it is shared (`Runtime::files_to_go`), counted
+  by the reading that hands it out (only audio), with what the song names that is none listed as what stays:
+  a song file may name anything, and its user is to see what it named. What arrived comes beside the song at a
+  save, with the recordings (`session/beside.rs`, `from others`). Hold all of it with strangers who have the
+  invitation (`trill-runtime/tests/files.rs`), and after touching how bytes are asked for or handed across run the
   `files_cross` example at 300 MB, and on lines as homes have them (`--files 12 --through-here --line
   5000:50000:20`, and the same at `:60` and at `1000:10000:40`), holding what it prints beside the table in
   `docs/working-together.md`: its small tests did not show a connection let go of for too many questions, an

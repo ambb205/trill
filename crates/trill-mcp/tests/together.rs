@@ -202,7 +202,8 @@ async fn the_audio_of_a_shared_song_is_said_before_it_goes_while_it_arrives_and_
     let goes = ok(&ada.client, "shared_song", json!({ "action": "what_goes" })).await;
     assert_eq!(goes["files"], 1, "{goes}");
     assert_eq!(goes["outside_the_songs_folders"], json!([vocal]), "a file outside the song's folders, by name");
-    assert!(goes["says"].as_str().unwrap().starts_with("1 file ("), "{goes}");
+    assert!(goes["says"].as_str().unwrap().starts_with("1 audio file ("), "{goes}");
+    assert!(goes.get("no_audio_and_stays").is_none(), "{goes}");
     assert!(!ada.runtime.together().is_on(), "asking shares nothing");
     // The reply to `share` says it again.
     let shared = ok(&ada.client, "shared_song", json!({ "action": "share", "name": "Ada" })).await;
@@ -248,6 +249,18 @@ async fn the_audio_of_a_shared_song_is_said_before_it_goes_while_it_arrives_and_
         files.into_iter().find(|file| file.place == trill_core::FilePlace::Clip(clip)).map(|file| file.path)
     };
     assert_eq!(named(&ben.runtime, held), None, "nothing of it has gone to Ben");
+    // At Ben's the clip is there and its file is not said: that is no
+    // file he is missing. It waits for whoever brought it, and is said so.
+    let waits = |reply: &Value| reply["arriving"][0]["played_by"] == "Demo";
+    let status = json!({ "action": "status" });
+    let at_ben = until(&ben.client, "shared_song", status, "Ben is told what waits for Ada", waits).await;
+    let why = at_ben["arriving"][0]["waits"].as_str().unwrap();
+    assert!(why.contains("for whoever brought it into the song") && why.contains("look for nothing here"), "{at_ben}");
+    assert!(at_ben["arriving"][0].get("mb").is_none(), "nothing is known of its size: {at_ben}");
+    let missing = ok(&ben.client, "missing_files", json!({})).await;
+    assert_eq!(missing["missing"], 0, "a file its bringer has not said is not missing here: {missing}");
+    let song = ok(&ben.client, "get_project", json!({})).await;
+    assert!(song.get("missing_files").is_none(), "{song}");
     let after = ok(&ada.client, "shared_song", json!({ "action": "let_files_go" })).await;
     assert!(after.get("held").is_none(), "{after}");
     let deadline = Instant::now() + Duration::from_secs(30);

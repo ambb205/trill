@@ -361,7 +361,11 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
         if two_rows { status_room } else { Rect::from_min_max(pos2(x, top), pos2(bar.right() - 12.0, top + chip)) };
     let problem = cx.snap.clip_problems.get(&clip.id);
     let stretched = warped && audio.source_tempo.is_some();
-    if cx.snap.arriving.contains(&clip.id) {
+    if cx.snap.arriving.contains(&clip.id) && audio.path.is_empty() {
+        // Someone else brought it, and their program has not said what
+        // its file is: theirs to put right, and not missing here.
+        status(&painter, theme, room, theme.info, "Its audio waits for whoever brought it");
+    } else if cx.snap.arriving.contains(&clip.id) {
         // On its way from someone else who has the song: not missing.
         status(&painter, theme, room, theme.info, "Its audio is on its way");
     } else if matches!(state, WaveState::Failed(_)) {

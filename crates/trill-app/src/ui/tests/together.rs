@@ -225,7 +225,8 @@ fn audio_that_is_on_its_way_and_files_that_are_held_are_said_in_the_status_bar_a
     let options = UiOptions { together_scene: Some(TogetherScene::Arriving), ..Default::default() };
     let (mut harness, ..) = with_three_tracks(options);
     harness.idle(3);
-    let bar = "Shared song: Here: Jo \u{00B7} 2 audio files wait for your word \u{00B7} 1 file held here";
+    let bar = "Shared song: Here: Jo \u{00B7} 2 audio files wait for your word \u{00B7} 1 audio file waits for \
+               whoever brought it \u{00B7} 1 file held here";
     assert!(harness.is_on_screen(bar), "{:?}", harness.labels);
     harness.click_label(bar);
     harness.idle(2);
@@ -233,6 +234,13 @@ fn audio_that_is_on_its_way_and_files_that_are_held_are_said_in_the_status_bar_a
     assert!(harness.is_on_screen("Vocal take 3.wav \u{00B7} 20 MB of 48 MB \u{00B7} from Jo"), "{:?}", harness.labels);
     assert!(harness.is_on_screen("Room mics.flac \u{00B7} 0.0 MB of 612 MB \u{00B7} waits for your word"));
     assert!(harness.is_on_screen("Let them arrive"));
+    // One that nobody has said is no file with a size: it is a clip that
+    // waits for whoever brought it, and theirs to put right.
+    assert!(
+        harness.is_on_screen("Guide guitar \u{00B7} waits for whoever brought it: their Trill has not said"),
+        "{:?}",
+        harness.labels
+    );
     // And what has not gone from here, by its path, with the word that lets it.
     assert!(harness.is_on_screen(r"D:\Sessions\Elsewhere\guide vocal.wav"));
     assert!(harness.is_on_screen("Let them go"));

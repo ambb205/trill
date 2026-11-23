@@ -53,7 +53,11 @@ that as one undoable edit. Tell the user about a notice; put theirs back when th
 - The audio a shared song plays travels with it: what its clips and takes play, and what its samplers and drum \
 racks play, arrives by itself from whoever in the song has it. Status lists what is on its way as `arriving`, each \
 with how far it is, from whom, and why it `waits` where it does. A file on its way is not a missing file and no \
-problem: do not look for it or relink it, and say that it is arriving. Nobody is told where anyone has a file: a \
+problem: do not look for it or relink it, and say that it is arriving. An entry with `played_by` in place of a name \
+is a clip or a sample someone else brought into the song whose file their Trill has not said yet: for a moment \
+while it reads the file, and for as long as it has not got the file itself or holds it back. Say whose it is to \
+put right (theirs: at their computer the file is missing, held, or no audio), and look for nothing on this one. \
+Nobody is told where anyone has a file: a \
 place is each computer's own, so a path you give a clip or a sampler is this computer's only. What a plugin names \
 inside its own state travels as the plugin wrote it. A sampled instrument's recordings do not travel.
 - `held` in status is files the song names on this computer that have not gone to the others, because nobody was \
@@ -221,6 +225,17 @@ impl TrillServer {
             let mb = |bytes: u64| round(bytes as f64 / f64::from(1 << 20));
             let arriving: Vec<Value> = (status.files.iter())
                 .map(|file| {
+                    // One that nobody has said: nothing is known of it but
+                    // the place that plays it.
+                    if file.waits == Some(Waiting::ToBeSaid) {
+                        return json!({
+                            "played_by": file.name,
+                            "waits": "for whoever brought it into the song: their Trill has not said what the file \
+                                      is (it is still reading it, has not got it either, does not read it as audio, \
+                                      or holds it until its user lets it go). It is not missing on this computer: \
+                                      look for nothing here.",
+                        });
+                    }
                     let mut said = json!({ "name": file.name, "mb": mb(file.bytes), "here_mb": mb(file.here) });
                     if let Some(from) = &file.from {
                         said["from"] = json!(from);
@@ -239,6 +254,8 @@ impl TrillServer {
                                 seconds.div_ceil(60)
                             ),
                             Waiting::ForSomeone => "nobody who is in the song has said they have it".to_owned(),
+                            // (Said above.)
+                            Waiting::ToBeSaid => "for whoever brought it into the song".to_owned(),
                         });
                     }
                     said
@@ -316,6 +333,11 @@ impl TrillServer {
         }
         if !going.elsewhere.is_empty() {
             out["outside_the_songs_folders"] = json!(going.elsewhere);
+        }
+        // What the song names that Trill does not read as audio: it goes
+        // to nobody, and is said because a song file may name anything.
+        if !going.no_audio.is_empty() {
+            out["no_audio_and_stays"] = json!(going.no_audio);
         }
         if going.gone > 0 {
             out["not_there"] = json!(going.gone);

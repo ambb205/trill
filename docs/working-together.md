@@ -40,9 +40,10 @@ A program joins wherever it can open a connection to the other: on one computer,
 through a port one of you forwarded, or through a meeting point.
 
 **What the other needs.** The song travels, and so does its audio (below); plugins do not. Whoever joins plays
-the song with their own plugins. A plugin one of you has not got stays in the song as a place that is kept, with
-the sentence that says so, as in a song that is opened without it; its settings are carried untouched, and it
-sounds for whoever has it. So for now a friend on another computer needs **the same plugins**.
+the song with their own plugins. A plugin one of you has not got stays in the song as a place that is kept; its
+settings are carried untouched, and it sounds for whoever has it. Whoever has not got it hears the track as
+someone who has it recorded it ([a plugin one of you has not got](#a-plugin-one-of-you-has-not-got), below), so
+a friend does not need the same plugins to hear the song, only to change what those plugins do.
 
 **A build to hand to a friend.** `sh scripts/friend-bundle.sh` makes a release build and gathers it into one
 folder, `target/friend/Trill`: `trill.exe` (which starts no program but itself), `trill-mcp.exe`, the licences,
@@ -76,7 +77,9 @@ you have been shown it.
 
 - *Before you share*, the Share panel says what goes: how many files, how large, the folders they lie in, and
   one by one every file that lies outside the song's own folder, Trill's recordings and your sample library.
-  Sharing is your word that they go.
+  Only what Trill reads as audio is counted, because only that goes. What the song names that is no audio is
+  listed after it, each by where it really lies, as what stays: a song file someone handed you may name
+  anything on your disk, and you should see what it named. Sharing is your word that the audio goes.
 - *A file your own hand brings into a shared song* (a clip you drop in, a sample you give a sampler, what you
   record) goes without a question: that is the hand's act.
 - *Anything else that comes to name a file here* is **held**: a shared song you opened from a file and joined
@@ -89,6 +92,13 @@ looking for it, and it plays when it is there without the song being opened agai
 settled before its first byte: one that is said to be longer than any file is (64 GB) is refused, one the disk
 has not the room for waits and is tried again, and above 500 MB waiting at once (`together.ask_above_mb` in the
 settings) the rest waits for your word, asked once, with *Let them arrive*.
+
+**A file nobody has said waits for whoever brought it.** A clip or a sample that someone else brought into the
+song can be in it before their Trill has said what its file is: for a moment while it reads the file, and for
+as long as it has not got the file itself, does not read it as audio, or holds it until its person lets it go.
+On your computer that is not a missing file, and nothing is looked for on your disk. The clip is silent and
+says *Its audio waits for whoever brought it*, the status bar says *1 audio file waits for whoever brought it*,
+and the panel names the clip. It is theirs to put right, at their computer.
 
 **An edit never waits for a file.** What is changed in the song, and who is here, go ahead of a file's bytes on
 every connection: behind one piece of 48 kB at the most. A file is read to be played before it has its name,
@@ -484,6 +494,8 @@ nearly nothing was). The file with least to go is asked for first, so that the m
 
 - A sampled instrument's recordings travelling, and telling the other which set of the catalogue an instrument
   is from. The other has the instrument's place and a sentence that its file is not there.
+- Saying *why* a file someone brought has not been said: whoever waits for it is told that it waits for them,
+  and not whether it is missing there, held there or no audio.
 - A list of what arrived and was never saved with a song, with a way to remove it. It stays in Trill's folder.
 - What was read of a file (its hash) kept from one run to the next: every file a shared song names is read once
   each time Trill is started and the song is in company.

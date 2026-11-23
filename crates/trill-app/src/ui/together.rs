@@ -166,8 +166,8 @@ pub enum TogetherScene {
     /// being asked for again.
     Lost,
     /// One joined a friend's song and its audio is on its way: one file
-    /// arriving, one that waits for a word, and one of one's own that is
-    /// held.
+    /// arriving, one that waits for a word, one that nobody has said, and
+    /// one of one's own that is held.
     Arriving,
 }
 
@@ -249,6 +249,8 @@ impl TogetherScene {
             let files = vec![
                 file("Vocal take 3.wav", 48, 20, Some("Jo"), None),
                 file("Room mics.flac", 612, 0, None, Some(Waiting::ForAWord)),
+                // (A clip Jo brought, of whose file nothing was said.)
+                file("Guide guitar", 0, 0, None, Some(Waiting::ToBeSaid)),
             ];
             // (A place that is nobody's: a made-up folder.)
             let held = vec![r"D:\Sessions\Elsewhere\guide vocal.wav".to_owned()];
@@ -410,13 +412,17 @@ pub fn status_words(seen: &Seen) -> Option<String> {
         Some((_, Meeting::Held)) | None => {}
     }
     // The song's audio: how far what is on its way is, and what waits.
-    if !seen.files.is_empty() {
-        let (here, all) =
-            seen.files.iter().fold((0u64, 0u64), |(here, all), file| (here + file.here, all + file.bytes));
-        let files =
-            if seen.files.len() == 1 { "1 audio file".to_owned() } else { format!("{} audio files", seen.files.len()) };
-        let asked = seen.files.iter().any(|file| file.waits == Some(Waiting::ForAWord));
-        let waiting = seen.files.iter().all(|file| file.waits.is_some());
+    // (What nobody has said yet is not on its way: said apart, below.)
+    let unsaid = seen.files.iter().filter(|file| file.waits == Some(Waiting::ToBeSaid)).count();
+    let coming = || seen.files.iter().filter(|file| file.waits != Some(Waiting::ToBeSaid));
+    if coming().next().is_some() {
+        let (here, all) = coming().fold((0u64, 0u64), |(here, all), file| (here + file.here, all + file.bytes));
+        let files = match coming().count() {
+            1 => "1 audio file".to_owned(),
+            count => format!("{count} audio files"),
+        };
+        let asked = coming().any(|file| file.waits == Some(Waiting::ForAWord));
+        let waiting = coming().all(|file| file.waits.is_some());
         match (asked, waiting) {
             (true, _) => words.push_str(&format!(" \u{00B7} {files} wait for your word")),
             (false, true) => words.push_str(&format!(" \u{00B7} {files} wait")),
@@ -425,6 +431,11 @@ pub fn status_words(seen: &Seen) -> Option<String> {
                 words.push_str(&format!(" \u{00B7} {files} arriving, {percent} %"));
             }
         }
+    }
+    match unsaid {
+        0 => {}
+        1 => words.push_str(" \u{00B7} 1 audio file waits for whoever brought it"),
+        unsaid => words.push_str(&format!(" \u{00B7} {unsaid} audio files wait for whoever brought them")),
     }
     if seen.files_wait.is_some() {
         words.push_str(" \u{00B7} audio waits for the meeting point");
@@ -610,7 +621,8 @@ fn share_panel(ui: &mut Ui, cx: &mut Cx) {
         None => {
             let about = "Someone else opens this song in their own Trill and you both change it at once. Nobody is \
                          the host: each of you has all of it, and can go on alone and merge again later. The song's \
-                         audio files go to whoever joins; they need the same plugins to hear what you hear.";
+                         audio files go to whoever joins. A plugin they have not got they hear as your Trill \
+                         records it for them.";
             line(ui, cx, about, theme.ink_dim);
             what_goes(ui, cx);
             heading(ui, cx, "Who can reach this song");
@@ -744,6 +756,25 @@ fn what_goes(ui: &mut Ui, cx: &mut Cx) {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
         return;
     };
+    // What the song names that is no audio stays, and is shown all the
+    // same: a song file someone else wrote may name anything.
+    let stays = |ui: &mut Ui, cx: &mut Cx| {
+        if going.no_audio.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        let about = match going.no_audio.len() {
+            1 => "The song names 1 file that is no audio as Trill reads it. It stays here:".to_owned(),
+            count => format!("The song names {count} files that are no audio as Trill reads them. They stay here:"),
+        };
+        line(ui, cx, &about, theme.ink_dim);
+        for path in going.no_audio.iter().take(LISTED) {
+            line(ui, cx, path, theme.ink_faint);
+        }
+        if going.no_audio.len() > LISTED {
+            line(ui, cx, &format!("and {} more", going.no_audio.len() - LISTED), theme.ink_faint);
+        }
+    };
     if going.files == 0 {
         line(
             ui,
@@ -751,13 +782,12 @@ fn what_goes(ui: &mut Ui, cx: &mut Cx) {
             "The song names no audio files on this computer: nothing but the song itself goes.",
             theme.ink_dim,
         );
+        stays(ui, cx);
         return;
     }
     let files = if going.files == 1 { "1 audio file".to_owned() } else { format!("{} audio files", going.files) };
-    let said = format!(
-        "{files}, {} together, to whoever joins: the ones Trill reads as audio. Nobody is told where you keep them.",
-        megabytes(going.bytes)
-    );
+    let said =
+        format!("{files}, {} together, to whoever joins. Nobody is told where you keep them.", megabytes(going.bytes));
     line(ui, cx, &said, theme.ink_dim);
     for (folder, count, bytes) in &going.folders {
         let files = if *count == 1 { "1 file".to_owned() } else { format!("{count} files") };
@@ -773,10 +803,20 @@ fn what_goes(ui: &mut Ui, cx: &mut Cx) {
             line(ui, cx, &format!("and {} more", going.elsewhere.len() - LISTED), theme.ink_faint);
         }
     }
+    stays(ui, cx);
 }
 
 /// How many files a list in the panel names one by one.
 const LISTED: usize = 8;
+
+/// What the panel says of a clip or a sample whose file nobody has said:
+/// it is with whoever brought it into the song, and theirs to put right.
+fn unsaid_words(place: &str) -> String {
+    format!(
+        "{place} \u{00B7} waits for whoever brought it: their Trill has not said what its file is (it is reading \
+         it, has not got it, or holds it back)"
+    )
+}
 
 /// While the song is shared: its audio that is on its way here, and the
 /// files on this computer that have not gone to the others.
@@ -787,6 +827,12 @@ fn audio(ui: &mut Ui, cx: &mut Cx) {
     if !files.is_empty() {
         heading(ui, cx, "Audio on its way");
         for file in files.iter().take(LISTED) {
+            // One that nobody has said: only the place that plays it is
+            // known, and whose it is to put right.
+            if file.waits == Some(Waiting::ToBeSaid) {
+                line(ui, cx, &unsaid_words(&file.name), theme.ink_dim);
+                continue;
+            }
             let about = match (&file.waits, &file.from) {
                 (Some(Waiting::ForAWord), _) => "waits for your word".to_owned(),
                 (Some(Waiting::ForRoom { short }), _) => {
@@ -796,6 +842,8 @@ fn audio(ui: &mut Ui, cx: &mut Cx) {
                     format!("waits for the meeting point's next day, about {} min", seconds.div_ceil(60))
                 }
                 (Some(Waiting::ForSomeone), _) => "nobody who is here has it".to_owned(),
+                // (Said above.)
+                (Some(Waiting::ToBeSaid), _) => "waits for whoever brought it".to_owned(),
                 (None, Some(from)) => format!("from {from}"),
                 (None, None) => "arriving".to_owned(),
             };

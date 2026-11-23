@@ -386,6 +386,9 @@ struct Driver {
     /// The files the song names on this computer that may not go to the
     /// others: nobody was shown them.
     held: Vec<String>,
+    /// The places of the song whose file nobody has said, each by the
+    /// name it is shown by: they wait for whoever brought them.
+    unsaid: Vec<String>,
     /// What the meeting point said the key may still pass today, when
     /// its day is over, and how many bytes of files had passed here then.
     allowance: Option<(u64, Instant, u64)>,
@@ -422,6 +425,7 @@ impl Driver {
         self.epoch = None;
         self.files.forget();
         self.held.clear();
+        self.unsaid.clear();
         (self.allowance, self.files_wait) = (None, None);
         self.renditions.leave(&self.session);
         self.session.lock().hear_changes(false);
@@ -793,11 +797,19 @@ impl Driver {
         }
         let revision = self.session.lock().revision();
         if self.files.look_is_due(revision) {
-            let (files, received, held) = {
+            let (files, received, held, unsaid) = {
                 let session = self.session.lock();
-                (session.files_here(), session.received_in(), session.files_held())
+                (session.files_here(), session.received_in(), session.files_held(), session.files_unsaid())
             };
             self.files.look(revision, files, received);
+            // What someone else brought into the song and has not said:
+            // shown with what is on its way, as waiting for them.
+            let mut unsaid: Vec<String> = unsaid.iter().map(crate::files::unsaid_name).collect();
+            unsaid.sort();
+            if unsaid != self.unsaid {
+                self.unsaid = unsaid;
+                self.shared.lock().status.revision += 1;
+            }
             // What the song names on this computer that nobody was shown
             // stays here: said once, with where to look at it.
             if held != self.held {
@@ -1110,6 +1122,19 @@ impl Driver {
                 here
             })
             .collect();
+        let mut files = self.files.on_their_way(&|link| {
+            let person = self.peers.get(&link).and_then(|peer| peer.person.as_ref());
+            person.map_or_else(|| "Someone".to_owned(), |person| person.name.clone())
+        });
+        // And what nobody has said yet, after them: nothing is known of
+        // such a file but the place that plays it.
+        files.extend(self.unsaid.iter().map(|name| OnItsWay {
+            name: name.clone(),
+            bytes: 0,
+            here: 0,
+            from: None,
+            waits: Some(crate::files::Waiting::ToBeSaid),
+        }));
         let status = Together {
             me: Person { colour: colours.get(&me).copied().unwrap_or(0), ..shared.status.me.clone() },
             invitation: self.net.listening().map(|invitation| invitation.to_string()),
@@ -1122,10 +1147,7 @@ impl Driver {
             away: (self.again.iter())
                 .map(|again| Away { name: again.name.clone(), since: again.since, tries: again.tries })
                 .collect(),
-            files: self.files.on_their_way(&|link| {
-                let person = self.peers.get(&link).and_then(|peer| peer.person.as_ref());
-                person.map_or_else(|| "Someone".to_owned(), |person| person.name.clone())
-            }),
+            files,
             held: self.held.clone(),
             // (To the minute: a count that ran would be news every tick.)
             files_wait: (self.files_wait)
@@ -1270,6 +1292,7 @@ impl Sharing {
                     presence_said: None,
                     files,
                     held: Vec::new(),
+                    unsaid: Vec::new(),
                     allowance: None,
                     files_wait: None,
                     renditions: Renditions::new(),

@@ -115,7 +115,10 @@ const NOT_THAT: Duration = Duration::from_secs(600);
 /// it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OnItsWay {
-    /// The name its maker has it under.
+    /// The name its maker has it under. For one that nobody has said
+    /// ([`Waiting::ToBeSaid`]), the name of the clip that plays it, or
+    /// the slot and the device: nothing else is known of it, and its
+    /// `bytes` are 0.
     pub name: String,
     pub bytes: u64,
     /// How many of them are here.
@@ -139,21 +142,45 @@ pub enum Waiting {
     ForTheWay { seconds: u64 },
     /// Nobody who is in the song has said they have it.
     ForSomeone,
+    /// Nobody has said what it is: it is with whoever brought it into
+    /// the song, whose program is still reading it, has not got it
+    /// either, does not read it as audio, or was not let hand it out
+    /// (`Session::files_unsaid`). Nothing can be asked for until it is.
+    ToBeSaid,
 }
 
-/// What a song would hand to whoever joins it: the files it names on this
-/// machine. For showing before the song is shared.
+/// What a place whose file nobody has said is shown by: the clip's name,
+/// or the slot and the device.
+pub(crate) fn unsaid_name(file: &trill_core::files::FileUse) -> String {
+    match &file.place {
+        FilePlace::Sample { slot, .. } => format!("{slot} of {}", file.name),
+        FilePlace::Clip(_) | FilePlace::Rendition(_) if file.name.is_empty() => "A clip".to_owned(),
+        FilePlace::Clip(_) | FilePlace::Rendition(_) => file.name.clone(),
+    }
+}
+
+/// What a song would hand to whoever joins it: the audio files it names
+/// on this machine. For showing before the song is shared.
+///
+/// Only what Trill reads as audio goes, and only that is counted: each
+/// file was read as the song plays it, not judged by its name. What the
+/// song names that is no audio is listed apart, by its path, because it
+/// stays here and because a song file someone else wrote may name
+/// anything: its user should see what it named.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Going {
-    /// How many files, and how many bytes they are together.
+    /// How many audio files, and how many bytes they are together.
     pub files: usize,
     pub bytes: u64,
     /// The folders they lie in, each with how many files and bytes: the
     /// song's own folder, Trill's recordings and the folders of the
     /// sample library.
     pub folders: Vec<(String, usize, u64)>,
-    /// The files that lie anywhere else, each by its path.
+    /// The audio files that lie anywhere else, each by its path.
     pub elsewhere: Vec<String>,
+    /// The files the song names that are there and that Trill does not
+    /// read as audio, each by its path: they go to nobody.
+    pub no_audio: Vec<String>,
     /// The files the song names that are not there.
     pub gone: usize,
 }
@@ -161,16 +188,29 @@ pub struct Going {
 impl Going {
     /// In a sentence or two, for a tool's reply and a front end's panel.
     pub fn sentence(&self) -> String {
-        if self.files == 0 {
-            return "The song names no audio files on this computer: nothing but the song itself goes to whoever \
-                    joins."
-                .to_owned();
-        }
         let files = |count: usize| if count == 1 { "1 file".to_owned() } else { format!("{count} files") };
+        // What stays, said after what goes.
+        let stays = match self.no_audio.len() {
+            0 => String::new(),
+            count => format!(
+                " {} the song names {} no audio as Trill reads {} and {} here: {}.",
+                files(count),
+                if count == 1 { "is" } else { "are" },
+                if count == 1 { "it" } else { "them" },
+                if count == 1 { "stays" } else { "stay" },
+                self.no_audio.join("; ")
+            ),
+        };
+        if self.files == 0 {
+            return format!(
+                "The song names no audio files on this computer: nothing but the song itself goes to whoever \
+                 joins.{stays}"
+            );
+        }
         let size = trill_fetch::whole::said_closely;
         let mut said = format!(
-            "{} ({}) that the song plays on this computer {} to whoever joins, where Trill reads them as audio",
-            files(self.files),
+            "{} ({}) that the song plays on this computer {} to whoever joins",
+            if self.files == 1 { "1 audio file".to_owned() } else { format!("{} audio files", self.files) },
             size(self.bytes),
             if self.files == 1 { "goes" } else { "go" },
         );
@@ -189,6 +229,7 @@ impl Going {
                 self.elsewhere.join("; ")
             ));
         }
+        said.push_str(&stays);
         said
     }
 }
@@ -1364,11 +1405,14 @@ fn as_shown(real: &Path) -> String {
 }
 
 impl Runtime {
-    /// What the open song would hand to whoever joins it: the files it
-    /// names on this computer, how large they are and where they lie. For
-    /// showing before the song is shared. It looks at the disk for each
-    /// file (that it is there, how large it is, where it really lies) and
-    /// reads none: call it away from the thread that draws.
+    /// What the open song would hand to whoever joins it: the audio files
+    /// it names on this computer, how large they are and where they lie.
+    /// For showing before the song is shared. It looks at the disk for
+    /// each file (that it is there, how large it is, where it really
+    /// lies) and asks the media cache whether it is audio, by the reading
+    /// that plays it: what the song plays was read when it was opened, and
+    /// what was not (a take, a file that is none) is read now. Call it
+    /// away from the thread that draws.
     ///
     /// Which folder a file lies in is asked of the file system, not read
     /// off how its path is spelled: a song file that someone else wrote
@@ -1396,15 +1440,22 @@ impl Runtime {
         let mut going = Going::default();
         let mut folders: BTreeMap<String, (usize, u64)> = BTreeMap::new();
         let mut elsewhere = std::collections::BTreeSet::new();
+        let mut no_audio = std::collections::BTreeSet::new();
         for path in files {
             let Some(found) = std::fs::metadata(&path).ok().filter(std::fs::Metadata::is_file) else {
                 going.gone += 1;
                 continue;
             };
-            going.files += 1;
-            going.bytes += found.len();
             // (A file whose real place cannot be told is in no folder that is known.)
             let real = really(Path::new(&path));
+            // Only audio goes, by the reading that says and hands it out
+            // too (`read`): what is none is shown as what stays.
+            if self.media.audio(Path::new(&path)).is_err() {
+                no_audio.insert(real.as_deref().map_or(path, as_shown));
+                continue;
+            }
+            going.files += 1;
+            going.bytes += found.len();
             let within = |folder: &Path| real.as_deref().is_some_and(|real| real.starts_with(folder));
             let known = song.as_deref().filter(|folder| within(folder)).map(|_| "the song's folder".to_owned());
             let known = known
@@ -1422,6 +1473,7 @@ impl Runtime {
             }
         }
         going.elsewhere = elsewhere.into_iter().collect();
+        going.no_audio = no_audio.into_iter().collect();
         going.folders = folders.into_iter().map(|(folder, (count, bytes))| (folder, count, bytes)).collect();
         going
     }

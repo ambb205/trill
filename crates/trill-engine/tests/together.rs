@@ -402,7 +402,15 @@ fn a_take_whose_file_the_other_has_not_got_has_a_place_of_the_others_own_and_pla
     assert_eq!(plays(&b, bass).len(), played);
     assert_eq!(file_of(&b, take), (String::new(), None), "no place, and nothing said of what it is yet");
     assert_eq!(file_of(&a, take).0, file.to_string_lossy(), "its maker has it where it is");
-    assert!(missing(&a).is_empty() && !missing(&b).is_empty(), "{:?}", b.problems());
+    // Until its maker has said what it is, it is hers to say: no problem
+    // of the other's and no file the other is missing, and the take and
+    // the clips that play it wait for her.
+    assert!(missing(&a).is_empty() && missing(&b).is_empty(), "{:?}", b.problems());
+    assert!(b.problems().is_empty(), "{:?}", b.problems());
+    let unsaid: Vec<FilePlace> = b.files_unsaid().into_iter().map(|file| file.place).collect();
+    assert!(unsaid.contains(&FilePlace::Clip(take)) && unsaid.len() == played + 1, "{unsaid:?}");
+    assert_eq!(b.files_arriving().len(), played, "the clips the track plays of it are silent and wait");
+    assert!(a.files_unsaid().is_empty(), "at its maker's it is a file like any other");
     assert!(
         !format!("{:?} {}", b.problems(), b.project().to_json()).contains("Ada's takes"),
         "nothing names her folder"
@@ -601,6 +609,13 @@ fn what_a_sampler_plays_is_said_without_its_place_and_has_a_place_made_here_at_t
     let made = folder.path().join("at Ben's").join(&song).join("of devices").join(sampler.0.to_string());
     assert_eq!(names(&b, sampler), [made.join("sample.wav").to_string_lossy()], "the other's names a place made there");
     assert!(kick.exists(), "though the file is on this very disk");
+    // Nothing was said of what the file is yet: it is its maker's to say,
+    // and at the other's neither a problem nor a file that is missing.
+    let waits = FilePlace::Sample { device: sampler, slot: "sample".into() };
+    assert_eq!(b.files_unsaid().into_iter().map(|file| file.place).collect::<Vec<_>>(), [waits.clone()]);
+    assert_eq!(b.files_arriving(), std::slice::from_ref(&waits));
+    assert!(b.problems().is_empty(), "{:?}", b.problems());
+    assert!(a.files_unsaid().is_empty());
 
     // Its maker says what the file is: the other gives the slot the place
     // for that, as it does for a clip, and has it handed over by that.

@@ -54,7 +54,7 @@
 use super::Session;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use trill_core::files::{Content, FileIs, FilePlace, kind_of, lies_in};
+use trill_core::files::{Content, FileIs, FilePlace, FileUse, kind_of, lies_in};
 use trill_core::merge::{AudioSet, Blob, ClipOp, DeviceOp, DeviceSet, Kept, Op, SongId};
 use trill_core::project::ClipContent;
 use trill_core::{ClipId, Device, DeviceFiles, DeviceId, Project};
@@ -577,8 +577,11 @@ impl Session {
 
     /// Of what a compile found wrong with the song, what is no problem:
     /// a file that is not there and whose place is in the song's folder
-    /// of files from other programs is on its way. Returns the places
-    /// that wait for one, and the problems that are left.
+    /// of files from other programs is on its way, and one that has no
+    /// place here because nobody has said what it is
+    /// ([`Session::files_unsaid`]) is someone else's to say. Neither is a
+    /// file this machine is missing. Returns the places that wait for
+    /// one, and the problems that are left.
     pub(super) fn arriving_among(&self, problems: Vec<crate::Problem>) -> (Vec<FilePlace>, Vec<crate::Problem>) {
         let Some(folder) = self.received_in() else { return (Vec::new(), problems) };
         let within = |path: &str| lies_in(Path::new(path), &folder);
@@ -586,17 +589,19 @@ impl Session {
         let mut left = Vec::new();
         for problem in problems {
             let place = match &problem {
-                crate::Problem::AudioFile { clip, path, .. } if within(path) => Some(FilePlace::Clip(*clip)),
+                // (A clip of a shared song that names no file here is one
+                // whose file was not said: it came without a place.)
+                crate::Problem::AudioFile { clip, path, .. } if within(path) || path.is_empty() => {
+                    Some(FilePlace::Clip(*clip))
+                }
                 crate::Problem::Rendition { track, path, .. } if within(path) => Some(FilePlace::Rendition(*track)),
                 crate::Problem::Sample { device, slot: Some(slot), .. } => {
-                    // Only a file of which the song says what it is can
-                    // arrive: one that nobody said anything of (it stayed
-                    // with its maker, or is no audio) is a file that is
-                    // not here, said as that.
-                    let held = self.project.device(*device).ok();
-                    let said = held.is_some_and(|device| device.files.contains_key(slot));
-                    let named = held.map(named_by).unwrap_or_default();
-                    let awaited = said && named.iter().any(|(named, path)| named == slot && within(path));
+                    // A file of which the song says what it is arrives.
+                    // One that nobody said anything of was given a place
+                    // made here, in the same folder: it is with its maker
+                    // until it is said.
+                    let named = self.project.device(*device).ok().map(named_by).unwrap_or_default();
+                    let awaited = named.iter().any(|(named, path)| named == slot && within(path));
                     awaited.then(|| FilePlace::Sample { device: *device, slot: slot.clone() })
                 }
                 _ => None,
@@ -610,12 +615,47 @@ impl Session {
     }
 
     /// The places of the song (clips, takes that are played, slots of
-    /// sample players) whose file is on its way from another program: it
-    /// is not here yet, the place is silent meanwhile, and it plays when
-    /// the file is there. These are not among [`Session::problems`] and
-    /// not among the song's missing files.
+    /// sample players) whose file is on its way from another program, or
+    /// is someone else's to say first ([`Session::files_unsaid`]): it is
+    /// not here yet, the place is silent meanwhile, and it plays when the
+    /// file is there. These are not among [`Session::problems`] and not
+    /// among the song's missing files.
     pub fn files_arriving(&self) -> &[FilePlace] {
         &self.arriving_files
+    }
+
+    /// Whether `file`, a place of the open song that names a file, is one
+    /// whose file nobody has said: see [`Session::files_unsaid`].
+    pub fn is_unsaid(&self, file: &FileUse) -> bool {
+        let Some(folder) = self.received_in() else { return false };
+        match &file.place {
+            // A clip that came from another program came without a place,
+            // and is given one when the song says what its file is.
+            FilePlace::Clip(_) => file.path.is_empty(),
+            // A slot of a device that came so was given a place made here.
+            FilePlace::Sample { device, slot } => {
+                let said = self.project.device(*device).is_ok_and(|device| device.files.contains_key(slot));
+                !said && lies_in(Path::new(&file.path), &folder.join(OF_DEVICES))
+            }
+            FilePlace::Rendition(_) => false,
+        }
+    }
+
+    /// The places of the open song whose file nobody has said: a clip, a
+    /// take or a slot of a sample player that someone else brought into
+    /// the song, of whose file their program has not said what it is. It
+    /// is so for a moment while that program reads the file, and for as
+    /// long as it has not got the file itself, does not read it as audio,
+    /// or was not let hand it out. Nothing can be asked for until then,
+    /// and nothing is to be looked for on this disk: such a place is
+    /// silent, is no problem of this machine's and no missing file of its
+    /// own. Giving the place a file by hand ([`Session::relink`]) is the
+    /// other way out of it.
+    pub fn files_unsaid(&self) -> Vec<FileUse> {
+        if self.shared_song().is_none() {
+            return Vec::new();
+        }
+        self.files().into_iter().filter(|file| self.is_unsaid(file)).collect()
     }
 
     /// Whether `path` is where a file of the open song lies once it has

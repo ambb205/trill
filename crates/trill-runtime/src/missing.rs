@@ -563,10 +563,12 @@ pub fn files_missing_in(session: &Session) -> Missing {
 }
 
 /// The places the song names a file, without the ones whose file is on
-/// its way from another program: such a file is arriving, not missing,
-/// and nobody is to go looking for it.
+/// its way from another program, and the ones whose file is someone
+/// else's who has not said what it is: such a file is arriving or to be
+/// said, not missing, and nobody is to go looking for it on this disk.
 fn not_awaited(session: &Session) -> Vec<FileUse> {
-    session.files().into_iter().filter(|file| !session.is_awaited(&file.path)).collect()
+    let theirs = |file: &FileUse| session.is_awaited(&file.path) || session.is_unsaid(file);
+    session.files().into_iter().filter(|file| !theirs(file)).collect()
 }
 
 /// What is missing among `uses`, in a song whose tracks are `tracks`, in
