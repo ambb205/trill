@@ -556,6 +556,55 @@ fn a_file_of_this_machines_goes_only_by_its_users_hand_and_a_song_file_is_a_stra
 }
 
 #[test]
+fn what_a_sampled_instrument_names_stays_with_its_maker_and_is_said_as_not_here_at_the_others() {
+    let reading = || {
+        let media = Arc::new(trill_media::MediaCache::new(64 << 20));
+        let factory = Arc::new(trill_dsp::Builtins::with_loader(media.clone()));
+        let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+        session.hear_changes(true);
+        session
+    };
+    // An instrument of Ada's: its file, and the one recording that names.
+    let folder = tempfile::tempdir().unwrap();
+    tone_at(&folder.path().join("Ada's instruments").join("a.wav"));
+    let instrument = folder.path().join("Ada's instruments").join("Glass.sfz");
+    std::fs::write(&instrument, "<region> sample=a.wav key=60\n").unwrap();
+    let mut a = reading();
+    let keys = a.edit(|song| Ok(song.add_track("Keys"))).unwrap();
+    let hand = trill_engine::hand::by_hand();
+    let device = a.add_device(ChainRef::Track(keys), trill_dsp::sampled::URI, None, None).unwrap();
+    let state = trill_dsp::sampled::State::new(instrument.to_string_lossy()).to_bytes();
+    a.set_device_state(device, Some(state)).unwrap();
+    drop(hand);
+    assert!(a.problems().is_empty(), "{:?}", a.problems());
+    a.share();
+    let mut b = reading();
+    b.keep_received_in(Some(folder.path().join("at Ben's")));
+    b.take_song(&a.whole_song()).unwrap();
+
+    // At Ben's the instrument names a place made there, and no file is
+    // at it. Nobody will ever say what that file is: an instrument's
+    // recordings do not travel. So it is said as what it is, a file that
+    // is not here, and not as something that arrives or that anyone is
+    // waited for.
+    let named = |session: &Session| -> Vec<String> {
+        let device = session.project().device(device).unwrap();
+        trill_core::DeviceFiles::files(&trill_dsp::SampleFiles, device).into_iter().map(|(_, path)| path).collect()
+    };
+    assert_eq!(named(&a), [instrument.to_string_lossy()], "its maker has it where it is");
+    let at_ben = named(&b);
+    assert!(at_ben.len() == 1 && at_ben[0].contains("at Ben's") && at_ben[0].contains("of devices"), "{at_ben:?}");
+    assert!(b.problems().iter().any(|problem| matches!(problem, Problem::Sample { .. })), "{:?}", b.problems());
+    assert!(b.files_arriving().is_empty() && b.files_unsaid().is_empty(), "{:?}", b.files_arriving());
+    // Nothing of it is read to be said or handed out, by either.
+    assert!(a.files_here().is_empty() && b.files_here().is_empty());
+    assert!(
+        !format!("{:?} {}", b.problems(), b.project().to_json()).contains("Ada's instruments"),
+        "and nothing names her folder"
+    );
+}
+
+#[test]
 fn what_a_sampler_plays_is_said_without_its_place_and_has_a_place_made_here_at_the_other_side() {
     // (Sessions whose sample players can read files.)
     let reading = || {

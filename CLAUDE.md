@@ -230,7 +230,8 @@ on the samples.
   a sample player with a place made here): its bringer's program is still reading it, has not got it, holds it
   or does not read it as audio. It is theirs to put right, so it is among what arrives and never among what
   this machine is missing: shown as waiting for whoever brought it (`Waiting::ToBeSaid`), and nothing is looked
-  for on this disk. What a song would hand over is shown before it is shared (`Runtime::files_to_go`), counted
+  for on this disk. (Only of what travels: what a sampled instrument names stays with its maker, nobody ever
+  says it, and at the others it is a file that is not there, said as that.) What a song would hand over is shown before it is shared (`Runtime::files_to_go`), counted
   by the reading that hands it out (only audio), with what the song names that is none listed as what stays:
   a song file may name anything, and its user is to see what it named. What arrived comes beside the song at a
   save, with the recordings (`session/beside.rs`, `from others`). Hold all of it with strangers who have the

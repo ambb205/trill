@@ -599,10 +599,15 @@ impl Session {
                     // A file of which the song says what it is arrives.
                     // One that nobody said anything of was given a place
                     // made here, in the same folder: it is with its maker
-                    // until it is said.
-                    let named = self.project.device(*device).ok().map(named_by).unwrap_or_default();
-                    let awaited = named.iter().any(|(named, path)| named == slot && within(path));
-                    awaited.then(|| FilePlace::Sample { device: *device, slot: slot.clone() })
+                    // until it is said. Only of a device whose files
+                    // travel: what a sampled instrument names stays where
+                    // it is, and is a file that is not here, said as that.
+                    let held = self.project.device(*device).ok();
+                    let said = held.is_some_and(|device| device.files.contains_key(slot));
+                    let travels = held.is_some_and(|device| SAMPLE_PLAYERS.contains(&device.uri.as_str()));
+                    let named = held.map(named_by).unwrap_or_default();
+                    let here = named.iter().any(|(named, path)| named == slot && within(path));
+                    ((said || travels) && here).then(|| FilePlace::Sample { device: *device, slot: slot.clone() })
                 }
                 _ => None,
             };
@@ -633,9 +638,13 @@ impl Session {
             // and is given one when the song says what its file is.
             FilePlace::Clip(_) => file.path.is_empty(),
             // A slot of a device that came so was given a place made here.
+            // (Of a device whose files travel: nobody will ever say what
+            // a sampled instrument names, which stays with its maker.)
             FilePlace::Sample { device, slot } => {
-                let said = self.project.device(*device).is_ok_and(|device| device.files.contains_key(slot));
-                !said && lies_in(Path::new(&file.path), &folder.join(OF_DEVICES))
+                let held = self.project.device(*device).ok();
+                let said = held.is_some_and(|device| device.files.contains_key(slot));
+                let travels = held.is_some_and(|device| SAMPLE_PLAYERS.contains(&device.uri.as_str()));
+                travels && !said && lies_in(Path::new(&file.path), &folder.join(OF_DEVICES))
             }
             FilePlace::Rendition(_) => false,
         }
