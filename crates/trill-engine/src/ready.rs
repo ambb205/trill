@@ -353,13 +353,29 @@ impl Vitals {
     }
 }
 
-/// [`Vitals::now`] as macOS says them: memory in use is what is resident,
-/// memory asked for the footprint (what the program wrote to, in memory or
-/// compressed); reads are the blocks read from a disk; handles are files
-/// and threads.
+/// [`Vitals::now`] as macOS says them: memory in use is what the program's
+/// allocations hold now, by the allocator's count; memory asked for is the
+/// footprint (what the program wrote to, in memory or compressed); reads are
+/// the blocks read from a disk; handles are files and threads.
+///
+/// In use is not what is resident, as on Windows: the allocator keeps what
+/// was freed and hands it out again, and memory the program grows into that
+/// way is resident and counted already. A sampler that loads in a program
+/// that let go of a song before shows only in what is allocated.
 #[cfg(target_os = "macos")]
 fn macos_vitals() -> Option<Vitals> {
     use std::mem::{size_of, zeroed};
+    /// What the allocator says of all its zones.
+    #[repr(C)]
+    struct MallocStatistics {
+        blocks_in_use: u32,
+        size_in_use: usize,
+        max_size_in_use: usize,
+        size_allocated: usize,
+    }
+    unsafe extern "C" {
+        fn malloc_zone_statistics(zone: *mut std::ffi::c_void, statistics: *mut MallocStatistics);
+    }
     // SAFETY: getpid cannot fail; each structure is one of numbers, for
     // which nothing is a fine start, filled in by the call it is the
     // structure of, for this process or the calling thread.
@@ -396,8 +412,12 @@ fn macos_vitals() -> Option<Vitals> {
         // Asked for no room, it says how much the list of files would take.
         let listed = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0).max(0) as usize;
         let files = (listed / size_of::<libc::proc_fdinfo>()) as u32;
+        let mut allocated =
+            MallocStatistics { blocks_in_use: 0, size_in_use: 0, max_size_in_use: 0, size_allocated: 0 };
+        // No zone: all of them, added up.
+        malloc_zone_statistics(std::ptr::null_mut(), &mut allocated);
         Some(Vitals {
-            in_use: usage.ri_resident_size,
+            in_use: allocated.size_in_use as u64,
             asked: usage.ri_phys_footprint,
             read: usage.ri_diskio_bytesread,
             reads: times.ru_inblock.max(0) as u64,
